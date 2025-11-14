@@ -151,11 +151,9 @@ class Transformer:
     '''
 
     def __call__(self, *args, **kwargs):
-        from seamless.workflow.core.direct.run import (
-            run_transformation_dict,
-            # fingertip,
-        )
         from .pretransformation import direct_transformer_to_pretransformation
+        from .run import run_transformation_dict_in_process
+        from .transformation_utils import tf_get_buffer
 
         """
         from seamless.workflow.core.direct.module import get_module_definition
@@ -225,11 +223,18 @@ class Transformer:
 
             try:
                 pre_transformation.prepare_transformation()
-                result_checksum = run_transformation_dict(
+
+                ### increfed, tf_checksum = register_transformation_dict(pre_transformation.pretransformation_dict,)
+                tf_buffer = tf_get_buffer(pre_transformation.pretransformation_dict)
+                tf_checksum = tf_buffer.get_checksum()
+                ### tf_dunder = extract_dunder(pre_transformation.pretransformation_dict)
+                tf_dunder = {}  # TODO
+
+                result_checksum = run_transformation_dict_in_process(
                     pre_transformation.pretransformation_dict,
-                    fingertip=False,
+                    tf_checksum=tf_checksum,
+                    tf_dunder=tf_dunder,
                     scratch=self.scratch,
-                    in_process=self._in_process,
                 )
             finally:
                 pre_transformation.release()

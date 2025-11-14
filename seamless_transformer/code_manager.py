@@ -166,6 +166,12 @@ class CodeManager:
             checksum.decref()
             self._semantic_active.remove(key)
 
+    def get_syntactic_checksums(self, semantic_checksum) -> list[Checksum]:
+        """Return syntactic checksums mapped to a semantic checksum."""
+        checksum = _coerce_checksum(semantic_checksum)
+        syn_hex_values = self._semantic_to_syntactic.get(checksum.hex(), set())
+        return [Checksum(hex_value) for hex_value in syn_hex_values]
+
 
 _CODE_MANAGER: CodeManager | None = None
 

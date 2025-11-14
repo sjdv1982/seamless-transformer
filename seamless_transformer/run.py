@@ -3,8 +3,7 @@
 from typing import Any, Dict, List, Tuple
 
 from seamless import Buffer, Checksum
-from seamless.checksum.cached_compile import exec_code
-
+from .cached_compile import exec_code
 from .injector import transformer_injector as injector
 from .transformation_namespace import build_transformation_namespace_sync
 from .transformer import transformer
@@ -35,6 +34,11 @@ def run_transformation_dict_in_process(
     from seamless.checksum.database_client import database
     /STUB
     """
+
+    cached_result = _transformation_cache.get(tf_checksum)
+    if cached_result is not None:
+        cached_result.tempref()
+        return cached_result
 
     # result_checksum = database.get_transformation_result(tf_checksum)
     # result_checksum = Checksum(result_checksum)
@@ -124,12 +128,13 @@ def run_transformation_dict_in_process(
     #     buffer_cache.cache_buffer(result_checksum, result_buffer)
     #     buffer_remote.write_buffer(result_checksum, result_buffer)
 
+    _transformation_cache[tf_checksum] = result_checksum
     return result_checksum
 
 
-def get_transformation_inputs_output(transformation: Dict[str, Any]) -> Tuple[
-    List[str], str, str, Any, Any
-]:
+def get_transformation_inputs_output(
+    transformation: Dict[str, Any],
+) -> Tuple[List[str], str, str, Any, Any]:
     """Return sorted inputs and output descriptors from a transformation dict."""
 
     inputs: List[str] = []
@@ -163,5 +168,7 @@ def get_transformation_inputs_output(transformation: Dict[str, Any]) -> Tuple[
 
     return inputs, outputname, output_celltype, output_subcelltype, output_hash_pattern
 
+
+_transformation_cache: dict[Checksum, Checksum] = {}
 
 __all__ = ["run_transformation_dict_in_process", "get_transformation_inputs_output"]

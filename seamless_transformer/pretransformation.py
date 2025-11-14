@@ -32,6 +32,7 @@ class PreTransformation:
         self._code_manager = code_manager or get_code_manager()
         self._prepared = False
         self._code_refs: list[tuple[Checksum, Checksum]] = []
+        self._value_refs: list[Checksum] = []
 
     @property
     def pretransformation_dict(self) -> Dict[str, Any]:
@@ -66,12 +67,14 @@ class PreTransformation:
 
     def release(self) -> None:
         """Release code-manager references."""
-        if not self._code_refs:
-            return
         for semantic_checksum, syntactic_checksum in self._code_refs:
             self._code_manager.decref_syntactic(syntactic_checksum)
             self._code_manager.decref_semantic(semantic_checksum)
         self._code_refs.clear()
+
+        for checksum in self._value_refs:
+            checksum.decref()
+        self._value_refs.clear()
 
     def __del__(self):
         try:
@@ -98,19 +101,23 @@ class PreTransformation:
         self._pretransformation_dict["__code_checksum__"] = syntactic_checksum.hex()
         return semantic_checksum
 
-    @staticmethod
-    def _to_checksum(value, celltype: str) -> Checksum | None:
+    def _to_checksum(self, value, celltype: str) -> Checksum | None:
         if value is None:
             return None
         if isinstance(value, Checksum):
-            return value
-        if isinstance(value, str) and len(value) == 64:
-            return Checksum(value)
-        if isinstance(value, Buffer):
+            checksum = value
+        elif isinstance(value, str) and len(value) == 64:
+            checksum = Checksum(value)
+        elif isinstance(value, Buffer):
             buffer = value
+            checksum = buffer.get_checksum()
         else:
             buffer = Buffer(value, celltype or "mixed")
-        return buffer.get_checksum()
+            checksum = buffer.get_checksum()
+
+        checksum.incref()
+        self._value_refs.append(checksum)
+        return checksum
 
 
 def direct_transformer_to_pretransformation(
