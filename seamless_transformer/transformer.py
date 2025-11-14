@@ -153,10 +153,9 @@ class Transformer:
     def __call__(self, *args, **kwargs):
         from seamless.workflow.core.direct.run import (
             run_transformation_dict,
-            direct_transformer_to_transformation_dict,
-            prepare_transformation_dict,
             # fingertip,
         )
+        from .pretransformation import direct_transformer_to_pretransformation
 
         """
         from seamless.workflow.core.direct.module import get_module_definition
@@ -201,14 +200,16 @@ class Transformer:
         /STUB
         """
 
-        transformation_dict = direct_transformer_to_transformation_dict(
+        pre_transformation = direct_transformer_to_pretransformation(
             self._codebuf, meta, self._celltypes, modules, arguments, env
         )
         if self._return_transformation:
             """
             STUB
             tf = transformation_from_dict(
-                transformation_dict, result_celltype, upstream_dependencies=deps
+                pre_transformation.pretransformation_dict,
+                result_celltype,
+                upstream_dependencies=deps,
             )
             tf.scratch = self.scratch
             return tf
@@ -222,13 +223,16 @@ class Transformer:
                     msg = "Dependency '{}' has an exception: {}"
                     raise RuntimeError(msg.format(depname, dep.exception))
 
-            prepare_transformation_dict(transformation_dict)
-            result_checksum = run_transformation_dict(
-                transformation_dict,
-                fingertip=False,
-                scratch=self.scratch,
-                in_process=self._in_process,
-            )
+            try:
+                pre_transformation.prepare_transformation()
+                result_checksum = run_transformation_dict(
+                    pre_transformation.pretransformation_dict,
+                    fingertip=False,
+                    scratch=self.scratch,
+                    in_process=self._in_process,
+                )
+            finally:
+                pre_transformation.release()
             result_checksum = Checksum(result_checksum)
             if not result_checksum:
                 raise RuntimeError("Result is empty")
