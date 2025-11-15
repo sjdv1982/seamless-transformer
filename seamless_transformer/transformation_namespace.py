@@ -7,6 +7,7 @@ from typing import Any, Dict, Tuple
 from seamless import CacheMissError, Checksum
 
 from .code_manager import get_code_manager
+from .transformation_utils import unpack_deep_structure, is_deep_celltype
 
 
 def build_transformation_namespace_sync(
@@ -19,12 +20,7 @@ def build_transformation_namespace_sync(
     code = None
     deep_structures_to_unpack: Dict[str, Tuple[Any, str]] = {}
     namespace["PINS"] = {}
-    output_hash_pattern = (
-        transformation["__output__"][3]
-        if len(transformation["__output__"]) == 4
-        else None
-    )
-    namespace["OUTPUTPIN"] = transformation["__output__"][1], output_hash_pattern
+    namespace["OUTPUTPIN"] = transformation["__output__"][1], None
     modules_to_build: Dict[str, Any] = {}
     as_ = transformation.get("__as__", {})
     namespace["FILESYSTEM"] = {}
@@ -62,12 +58,12 @@ def build_transformation_namespace_sync(
             continue
 
         target_celltype = celltype or "mixed"
-        if celltype in ("deepcell", "deepfolder"):
-            deep_value = buffer.get_value("plain")
+        if is_deep_celltype(celltype):
+            deep_structure = buffer.get_value("plain")
+            value = unpack_deep_structure(deep_structure, celltype)
             pinname_as = as_.get(pinname, pinname)
-            deep_structures_to_unpack[pinname_as] = (deep_value, celltype)
-            namespace["PINS"][pinname_as] = deep_value
-            namespace[pinname_as] = deep_value
+            namespace["PINS"][pinname_as] = value
+            namespace[pinname_as] = value
             continue
 
         value = buffer.get_value(target_celltype)

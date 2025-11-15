@@ -7,6 +7,9 @@ from copy import deepcopy
 from functools import partial, update_wrapper
 import inspect
 from seamless import Checksum, Buffer, CacheMissError
+from .pretransformation import direct_transformer_to_pretransformation
+from .run import run_transformation_dict
+from .transformation_utils import unpack_deep_structure, is_deep_celltype, tf_get_buffer
 
 """
 from seamless.util.is_forked import is_forked
@@ -151,9 +154,6 @@ class Transformer:
     '''
 
     def __call__(self, *args, **kwargs):
-        from .pretransformation import direct_transformer_to_pretransformation
-        from .run import run_transformation_dict_in_process
-        from .transformation_utils import tf_get_buffer
 
         """
         from seamless.workflow.core.direct.module import get_module_definition
@@ -230,11 +230,12 @@ class Transformer:
                 ### tf_dunder = extract_dunder(pre_transformation.pretransformation_dict)
                 tf_dunder = {}  # TODO
 
-                result_checksum = run_transformation_dict_in_process(
+                result_checksum = run_transformation_dict(
                     pre_transformation.pretransformation_dict,
                     tf_checksum=tf_checksum,
                     tf_dunder=tf_dunder,
                     scratch=self.scratch,
+                    in_process=self._in_process,
                 )
             finally:
                 pre_transformation.release()
@@ -242,9 +243,13 @@ class Transformer:
             if not result_checksum:
                 raise RuntimeError("Result is empty")
             buf = result_checksum.resolve()
-            if result_celltype in ("deepcell", "folder"):
-                result_celltype = "plain"
-            return buf.get_value(result_celltype)
+            target_celltype = result_celltype
+            if result_celltype == "folder":
+                target_celltype = "plain"
+            value = buf.get_value(target_celltype)
+            if is_deep_celltype(result_celltype):
+                value = unpack_deep_structure(value, result_celltype)
+            return value
 
     @property
     def meta(self):
