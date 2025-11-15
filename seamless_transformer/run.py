@@ -15,7 +15,7 @@ def run_transformation_dict_in_process(
     """Execute a transformation dict in-process.
 
     Ported from seamless.workflow.core.direct.run.run_transformation_dict_in_process.
-    Many responsibilities (metadata, semantic cache building, module compilation)
+    Many responsibilities (metadata, module compilation)
     are still pending and therefore commented out for now.
     """
 
@@ -61,15 +61,10 @@ def run_transformation_dict_in_process(
     if env_checksum0 is not None:
         raise NotImplementedError("Environments are not supported yet")
 
-    # semantic_cache = transformation_cache.build_semantic_cache(transformation)
-    semantic_cache = None
-
     inputs, output_name, output_celltype, output_subcelltype, output_hash_pattern = (
         get_transformation_inputs_output(transformation)
     )
-    tf_namespace = build_transformation_namespace_sync(
-        transformation, semantic_cache, "transformer-in-process"
-    )
+    tf_namespace = build_transformation_namespace_sync(transformation)
     code, namespace, modules_to_build, deep_structures_to_unpack = tf_namespace
 
     if deep_structures_to_unpack:

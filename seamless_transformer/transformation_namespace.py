@@ -10,7 +10,7 @@ from .code_manager import get_code_manager
 
 
 def build_transformation_namespace_sync(
-    transformation: Dict[str, Any], semantic_cache, codename: str
+    transformation: Dict[str, Any],
 ) -> Tuple[Any, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     namespace = {
         "__name__": "transformer",
