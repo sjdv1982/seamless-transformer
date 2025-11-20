@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Tuple
 
 import asyncio
 import multiprocessing
+import warnings
 
 from seamless import Buffer, Checksum
 from .cached_compile import exec_code
@@ -17,6 +18,7 @@ from .transformation_utils import (
 )
 
 PACK_DEEP_RESULTS = False
+_BUFFER_WRITER_HOOK_ACTIVE = False
 
 
 def run_transformation_dict_in_process(
@@ -93,7 +95,7 @@ def run_transformation_dict_in_process(
     """
     assert code is not None
 
-    from .transformer import transformer
+    from . import transformer
 
     namespace["transformer"] = transformer
     namespace.pop(output_name, None)
@@ -211,48 +213,59 @@ async def run_transformation_dict_forked(
         if multiprocessing.get_start_method(allow_none=True) is None:
             multiprocessing.set_start_method("fork")
         queue: multiprocessing.Queue = multiprocessing.JoinableQueue()
-        proc = multiprocessing.Process(
-            target=run_forked,
-            args=(
-                "transformer-forked",
-                code,
-                False,
-                injector,
-                {},
-                "transformer-forked",
-                namespace,
-                {},  # deep structures already unpacked
-                inputs,
-                output_name,
-                output_celltype,
-                scratch,
-                queue,
-            ),
-            kwargs={"tf_checksum": tf_checksum},
-            daemon=False,
-        )
-        proc.start()
         result_value = None
         result_checksum = None
-        try:
-            while True:
-                status, msg = queue.get()
-                queue.task_done()
-                if isinstance(status, tuple) and status[1] == "checksum":
-                    if status[0] == 0:
-                        result_checksum = Checksum(msg)
+        with warnings.catch_warnings():
+            if _BUFFER_WRITER_HOOK_ACTIVE:
+                warnings.filterwarnings(
+                    "ignore",
+                    message=(
+                        "This process .* is multi-threaded, use of fork\\(\\) may "
+                        "lead to deadlocks in the child\\."
+                    ),
+                    category=DeprecationWarning,
+                    module=r"multiprocessing",
+                )
+            proc = multiprocessing.Process(
+                target=run_forked,
+                args=(
+                    "transformer-forked",
+                    code,
+                    False,
+                    injector,
+                    {},
+                    "transformer-forked",
+                    namespace,
+                    {},  # deep structures already unpacked
+                    inputs,
+                    output_name,
+                    output_celltype,
+                    scratch,
+                    queue,
+                ),
+                kwargs={"tf_checksum": tf_checksum},
+                daemon=False,
+            )
+            proc.start()
+            try:
+                while True:
+                    status, msg = queue.get()
+                    queue.task_done()
+                    if isinstance(status, tuple) and status[1] == "checksum":
+                        if status[0] == 0:
+                            result_checksum = Checksum(msg)
+                            break
+                        continue
+                    if status == 0:
+                        result_value = msg
                         break
-                    continue
-                if status == 0:
-                    result_value = msg
-                    break
-                if status == 1:
-                    raise RuntimeError(msg)
-                if status in (2, 3, 4, 5, 6, 7, 8):
-                    continue
-            queue.join()
-        finally:
-            proc.join()
+                    if status == 1:
+                        raise RuntimeError(msg)
+                    if status in (2, 3, 4, 5, 6, 7, 8):
+                        continue
+                queue.join()
+            finally:
+                proc.join()
         if proc.exitcode and proc.exitcode != 0 and result_checksum is None:
             raise RuntimeError(f"Forked transformer exited with code {proc.exitcode}")
 
@@ -332,3 +345,8 @@ __all__ = [
     "run_transformation_dict_forked_sync",
     "run_transformation_dict",
 ]
+
+
+def mark_buffer_writer_hook_installed() -> None:
+    global _BUFFER_WRITER_HOOK_ACTIVE
+    _BUFFER_WRITER_HOOK_ACTIVE = True

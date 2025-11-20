@@ -1,1 +1,1 @@
-from .transformer import transformer
+from .transformer_class import transformer
