@@ -8,7 +8,7 @@ from functools import partial, update_wrapper
 import inspect
 from seamless import Checksum, Buffer, CacheMissError
 from .pretransformation import direct_transformer_to_pretransformation
-from .run import run_transformation_dict
+from .transformation_cache import run_sync
 from .transformation_utils import unpack_deep_structure, is_deep_celltype, tf_get_buffer
 
 """
@@ -230,7 +230,7 @@ class Transformer:
                 ### tf_dunder = extract_dunder(pre_transformation.pretransformation_dict)
                 tf_dunder = {}  # TODO
 
-                result_checksum = run_transformation_dict(
+                result_checksum = run_sync(
                     pre_transformation.pretransformation_dict,
                     tf_checksum=tf_checksum,
                     tf_dunder=tf_dunder,

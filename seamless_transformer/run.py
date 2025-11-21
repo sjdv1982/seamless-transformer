@@ -1,8 +1,6 @@
 """Execution helpers for direct transformers."""
 
 from typing import Any, Dict, List, Tuple
-
-import asyncio
 import multiprocessing
 import warnings
 
@@ -46,11 +44,6 @@ def run_transformation_dict_in_process(
     from seamless.checksum.database_client import database
     /STUB
     """
-
-    cached_result = _transformation_cache.get(tf_checksum)
-    if cached_result is not None:
-        cached_result.tempref()
-        return cached_result
 
     # result_checksum = database.get_transformation_result(tf_checksum)
     # result_checksum = Checksum(result_checksum)
@@ -126,9 +119,9 @@ def run_transformation_dict_in_process(
 
     result_buffer = Buffer(result, output_celltype)
     result_checksum = result_buffer.get_checksum()
-
     if not scratch:
-        result_checksum.tempref()
+        # Keep the result buffer around so resolve() can find it.
+        result_buffer.tempref()
 
     # database.set_transformation_result(tf_checksum, result_checksum)
     # if not scratch:
@@ -138,7 +131,6 @@ def run_transformation_dict_in_process(
     #     buffer_cache.cache_buffer(result_checksum, result_buffer)
     #     buffer_remote.write_buffer(result_checksum, result_buffer)
 
-    _transformation_cache[tf_checksum] = result_checksum
     return result_checksum
 
 
@@ -189,11 +181,6 @@ async def run_transformation_dict_forked(
     transformation = dict(transformation_dict)
     if tf_dunder:
         transformation.update(tf_dunder)
-
-    cached_result = _transformation_cache.get(tf_checksum)
-    if cached_result is not None:
-        cached_result.tempref()
-        return cached_result
 
     if transformation.get("__language__") == "bash":
         raise NotImplementedError("Bash transformers are not supported yet")
@@ -281,69 +268,19 @@ async def run_transformation_dict_forked(
                 packed_result = pack_deep_structure(result_value, output_celltype)
             buf = Buffer(packed_result, output_celltype)
             result_checksum = buf.get_checksum()
-        if not scratch:
+            if not scratch:
+                buf.tempref()
+        elif not scratch:
+            # We may only have the checksum; keep it warm if possible.
             result_checksum.tempref()
-        _transformation_cache[tf_checksum] = result_checksum
         return result_checksum
 
     return _run()
-
-
-def run_transformation_dict_forked_sync(
-    transformation_dict: Dict[str, Any], tf_checksum, tf_dunder, scratch: bool
-) -> Checksum:
-    """Synchronous wrapper for the forked executor."""
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(
-            run_transformation_dict_forked(
-                transformation_dict, tf_checksum, tf_dunder, scratch
-            ),
-            loop,
-        )
-        return future.result()
-    new_loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(new_loop)
-        return new_loop.run_until_complete(
-            run_transformation_dict_forked(
-                transformation_dict, tf_checksum, tf_dunder, scratch
-            )
-        )
-    finally:
-        asyncio.set_event_loop(None)
-        new_loop.close()
-
-
-def run_transformation_dict(
-    transformation_dict: Dict[str, Any],
-    tf_checksum,
-    tf_dunder,
-    scratch: bool,
-    *,
-    in_process: bool,
-) -> Checksum:
-    if in_process:
-        return run_transformation_dict_in_process(
-            transformation_dict, tf_checksum, tf_dunder, scratch
-        )
-    return run_transformation_dict_forked_sync(
-        transformation_dict, tf_checksum, tf_dunder, scratch
-    )
-
-
-_transformation_cache: dict[Checksum, Checksum] = {}
 
 __all__ = [
     "run_transformation_dict_in_process",
     "get_transformation_inputs_output",
     "run_transformation_dict_forked",
-    "run_transformation_dict_forked_sync",
-    "run_transformation_dict",
 ]
 
 
