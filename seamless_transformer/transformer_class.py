@@ -154,7 +154,6 @@ class Transformer:
     '''
 
     def __call__(self, *args, **kwargs):
-
         """
         from seamless.workflow.core.direct.module import get_module_definition
         """
@@ -236,6 +235,7 @@ class Transformer:
                     tf_dunder=tf_dunder,
                     scratch=self.scratch,
                     in_process=self._in_process,
+                    require_fingertip=True,
                 )
             finally:
                 pre_transformation.release()
