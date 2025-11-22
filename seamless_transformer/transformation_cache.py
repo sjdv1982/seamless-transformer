@@ -13,6 +13,11 @@ try:
 except ImportError:
     database_remote = None
 
+try:
+    from seamless_remote.client import close_all_clients as _close_all_clients
+except ImportError:  # pragma: no cover - optional dependency
+    _close_all_clients = None
+
 # In-process cache of transformation results
 _transformation_cache: dict[Checksum, Checksum] = {}
 
@@ -124,7 +129,18 @@ def run_sync(
             )
         )
     finally:
+        # Close any aiohttp sessions bound to this temporary loop to avoid
+        # unclosed-connector warnings on shutdown.
+        if _close_all_clients is not None:
+            try:
+                _close_all_clients()
+            except Exception:
+                pass
         asyncio.set_event_loop(None)
+        try:
+            new_loop.run_until_complete(new_loop.shutdown_asyncgens())
+        except Exception:
+            pass
         new_loop.close()
 
 

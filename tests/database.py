@@ -5,10 +5,6 @@ from seamless_transformer import transformer
 import seamless.config
 
 seamless.config.init()
-b = Buffer(b"testbuffer")
-
-### b.incref()  # launch hashserver in background
-asyncio.run(b.write())  # wait for hashserver
 
 
 @transformer
