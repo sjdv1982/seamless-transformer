@@ -11,18 +11,6 @@ from .pretransformation import direct_transformer_to_pretransformation
 from .transformation_cache import run_sync
 from .transformation_utils import unpack_deep_structure, is_deep_celltype, tf_get_buffer
 
-"""
-from seamless.util.is_forked import is_forked
-from seamless.checksum.database_client import database
-from seamless.checksum.buffer_remote import has_readwrite_servers
-from seamless.checksum.get_buffer import get_buffer
-from seamless.checksum.deserialize import deserialize_sync
-
-from .Transformation import Transformation, transformation_from_dict
-from ..Environment import Environment
-"""
-
-
 def transformer(
     func=None,
     *,
@@ -30,7 +18,6 @@ def transformer(
     direct_print=None,
     local=None,
     return_transformation=False,
-    in_process=False,
 ):
     """Wraps a function in a direct transformer
     Direct transformers can be called as normal functions, but
@@ -43,7 +30,6 @@ def transformer(
             direct_print=direct_print,
             local=local,
             return_transformation=return_transformation,
-            in_process=in_process,
         )
     result = Transformer(
         func,
@@ -51,7 +37,6 @@ def transformer(
         direct_print=direct_print,
         local=local,
         return_transformation=return_transformation,
-        in_process=in_process,
     )
     update_wrapper(result, func)
     return result
@@ -64,7 +49,7 @@ class Transformer:
     into a Seamless transformation. Doing so imports seamless.workflow."""
 
     def __init__(
-        self, func, *, scratch, direct_print, local, return_transformation, in_process
+        self, func, *, scratch, direct_print, local, return_transformation
     ):
         """Transformer.
         Transformers can be called as normal functions, but
@@ -91,8 +76,6 @@ class Transformer:
         - scratch  ...
 
         - direct_print ...
-
-        - in_process ...
 
         Attributes:
 
@@ -127,8 +110,6 @@ class Transformer:
         self._environment = Environment(self)
         self._environment_state = None
         """
-        self._in_process = in_process
-
         self._meta = {"transformer_path": ["tf", "tf"], "local": local}
         self.scratch = scratch
         self.direct_print = direct_print
@@ -156,18 +137,6 @@ class Transformer:
     def __call__(self, *args, **kwargs):
         """
         from seamless.workflow.core.direct.module import get_module_definition
-        """
-
-        """
-        STUB
-        if is_forked():
-            assert not self._in_process
-            if not database.active or not has_readwrite_servers():
-                raise RuntimeError(
-                    # pylint: disable=line-too-long
-                    "Running @transformer inside a transformation requires Seamless database and buffer servers"
-                )
-        /STUB
         """
 
         arguments = self._signature.bind(*args, **kwargs).arguments
@@ -234,7 +203,6 @@ class Transformer:
                     tf_checksum=tf_checksum,
                     tf_dunder=tf_dunder,
                     scratch=self.scratch,
-                    in_process=self._in_process,
                     require_fingertip=True,
                 )
             finally:

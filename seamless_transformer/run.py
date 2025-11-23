@@ -1,14 +1,12 @@
 """Execution helpers for direct transformers."""
 
 from typing import Any, Dict, List, Tuple
-import multiprocessing
-import warnings
+import os
 
 from seamless import Buffer, Checksum
 from .cached_compile import exec_code
 from .injector import transformer_injector as injector
 from .transformation_namespace import build_transformation_namespace_sync
-from .execute_forked import run_forked
 from .transformation_utils import (
     unpack_deep_structure,
     is_deep_celltype,
@@ -16,7 +14,6 @@ from .transformation_utils import (
 )
 
 PACK_DEEP_RESULTS = False
-_BUFFER_WRITER_HOOK_ACTIVE = False
 
 
 def run_transformation_dict_in_process(
@@ -54,6 +51,12 @@ def run_transformation_dict_in_process(
     # execution_metadata = deepcopy(execution_metadata0)
     # if "Executor" not in execution_metadata:
     #     execution_metadata["Executor"] = "seamless-in-process"
+
+    if os.environ.get("SEAMLESS_DEBUG_FORK"):
+        print(
+            "[transformer-run] running transformation in-process",
+            flush=True,
+        )
 
     transformation: Dict[str, Any] = {}
     transformation.update(transformation_dict)
@@ -173,117 +176,7 @@ def get_transformation_inputs_output(
     return inputs, outputname, output_celltype, output_subcelltype
 
 
-async def run_transformation_dict_forked(
-    transformation_dict: Dict[str, Any], tf_checksum, tf_dunder, scratch: bool
-) -> Checksum:
-    """Execute a transformation dict in a forked subprocess."""
-
-    transformation = dict(transformation_dict)
-    if tf_dunder:
-        transformation.update(tf_dunder)
-
-    if transformation.get("__language__") == "bash":
-        raise NotImplementedError("Bash transformers are not supported yet")
-    if transformation.get("__env__") is not None:
-        raise NotImplementedError("Environments are not supported yet")
-
-    inputs, output_name, output_celltype, output_subcelltype = (
-        get_transformation_inputs_output(transformation)
-    )
-    tf_namespace = build_transformation_namespace_sync(transformation)
-    code, namespace, modules_to_build, _ = tf_namespace
-    if modules_to_build:
-        raise NotImplementedError("Module builds not yet supported")
-    assert code is not None
-
-    def _run() -> Checksum:
-        if multiprocessing.get_start_method(allow_none=True) is None:
-            multiprocessing.set_start_method("fork")
-        queue: multiprocessing.Queue = multiprocessing.JoinableQueue()
-        result_value = None
-        result_checksum = None
-        with warnings.catch_warnings():
-            if _BUFFER_WRITER_HOOK_ACTIVE:
-                warnings.filterwarnings(
-                    "ignore",
-                    message=(
-                        "This process .* is multi-threaded, use of fork\\(\\) may "
-                        "lead to deadlocks in the child\\."
-                    ),
-                    category=DeprecationWarning,
-                    module=r"multiprocessing",
-                )
-            proc = multiprocessing.Process(
-                target=run_forked,
-                args=(
-                    "transformer-forked",
-                    code,
-                    False,
-                    injector,
-                    {},
-                    "transformer-forked",
-                    namespace,
-                    {},  # deep structures already unpacked
-                    inputs,
-                    output_name,
-                    output_celltype,
-                    scratch,
-                    queue,
-                ),
-                kwargs={"tf_checksum": tf_checksum},
-                daemon=False,
-            )
-            proc.start()
-            try:
-                while True:
-                    status, msg = queue.get()
-                    queue.task_done()
-                    if isinstance(status, tuple) and status[1] == "checksum":
-                        if status[0] == 0:
-                            result_checksum = Checksum(msg)
-                            break
-                        continue
-                    if status == 0:
-                        result_value = msg
-                        break
-                    if status == 1:
-                        raise RuntimeError(msg)
-                    if status in (2, 3, 4, 5, 6, 7, 8):
-                        continue
-                queue.join()
-            finally:
-                proc.join()
-        if proc.exitcode and proc.exitcode != 0 and result_checksum is None:
-            raise RuntimeError(f"Forked transformer exited with code {proc.exitcode}")
-
-        if result_checksum is None:
-            if result_value is None:
-                raise RuntimeError("Forked transformation produced no result")
-            packed_result = result_value
-            if is_deep_celltype(output_celltype):
-                if not PACK_DEEP_RESULTS:
-                    raise NotImplementedError(
-                        "Packing deep transformation results is not supported yet"
-                    )
-                packed_result = pack_deep_structure(result_value, output_celltype)
-            buf = Buffer(packed_result, output_celltype)
-            result_checksum = buf.get_checksum()
-            if not scratch:
-                buf.tempref()
-        elif not scratch:
-            # We may only have the checksum; keep it warm if possible.
-            result_checksum.tempref()
-        return result_checksum
-
-    return _run()
-
 __all__ = [
     "run_transformation_dict_in_process",
     "get_transformation_inputs_output",
-    "run_transformation_dict_forked",
 ]
-
-
-def mark_buffer_writer_hook_installed() -> None:
-    global _BUFFER_WRITER_HOOK_ACTIVE
-    _BUFFER_WRITER_HOOK_ACTIVE = True
