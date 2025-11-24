@@ -8,17 +8,19 @@ from functools import partial, update_wrapper
 import inspect
 from seamless import Checksum, Buffer, CacheMissError
 from .pretransformation import direct_transformer_to_pretransformation
+from .transformation_class import transformation_from_pretransformation
 from .transformation_cache import run_sync
 from .transformation_utils import unpack_deep_structure, is_deep_celltype, tf_get_buffer
+
 
 def transformer(
     func=None,
     *,
-    scratch=None,
-    direct_print=None,
-    local=None,
+    scratch=False,
+    direct_print=False,
+    local=False,
     return_transformation=False,
-):
+) -> "Transformer":
     """Wraps a function in a direct transformer
     Direct transformers can be called as normal functions, but
     the source code of the function and the arguments are converted
@@ -48,9 +50,7 @@ class Transformer:
     the source code of the function and the arguments are converted
     into a Seamless transformation. Doing so imports seamless.workflow."""
 
-    def __init__(
-        self, func, *, scratch, direct_print, local, return_transformation
-    ):
+    def __init__(self, func, *, scratch, direct_print, local, return_transformation):
         """Transformer.
         Transformers can be called as normal functions, but
         the source code of the function and the arguments are converted
@@ -60,22 +60,22 @@ class Transformer:
 
         - local. If True, transformations are executed in the local
                     Seamless instance.
-                If False, they are delegated to the assistant, which must exist.
-                If None (default), the assistant tried first
-                and local execution is a fallback for if there is no assistant.
+                If False (default), they are executed remotely if possible.
 
         - return_transformation.
-                If False, calling the function executes it immediately,
+                If False (default), calling the function executes it immediately,
                     returning its value.
                 If True, it returns a Transformation object.
-                Imperative transformations can be queried for their .value
-                or .logs. Doing so forces their execution.
-                As of Seamless 0.12, forcing one transformation also forces
-                    all other transformations.
 
-        - scratch  ...
+        - scratch.
+                If True, only the checksum is preserved. This is for cases where
+                  the result is bulky, but can be recomputed easily
+                If False (default), the buffers are preserved, so that the value
+                  can be accessed if needed.
 
-        - direct_print ...
+
+        - direct_print: If True, it is attempted to print stdout and stderr
+                while the transformation runs.
 
         Attributes:
 
@@ -152,8 +152,8 @@ class Transformer:
         """
         env = None
 
+        result_celltype = self.celltypes["result"]
         meta = deepcopy(self._meta)
-        result_celltype = self._celltypes["result"]
         modules = {}
         """
         STUB
@@ -170,18 +170,12 @@ class Transformer:
             self._codebuf, meta, self._celltypes, modules, arguments, env
         )
         if self._return_transformation:
-            """
-            STUB
-            tf = transformation_from_dict(
-                pre_transformation.pretransformation_dict,
-                result_celltype,
+            return transformation_from_pretransformation(
+                pre_transformation,
                 upstream_dependencies=deps,
+                meta=meta,
+                scratch=self.scratch,
             )
-            tf.scratch = self.scratch
-            return tf
-            /STUB
-            """
-            raise NotImplementedError
         else:
             for depname, dep in deps.items():
                 dep.compute()
@@ -194,6 +188,7 @@ class Transformer:
 
                 ### increfed, tf_checksum = register_transformation_dict(pre_transformation.pretransformation_dict,)
                 tf_buffer = tf_get_buffer(pre_transformation.pretransformation_dict)
+                tf_buffer.tempref()
                 tf_checksum = tf_buffer.get_checksum()
                 ### tf_dunder = extract_dunder(pre_transformation.pretransformation_dict)
                 tf_dunder = {}  # TODO
@@ -211,6 +206,7 @@ class Transformer:
             if not result_checksum:
                 raise RuntimeError("Result is empty")
             buf = result_checksum.resolve()
+            assert isinstance(buf, Buffer)
             target_celltype = result_celltype
             if result_celltype == "folder":
                 target_celltype = "plain"
@@ -276,6 +272,29 @@ class Transformer:
     @return_transformation.setter
     def return_transformation(self, value: bool):
         self._return_transformation = value
+
+    def copy(
+        self,
+        scratch=None,
+        direct_print=None,
+        local=None,
+        return_transformation=False,
+    ):
+        """Make a copy of the Transformer.
+
+        If other parameters are provided, their attributes on the copy
+        are set to the provided value.
+        """
+        transformer = deepcopy(self)
+        if scratch is not None:
+            transformer.scratch = scratch
+        if direct_print is not None:
+            transformer.direct_print = direct_print
+        if local is not None:
+            transformer.local = local
+        if return_transformation is not None:
+            transformer.return_transformation = return_transformation
+        return transformer
 
 
 class CelltypesWrapper:

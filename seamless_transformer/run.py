@@ -17,13 +17,15 @@ PACK_DEEP_RESULTS = False
 
 
 def run_transformation_dict_in_process(
-    transformation_dict: Dict[str, Any], tf_checksum, tf_dunder, scratch: bool
+    transformation_dict: Dict[str, Any], tf_checksum: Checksum, tf_dunder, scratch: bool
 ) -> Checksum:
     """Execute a transformation dict in-process.
 
     Ported from seamless.workflow.core.direct.run.run_transformation_dict_in_process.
     Many responsibilities (metadata, module compilation)
     are still pending and therefore commented out for now.
+
+    tf_checksum is the checksum of the transformation dict
     """
 
     """
@@ -37,15 +39,8 @@ def run_transformation_dict_in_process(
         languages as default_languages,
     )
     from seamless.workflow.core.transformation import build_all_modules
-    from seamless.workflow.core.cache.transformation_cache import transformation_cache
-    from seamless.checksum.database_client import database
     /STUB
     """
-
-    # result_checksum = database.get_transformation_result(tf_checksum)
-    # result_checksum = Checksum(result_checksum)
-    # if result_checksum:
-    #     return result_checksum
 
     # get_global_info()
     # execution_metadata = deepcopy(execution_metadata0)

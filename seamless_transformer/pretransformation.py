@@ -65,6 +65,10 @@ class PreTransformation:
         self._prepared = True
         return self._pretransformation_dict
 
+    @property
+    def result_celltype(self) -> str:
+        return self._pretransformation_dict["__output__"][1]
+
     def release(self) -> None:
         """Release code-manager references."""
         for semantic_checksum, syntactic_checksum in self._code_refs:

@@ -5,7 +5,7 @@ from typing import Any, Dict
 import asyncio
 import os
 
-from seamless import CacheMissError, Checksum, get_is_child
+from seamless import CacheMissError, Checksum, is_worker
 
 from .run import run_transformation_dict_in_process
 
@@ -78,6 +78,7 @@ class TransformationCache:
                 if require_fingertip:
                     try:
                         _debug("waiting for fingertip resolution")
+                        # TODO: be more lazy and only evaluate the *potential* checksum resolution
                         await remote_result.resolution()
                     except CacheMissError:
                         _debug("fingertip resolution cache miss")
@@ -172,7 +173,7 @@ _transformation_cache_instance: TransformationCache | None = None
 
 
 def get_transformation_cache() -> TransformationCache:
-    if get_is_child():
+    if is_worker():
         raise RuntimeError(
             "Transformation cache is not available inside a child process"
         )

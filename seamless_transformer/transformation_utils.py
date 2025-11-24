@@ -55,10 +55,9 @@ def unpack_deep_structure(structure, celltype: str):
             return [_convert(v) for v in value]
         checksum = Checksum(value)
         buffer = checksum.resolve()
+        assert isinstance(buffer, Buffer)
         if celltype == "deepfolder":
-            content = buffer.content
-            if content is None:
-                content = buffer.get_value("plain")
+            pass
         else:
             content = buffer.get_value("mixed")
         return content
