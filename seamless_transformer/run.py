@@ -53,9 +53,11 @@ def run_transformation_dict_in_process(
             flush=True,
         )
 
+    extra_globals = {}
+    if isinstance(tf_dunder, dict):
+        extra_globals = tf_dunder.get("globals", {}) or {}
     transformation: Dict[str, Any] = {}
     transformation.update(transformation_dict)
-    transformation.update(tf_dunder)
 
     if transformation.get("__language__") == "bash":
         raise NotImplementedError("Bash transformers are not supported yet")
@@ -69,6 +71,9 @@ def run_transformation_dict_in_process(
     )
     tf_namespace = build_transformation_namespace_sync(transformation)
     code, namespace, modules_to_build, _ = tf_namespace
+
+    if extra_globals:
+        namespace.update(extra_globals)
 
     module_workspace = {}
     """

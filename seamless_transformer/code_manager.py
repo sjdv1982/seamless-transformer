@@ -34,6 +34,8 @@ class CodeManager:
         # bookkeeping of which checksums are currently incref'ed in the cache
         self._syntactic_active: set[str] = set()
         self._semantic_active: set[str] = set()
+        # keep semantic buffers alive so they remain resolvable across processes
+        self._semantic_buffers: Dict[str, Buffer] = {}
 
     # --- registration helpers -------------------------------------------------
     def track_code_buffer(self, code_buffer: Buffer) -> Tuple[Checksum, Checksum]:
@@ -59,7 +61,10 @@ class CodeManager:
         tree = ast.parse(code_text, filename="<transformer>")
         semantic_dump = ast_dump(tree)
         semantic_buffer = Buffer(semantic_dump, "text")
-        return semantic_buffer.get_checksum()
+        checksum = semantic_buffer.get_checksum()
+        # Keep the semantic buffer strongly referenced so child workers can download it.
+        self._semantic_buffers[checksum.hex()] = semantic_buffer
+        return checksum
 
     # --- reference counting ---------------------------------------------------
     def incref_semantic(self, checksum) -> None:
@@ -165,6 +170,7 @@ class CodeManager:
         elif total == 0 and active:
             checksum.decref()
             self._semantic_active.remove(key)
+            self._semantic_buffers.pop(key, None)
 
     def get_syntactic_checksums(self, semantic_checksum) -> list[Checksum]:
         """Return syntactic checksums mapped to a semantic checksum."""

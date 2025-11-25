@@ -4,6 +4,7 @@ import asyncio
 from seamless_transformer import transformer
 
 DELAY = 0.5
+N = 10
 
 
 def test_transformation_async():
@@ -15,13 +16,15 @@ def test_transformation_async():
         return 10 * a + 2 * b
 
     async def main():
-        tasks = [func(n, -1, DELAY).task() for n in range(4)]
+        tasks = [func(n, -1, DELAY).task() for n in range(N)]
         results = await asyncio.gather(*tasks)
         return results
 
     start = time.perf_counter()
     results = asyncio.run(main())
     duration1 = time.perf_counter() - start
+    print(f"Duration for {N} calls", duration1)
+    assert DELAY * N < duration1 < DELAY * N + 2
 
     for tasknr, result in enumerate(results):
         assert result == 10 * tasknr - 2

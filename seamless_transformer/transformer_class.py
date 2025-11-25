@@ -6,11 +6,13 @@ into a Seamless transformation."""
 from copy import deepcopy
 from functools import partial, update_wrapper
 import inspect
+import pickle
 from seamless import Checksum, Buffer, CacheMissError
 from .pretransformation import direct_transformer_to_pretransformation
 from .transformation_class import transformation_from_pretransformation
 from .transformation_cache import run_sync
 from .transformation_utils import unpack_deep_structure, is_deep_celltype, tf_get_buffer
+from . import worker
 
 
 def transformer(
@@ -169,6 +171,7 @@ class Transformer:
         pre_transformation = direct_transformer_to_pretransformation(
             self._codebuf, meta, self._celltypes, modules, arguments, env
         )
+        tf_dunder = {"globals": self._collect_execution_globals()}
         if self._return_transformation:
             return transformation_from_pretransformation(
                 pre_transformation,
@@ -190,9 +193,6 @@ class Transformer:
                 tf_buffer = tf_get_buffer(pre_transformation.pretransformation_dict)
                 tf_buffer.tempref()
                 tf_checksum = tf_buffer.get_checksum()
-                ### tf_dunder = extract_dunder(pre_transformation.pretransformation_dict)
-                tf_dunder = {}  # TODO
-
                 result_checksum = run_sync(
                     pre_transformation.pretransformation_dict,
                     tf_checksum=tf_checksum,
@@ -295,6 +295,37 @@ class Transformer:
         if return_transformation is not None:
             transformer.return_transformation = return_transformation
         return transformer
+
+    def _collect_execution_globals(self) -> dict[str, object]:
+        func = getattr(self, "__wrapped__", None)
+        if func is None or not hasattr(func, "__code__"):
+            return {}
+        names = set(func.__code__.co_freevars) | set(func.__code__.co_names)
+        closure_cells = dict(zip(func.__code__.co_freevars, func.__closure__ or []))
+        globals_map: dict[str, object] = {}
+        for name in names:
+            value = None
+            if name in closure_cells:
+                try:
+                    value = closure_cells[name].cell_contents
+                except ValueError:
+                    continue
+            elif name in func.__globals__:
+                value = func.__globals__[name]
+            if value is None:
+                continue
+            try:
+                pickle.dumps(value)
+                globals_map[name] = value
+                continue
+            except Exception:
+                pass
+            if isinstance(value, Transformer):
+                try:
+                    globals_map[name] = worker.register_transformer_proxy(value)
+                except Exception:
+                    pass
+        return globals_map
 
 
 class CelltypesWrapper:

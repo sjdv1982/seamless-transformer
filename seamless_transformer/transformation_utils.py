@@ -21,10 +21,15 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
             "__languages__",
             "__meta__",
             "__env__",
-            "__code_checksum__",
         ):
             continue
-        if key in ("__language__", "__output__", "__as__", "__format__"):
+        if key in (
+            "__language__",
+            "__output__",
+            "__as__",
+            "__format__",
+            "__code_checksum__",
+        ):
             result[key] = value
             continue
         if key.startswith("SPECIAL__"):

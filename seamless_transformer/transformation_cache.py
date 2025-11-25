@@ -8,6 +8,7 @@ import os
 from seamless import CacheMissError, Checksum, is_worker
 
 from .run import run_transformation_dict_in_process
+from . import worker
 
 try:
     from seamless.caching import buffer_writer as _buffer_writer
@@ -70,7 +71,7 @@ class TransformationCache:
                 cached_result.tempref()
             return cached_result
 
-        if database_remote is not None:
+        if database_remote is not None and not is_worker():
             _debug(f"query remote db for {tf_checksum.hex()}")
             remote_result = await database_remote.get_transformation_result(tf_checksum)
             _debug(f"remote db result {remote_result}")
@@ -89,13 +90,37 @@ class TransformationCache:
                         remote_result.tempref()
                     return remote_result
 
-        _debug("running transformation in-process")
-        result_checksum = run_transformation_dict_in_process(
-            transformation_dict, tf_checksum, tf_dunder, scratch
-        )
-        result_checksum = Checksum(result_checksum)
+        if worker.has_spawned and not is_worker():
+            _debug("dispatching transformation to worker pool")
+            result_checksum = await worker.dispatch_to_workers(
+                transformation_dict,
+                tf_checksum=tf_checksum,
+                tf_dunder=tf_dunder,
+                scratch=scratch,
+            )
+            if isinstance(result_checksum, str):
+                raise RuntimeError(result_checksum)
+            result_checksum = Checksum(result_checksum)
+        elif is_worker():
+            assert not worker.has_spawned
+            _debug("forwarding transformation request to parent")
+            result_checksum = await worker.forward_to_parent(
+                transformation_dict,
+                tf_checksum=tf_checksum,
+                tf_dunder=tf_dunder,
+                scratch=scratch,
+            )
+            if isinstance(result_checksum, str):
+                raise RuntimeError(result_checksum)
+            result_checksum = Checksum(result_checksum)
+        else:
+            _debug("running transformation in-process")
+            result_checksum = run_transformation_dict_in_process(
+                transformation_dict, tf_checksum, tf_dunder, scratch
+            )
+            result_checksum = Checksum(result_checksum)
 
-        if database_remote is not None:
+        if database_remote is not None and not is_worker():
             await database_remote.set_transformation_result(
                 tf_checksum, result_checksum
             )
@@ -173,10 +198,6 @@ _transformation_cache_instance: TransformationCache | None = None
 
 
 def get_transformation_cache() -> TransformationCache:
-    if is_worker():
-        raise RuntimeError(
-            "Transformation cache is not available inside a child process"
-        )
     global _transformation_cache_instance
     if _transformation_cache_instance is None:
         _transformation_cache_instance = TransformationCache()

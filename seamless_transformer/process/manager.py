@@ -14,7 +14,14 @@ from .channel import ChildChannel, Endpoint
 from .shared_memory import SharedMemoryRegistry
 from .utils import run_handler
 
-_CTX = mp.get_context("spawn")
+
+def _select_context() -> mp.context.BaseContext:
+    """Select the process start method (always spawn)."""
+
+    return mp.get_context("spawn")
+
+
+_CTX = _select_context()
 
 
 class ProcessError(RuntimeError):
@@ -169,6 +176,7 @@ class ProcessManager:
             target=_worker_bootstrap,
             args=(child_conn, initializer),
             name=handle.name,
+            daemon=True,
         )
         process.start()
         child_conn.close()
@@ -245,7 +253,9 @@ class ProcessManager:
             handle.endpoint = None
             handle.process = None
 
-    async def _handle_worker_ready(self, handle: ProcessHandle, payload: Any) -> Dict[str, Any]:
+    async def _handle_worker_ready(
+        self, handle: ProcessHandle, payload: Any
+    ) -> Dict[str, Any]:
         if handle.closing or self._closing:
             return {"status": "closing"}
         pid = payload.get("pid") if isinstance(payload, dict) else None
@@ -262,7 +272,9 @@ class ProcessManager:
             handle.health_task = self.loop.create_task(self._health_loop(handle))
         return {"status": "ok", "generation": handle.generation}
 
-    async def _handle_incref(self, handle: ProcessHandle, payload: Any) -> Dict[str, Any]:
+    async def _handle_incref(
+        self, handle: ProcessHandle, payload: Any
+    ) -> Dict[str, Any]:
         if handle.pid is None:
             raise ProcessError("Worker PID not available")
         key = payload["key"]
@@ -275,11 +287,15 @@ class ProcessManager:
         await self.memory_registry.decref(key, handle.pid)
 
 
-def _worker_bootstrap(conn: Connection, initializer: Optional[Callable[[ChildChannel], Any]]) -> None:
+def _worker_bootstrap(
+    conn: Connection, initializer: Optional[Callable[[ChildChannel], Any]]
+) -> None:
     asyncio.run(_child_main(conn, initializer))
 
 
-async def _child_main(conn: Connection, initializer: Optional[Callable[[ChildChannel], Any]]) -> None:
+async def _child_main(
+    conn: Connection, initializer: Optional[Callable[[ChildChannel], Any]]
+) -> None:
     loop = asyncio.get_event_loop()
     endpoint = Endpoint(conn, loop=loop, name=f"child[{os.getpid()}]")
     channel = ChildChannel(endpoint)

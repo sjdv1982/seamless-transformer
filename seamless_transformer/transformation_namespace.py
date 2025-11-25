@@ -25,6 +25,7 @@ def build_transformation_namespace_sync(
     as_ = transformation.get("__as__", {})
     namespace["FILESYSTEM"] = {}
     code_manager = get_code_manager()
+    fallback_syntactic = transformation.get("__code_checksum__")
 
     for pinname in sorted(transformation.keys()):
         if pinname in (
@@ -46,6 +47,8 @@ def build_transformation_namespace_sync(
         checksum = Checksum(checksum_value)
         if pinname == "code":
             syntactic_options = code_manager.get_syntactic_checksums(checksum)
+            if not syntactic_options and fallback_syntactic:
+                syntactic_options = [Checksum(fallback_syntactic)]
             checksum = syntactic_options[0] if syntactic_options else checksum
 
         buffer = checksum.resolve()
