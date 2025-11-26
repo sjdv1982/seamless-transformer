@@ -1,6 +1,7 @@
 from tqdm import tqdm
 from seamless_transformer import transformer
 
+import seamless
 import seamless.config
 
 seamless.config.init()
@@ -28,3 +29,4 @@ OFFSET = 3  # vary this to force cache misses
 for a in tqdm(list(range(10))):
     for b in range(10):
         func(a + 10000 + 10 * OFFSET, 42 + b)
+seamless.close()

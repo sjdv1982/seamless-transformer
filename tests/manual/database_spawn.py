@@ -11,7 +11,7 @@ DELAY = 0.5
 WORKERS = 8  # make this no bigger than #cores on your system
 N = 4
 
-OFFSET = 6  # vary this to force cache misses
+OFFSET = 1  # vary this to force cache misses
 
 
 @transformer
