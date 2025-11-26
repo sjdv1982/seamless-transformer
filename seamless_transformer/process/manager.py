@@ -236,7 +236,11 @@ class ProcessManager:
     async def _handle_worker_failure(self, handle: ProcessHandle, reason: str) -> None:
         if handle.restarting or handle.closing or self._closing:
             return
-        if self._closing:
+        if not handle.ready_event.is_set():
+            # Child never became ready; don't loop restarts.
+            handle.restart = False
+            handle.restarting = False
+            self._handles.pop(handle.name, None)
             return
         self._logger.warning("Restarting worker %s (%s)", handle.name, reason)
         handle.restarting = True

@@ -2,7 +2,7 @@ import time
 
 from seamless_transformer import transformer
 
-DELAY = 2.0
+DELAY = 1.0
 
 
 def test_transformation():
@@ -33,7 +33,7 @@ def test_transformation():
     print(second_duration)
 
     assert result1 == result2 == 54
-    assert first_duration >= 2
+    assert first_duration >= DELAY
     assert second_duration < 0.5
 
     start = time.perf_counter()

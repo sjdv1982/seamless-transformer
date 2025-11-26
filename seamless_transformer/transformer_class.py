@@ -7,12 +7,14 @@ from copy import deepcopy
 from functools import partial, update_wrapper
 import inspect
 import pickle
-from seamless import Checksum, Buffer, CacheMissError
+from seamless import Checksum, Buffer, CacheMissError, ensure_open
 from .pretransformation import direct_transformer_to_pretransformation
 from .transformation_class import transformation_from_pretransformation
 from .transformation_cache import run_sync
 from .transformation_utils import unpack_deep_structure, is_deep_celltype, tf_get_buffer
 from . import worker
+import multiprocessing as mp
+import sys
 
 
 def transformer(
@@ -141,6 +143,7 @@ class Transformer:
         from seamless.workflow.core.direct.module import get_module_definition
         """
 
+        ensure_open("transformer call")
         arguments = self._signature.bind(*args, **kwargs).arguments
         deps = {}
         """

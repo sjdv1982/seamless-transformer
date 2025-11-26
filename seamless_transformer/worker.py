@@ -15,6 +15,7 @@ import traceback
 import uuid
 import sys
 import logging
+import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.thread import _worker as _cf_worker
 import weakref
@@ -24,7 +25,7 @@ from typing import Any, Dict, Optional
 
 import seamless.caching.buffer_cache as _buffer_cache
 import seamless.buffer_class as _buffer_class
-from seamless import Buffer, CacheMissError, Checksum, set_is_worker
+from seamless import Buffer, CacheMissError, Checksum, set_is_worker, ensure_open
 from seamless.caching.buffer_cache import get_buffer_cache
 
 from .process import ChildChannel, ProcessManager, ConnectionClosed
@@ -571,7 +572,16 @@ class _WorkerManager:
 
 
 def spawn(num_workers: Optional[int] = None) -> _WorkerManager:
+    ensure_open("spawn workers")
     global has_spawned, _worker_manager
+    proc = mp.current_process()
+    if proc is not None and proc.name != "MainProcess":
+        # Child interpreter re-imported __main__: just no-op to avoid recursive spawns.
+        print(
+            "seamless_transformer.worker.spawn() called outside MainProcess; ignoring (guard with if __name__ == '__main__')",
+            file=sys.stderr,
+        )
+        return _worker_manager
     if has_spawned:
         raise RuntimeError("Workers have already been spawned")
     worker_count = num_workers or (os.cpu_count() or 1)
@@ -601,6 +611,7 @@ def _cleanup_workers() -> None:
 def shutdown_workers() -> None:
     """Explicitly shut down the worker pool and clear the spawn flag."""
 
+    ensure_open("shutdown workers")
     global has_spawned, _worker_manager
     if _worker_manager is None:
         return

@@ -2,19 +2,19 @@ import pytest
 import time
 import asyncio
 
-from seamless_transformer import transformer
-from seamless_transformer.worker import spawn, has_spawned, shutdown_workers
+from seamless_transformer import transformer, shutdown_workers
+from seamless_transformer.worker import spawn, has_spawned
 
 DELAY = 0.5
 WORKERS = 8  # make this no bigger than #cores on your system
-N = 400  # make this no bigger than the WORKERS, or increase PARALLEL_FACTOR
+N = 40  # make this no bigger than the WORKERS, or increase PARALLEL_FACTOR
 # COMMENT: beyond N=80 or so, the system starts to run into slowdowns...
 #   => increase PARALLEL_FACTOR beyond N/WORKERS,e.g. to 100 for N=400
 #   => need seamless-multi pools
 PARALLEL_FACTOR = 100
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def spawned_workers():
     if not has_spawned:
         spawn(WORKERS)

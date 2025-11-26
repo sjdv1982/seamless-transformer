@@ -12,7 +12,7 @@ import asyncio
 import traceback
 from typing import Dict, Optional, TYPE_CHECKING
 
-from seamless import Checksum, Buffer
+from seamless import Checksum, Buffer, ensure_open
 
 if TYPE_CHECKING:
     from .pretransformation import PreTransformation
@@ -91,6 +91,7 @@ class Transformation:
         Evaluate dependencies and calculate the transformation checksum from the inputs
         In case of failure, set .exception and return None
         """
+        ensure_open("transformation construct")
         if self._constructed:
             return self._transformation_checksum
         try:
@@ -110,6 +111,7 @@ class Transformation:
         Evaluate dependencies and calculate the transformation checksum from the inputs
         In case of failure, set .exception and return None
         """
+        ensure_open("transformation construction")
         if self._constructed:
             return self._transformation_checksum
         try:
@@ -219,6 +221,7 @@ class Transformation:
 
         It is made sure that the result value will be available upon Checksum.resolve().
         """
+        ensure_open("transformation compute")
         if self._evaluated:
             return self._result_checksum
         if self._computation_task is None:
@@ -255,6 +258,7 @@ class Transformation:
         If require_value is True, it is made sure that the value will be available too.
         (If only the checksum is available, the transformation will be recomputed.)
         """
+        ensure_open("transformation computation")
         if self._computation_task is not None:
             await self._computation_task
             return self._result_checksum
@@ -272,6 +276,7 @@ class Transformation:
 
     def start(self, *, loop: asyncio.AbstractEventLoop | None = None) -> "Transformation":
         """Ensure the computation task is scheduled; return self for chaining."""
+        ensure_open("transformation start")
         for _depname, dep in self._upstream_dependencies.items():
             dep.start()
         if self._computation_task is not None:
@@ -335,6 +340,7 @@ class Transformation:
 
         First runs .compute, then resolve the result checksum into a value.
         Raise RuntimeError in case of an exception."""
+        ensure_open("transformation task")
         return get_event_loop().create_task(self._run())
 
     def run(self):
@@ -343,6 +349,7 @@ class Transformation:
         First runs .compute, then resolve the result checksum into a value.
         Raise RuntimeError in case of an exception."""
 
+        ensure_open("transformation run")
         self.compute()
         return self.value
 
