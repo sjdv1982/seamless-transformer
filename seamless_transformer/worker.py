@@ -31,7 +31,7 @@ from seamless.caching.buffer_cache import get_buffer_cache
 from .process import ChildChannel, ProcessManager, ConnectionClosed
 from .run import run_transformation_dict_in_process
 
-has_spawned = False
+_has_spawned = False
 
 _worker_manager: "_WorkerManager | None" = None
 _child_channel: Optional[ChildChannel] = None
@@ -103,6 +103,19 @@ def register_transformer_proxy(obj: Any) -> _TransformerProxy:
     proxy_id = uuid.uuid4().hex
     _transformer_registry[proxy_id] = obj
     return _TransformerProxy(proxy_id)
+
+
+def has_spawned() -> bool:
+    """Return True if workers have been spawned in this process."""
+
+    return _has_spawned
+
+
+def _set_has_spawned(value: bool) -> None:
+    """Internal helper to reset spawn flag (testing/cleanup)."""
+
+    global _has_spawned
+    _has_spawned = bool(value)
 
 
 def _request_parent_sync(op: str, payload: Any) -> Any:
@@ -573,7 +586,7 @@ class _WorkerManager:
 
 def spawn(num_workers: Optional[int] = None) -> _WorkerManager:
     ensure_open("spawn workers")
-    global has_spawned, _worker_manager
+    global _has_spawned, _worker_manager
     proc = mp.current_process()
     if proc is not None and proc.name != "MainProcess":
         # Child interpreter re-imported __main__: just no-op to avoid recursive spawns.
@@ -582,11 +595,11 @@ def spawn(num_workers: Optional[int] = None) -> _WorkerManager:
             file=sys.stderr,
         )
         return _worker_manager
-    if has_spawned:
+    if _has_spawned:
         raise RuntimeError("Workers have already been spawned")
     worker_count = num_workers or (os.cpu_count() or 1)
     _worker_manager = _WorkerManager(worker_count)
-    has_spawned = True
+    _has_spawned = True
     return _worker_manager
 
 
@@ -597,7 +610,7 @@ def _require_manager() -> _WorkerManager:
 
 
 def _cleanup_workers() -> None:
-    global _worker_manager, has_spawned
+    global _worker_manager, _has_spawned
     if _worker_manager is None:
         return
     try:
@@ -605,14 +618,14 @@ def _cleanup_workers() -> None:
     except Exception:
         pass
     _worker_manager = None
-    has_spawned = False
+    _has_spawned = False
 
 
 def shutdown_workers() -> None:
     """Explicitly shut down the worker pool and clear the spawn flag."""
 
     ensure_open("shutdown workers")
-    global has_spawned, _worker_manager
+    global _has_spawned, _worker_manager
     if _worker_manager is None:
         return
     try:
@@ -620,7 +633,7 @@ def shutdown_workers() -> None:
     except Exception:
         pass
     _worker_manager = None
-    has_spawned = False
+    _has_spawned = False
 
 
 async def dispatch_to_workers(

@@ -8,9 +8,10 @@ from seamless_transformer.worker import has_spawned, spawn
 
 @pytest.fixture(scope="session")
 def spawned_workers():
-    if not has_spawned:
+    if not has_spawned():
         spawn(2)
     yield True
+    # Do not call shutdown_workers() here; session fixture cleanup is handled elsewhere.
 
 
 def test_spawned_workers_execute_transformations(spawned_workers):

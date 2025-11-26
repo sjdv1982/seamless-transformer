@@ -90,7 +90,7 @@ class TransformationCache:
                         remote_result.tempref()
                     return remote_result
 
-        if worker.has_spawned and not is_worker():
+        if worker.has_spawned() and not is_worker():
             _debug("dispatching transformation to worker pool")
             result_checksum = await worker.dispatch_to_workers(
                 transformation_dict,
@@ -102,7 +102,7 @@ class TransformationCache:
                 raise RuntimeError(result_checksum)
             result_checksum = Checksum(result_checksum)
         elif is_worker():
-            assert not worker.has_spawned
+            assert not worker.has_spawned()
             _debug("forwarding transformation request to parent")
             result_checksum = await worker.forward_to_parent(
                 transformation_dict,

@@ -16,7 +16,7 @@ PARALLEL_FACTOR = 5
 
 @pytest.fixture(scope="module")
 def spawned_workers():
-    if not has_spawned:
+    if not has_spawned():
         spawn(WORKERS)
     yield True
 

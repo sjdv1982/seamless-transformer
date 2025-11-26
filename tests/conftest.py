@@ -12,7 +12,7 @@ def _close_seamless_once():
     seamless._require_close = False
     shutdown._closed = False
     shutdown._closing = False
-    worker.has_spawned = False
+    worker._set_has_spawned(False)
     worker._worker_manager = None
     yield
     seamless.close()
