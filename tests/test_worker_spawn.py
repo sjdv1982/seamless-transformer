@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from seamless_transformer import transformer, shutdown_workers
+from seamless_transformer import transformer
 from seamless_transformer.worker import has_spawned, spawn
 
 
@@ -11,7 +11,6 @@ def spawned_workers():
     if not has_spawned:
         spawn(2)
     yield True
-    shutdown_workers()
 
 
 def test_spawned_workers_execute_transformations(spawned_workers):

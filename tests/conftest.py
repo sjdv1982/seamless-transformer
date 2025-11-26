@@ -15,4 +15,4 @@ def _close_seamless_once():
     worker.has_spawned = False
     worker._worker_manager = None
     yield
-    ###seamless.close()
+    seamless.close()

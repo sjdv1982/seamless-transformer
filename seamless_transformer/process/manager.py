@@ -236,6 +236,20 @@ class ProcessManager:
     async def _handle_worker_failure(self, handle: ProcessHandle, reason: str) -> None:
         if handle.restarting or handle.closing or self._closing:
             return
+        if not handle.restart:
+            # During shutdown or explicit disable, skip restart noise and just drop the handle.
+            handle.restarting = False
+            handle.cancel_watchers()
+            if handle.endpoint:
+                await handle.endpoint.aclose()
+            if handle.process and handle.process.is_alive():
+                handle.process.join(timeout=0.5)
+            if handle.pid is not None:
+                await self.memory_registry.reset_pid(handle.pid)
+            self._handles.pop(handle.name, None)
+            handle.endpoint = None
+            handle.process = None
+            return
         if not handle.ready_event.is_set():
             # Child never became ready; don't loop restarts.
             handle.restart = False
