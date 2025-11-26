@@ -84,6 +84,11 @@ class Endpoint:
                     break
                 except ConnectionClosed:
                     break
+                except RuntimeError as exc:
+                    # Happens during interpreter shutdown when loop is closing; exit quietly.
+                    if self._loop.is_closed() or "after interpreter shutdown" in str(exc).lower():
+                        break
+                    raise
                 await self._handle_message(message)
         except asyncio.CancelledError:
             pass
@@ -263,9 +268,7 @@ class ChildChannel:
     async def acquire_shared_memory(
         self, key: str, *, timeout: Optional[float] = None
     ) -> ChildSharedMemoryHandle:
-        response = await self.request(
-            "shm_incref", {"key": key}, timeout=timeout
-        )
+        response = await self.request("shm_incref", {"key": key}, timeout=timeout)
         return ChildSharedMemoryHandle(
             channel=self,
             key=key,

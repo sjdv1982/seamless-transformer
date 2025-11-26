@@ -120,6 +120,13 @@ class TransformationCache:
             )
             result_checksum = Checksum(result_checksum)
 
+        if require_fingertip:
+            try:
+                _debug("ensuring fingertip value for result")
+                await result_checksum.resolution()
+            except Exception:
+                _debug("fingertip resolution failed; will continue")
+
         if database_remote is not None and not is_worker():
             await database_remote.set_transformation_result(
                 tf_checksum, result_checksum
@@ -129,6 +136,17 @@ class TransformationCache:
             result_checksum.tempref()
         self._transformation_cache[tf_checksum] = result_checksum
         await _await_buffer_writer(result_checksum)
+
+        if database_remote is not None and not is_worker() and not scratch:
+            try:
+                buf = result_checksum.resolve()
+            except Exception:
+                buf = None
+            if buf is not None:
+                try:
+                    await buf.write()
+                except Exception:
+                    pass
         return result_checksum
 
     def run_sync(

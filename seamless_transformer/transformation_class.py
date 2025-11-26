@@ -166,7 +166,8 @@ class Transformation:
 
     def _run_dependencies(self) -> None:
         try:
-            self.start()
+            loop = get_event_loop()
+            self.start(loop=loop)
             for depname, dep in self._upstream_dependencies.items():
                 dep.compute()
                 if dep.exception is not None:
@@ -220,11 +221,16 @@ class Transformation:
         """
         if self._evaluated:
             return self._result_checksum
-        loop = get_event_loop()
-        if not loop.is_running():
-            self.start()
+        if self._computation_task is None:
+            task_loop = get_event_loop()
+            self.start(loop=task_loop)
+        else:
+            task_loop = self._computation_task.get_loop()
+
+        if not task_loop.is_running():
             assert self._computation_task is not None
-            loop.run_until_complete(self._computation_task)
+            task_loop.run_until_complete(self._computation_task)
+            self._computation_task = None
         else:
             self._run_dependencies()
             if self._exception is None:
@@ -264,13 +270,13 @@ class Transformation:
         except Exception:
             pass
 
-    def start(self) -> "Transformation":
+    def start(self, *, loop: asyncio.AbstractEventLoop | None = None) -> "Transformation":
         """Ensure the computation task is scheduled; return self for chaining."""
         for _depname, dep in self._upstream_dependencies.items():
             dep.start()
         if self._computation_task is not None:
             return self
-        loop = get_event_loop()
+        loop = loop or get_event_loop()
         self._computation_task = loop.create_task(self._computation(require_value=True))
         self._computation_task.add_done_callback(self._future_cleanup)
         return self

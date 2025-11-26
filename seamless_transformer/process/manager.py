@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
 from typing import Any, Callable, Dict, Optional
 
-from .channel import ChildChannel, Endpoint
+from .channel import ChildChannel, Endpoint, ConnectionClosed
 from .shared_memory import SharedMemoryRegistry
 from .utils import run_handler
 
@@ -236,6 +236,8 @@ class ProcessManager:
     async def _handle_worker_failure(self, handle: ProcessHandle, reason: str) -> None:
         if handle.restarting or handle.closing or self._closing:
             return
+        if self._closing:
+            return
         self._logger.warning("Restarting worker %s (%s)", handle.name, reason)
         handle.restarting = True
         handle.cancel_watchers()
@@ -319,5 +321,8 @@ async def _child_main(
             loop.call_soon(endpoint.close)
             raise
     if not channel.ready_notified:
-        await channel.notify_ready()
+        try:
+            await channel.notify_ready()
+        except ConnectionClosed:
+            return
     await channel.wait_closed()

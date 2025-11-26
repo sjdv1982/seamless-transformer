@@ -24,7 +24,7 @@ print("START3")
 print(func(100 * OFFSET + 5, 18))
 
 print("ITER")
-OFFSET = 1  # vary this to force cache misses
+OFFSET = 3  # vary this to force cache misses
 for a in tqdm(list(range(10))):
     for b in range(10):
         func(a + 10000 + 10 * OFFSET, 42 + b)

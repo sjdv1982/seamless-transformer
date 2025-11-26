@@ -8,13 +8,13 @@ shared memory.
 
 from __future__ import annotations
 
-import atexit
 import asyncio
 import os
 import threading
 import traceback
 import uuid
 import sys
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.thread import _worker as _cf_worker
 import weakref
@@ -27,7 +27,7 @@ import seamless.buffer_class as _buffer_class
 from seamless import Buffer, CacheMissError, Checksum, set_is_worker
 from seamless.caching.buffer_cache import get_buffer_cache
 
-from .process import ChildChannel, ProcessManager
+from .process import ChildChannel, ProcessManager, ConnectionClosed
 from .run import run_transformation_dict_in_process
 
 has_spawned = False
@@ -38,7 +38,7 @@ _child_loop: Optional[asyncio.AbstractEventLoop] = None
 _primitives_patched = False
 _dummy_buffer_cache = None
 _transformer_registry: Dict[str, Any] = {}
-_atexit_registered = False
+_quiet = False
 
 
 def _memory_provider(_key: str) -> None:
@@ -231,7 +231,7 @@ def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
 
 
 async def _child_initializer(channel: ChildChannel) -> None:
-    global _child_channel, _child_loop
+    global _child_channel, _child_loop, _quiet
     _child_channel = channel
     _child_loop = asyncio.get_running_loop()
     set_is_worker(True)
@@ -241,9 +241,34 @@ async def _child_initializer(channel: ChildChannel) -> None:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _execute_transformation, payload)
 
+    async def handle_quiet(_payload: Any) -> str:
+        _quiet = True
+        if os.environ.get("SEAMLESS_DEBUG_TRANSFORMATION"):
+            print("[worker] received quiet request", file=sys.stderr, flush=True)
+        try:
+            logging.getLogger(__name__).setLevel(logging.ERROR)
+            logging.getLogger("seamless_transformer.process.channel").setLevel(
+                logging.ERROR
+            )
+            logging.getLogger("seamless_transformer.process.manager").setLevel(
+                logging.ERROR
+            )
+        except Exception:
+            pass
+        return "ok"
+
     channel.add_request_handler("execute_transformation", handle_execute)
+    channel.add_request_handler("quiet", handle_quiet)
     if not channel.ready_notified:
-        await channel.notify_ready({"role": "worker"})
+        try:
+            await channel.notify_ready({"role": "worker"})
+        except ConnectionClosed:
+            # Parent is already closing; exit quietly.
+            try:
+                channel.ready_notified = True  # prevent manager child_main from retrying
+            except Exception:
+                pass
+            return
 
 
 class _WorkerManager:
@@ -546,15 +571,12 @@ class _WorkerManager:
 
 
 def spawn(num_workers: Optional[int] = None) -> _WorkerManager:
-    global has_spawned, _worker_manager, _atexit_registered
+    global has_spawned, _worker_manager
     if has_spawned:
         raise RuntimeError("Workers have already been spawned")
     worker_count = num_workers or (os.cpu_count() or 1)
     _worker_manager = _WorkerManager(worker_count)
     has_spawned = True
-    if not _atexit_registered:
-        atexit.register(_cleanup_workers)
-        _atexit_registered = True
     return _worker_manager
 
 
