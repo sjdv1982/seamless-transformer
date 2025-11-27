@@ -6,4 +6,5 @@ build-backend = "setuptools.build_meta"
 seamless_config = ["tools.yaml"]
 
 [project]
+name = "seamless-transformer"
 version = "0.0.0"
