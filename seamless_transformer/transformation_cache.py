@@ -103,6 +103,16 @@ class TransformationCache:
                     "Remote execution requested but seamless_remote is not installed"
                 )
             _debug("dispatching transformation to remote jobserver")
+
+            ### NOTE: flushing the entire buffer_writer queue, just to be sure that
+            ###   the jobserver has it available.
+            ### TODO: flush only the buffers that are required by the transformation
+            ### This is not trivial in case of deep checksums
+            from seamless.caching import buffer_writer
+
+            buffer_writer.flush()
+            ### /NOTE
+
             result_checksum = await jobserver_remote.run_transformation(
                 transformation_dict,
                 tf_checksum=tf_checksum,
