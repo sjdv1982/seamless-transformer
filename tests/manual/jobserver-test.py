@@ -10,6 +10,9 @@ seamless_config.init()
 
 @transformer(return_transformation=True)
 def func(a, b):
+    import subprocess
+
+    ### return subprocess.check_output("hostname").decode()
     return 18 * a - 2 * b
 
 
@@ -24,5 +27,10 @@ tf = func(4, 5)
 tf.construct()
 print(tf.transformation_checksum)
 print(tf.run())
+
+KEY = 1  # change this to enforce cache misses
+func = func.copy(return_transformation=False)
+for n in range(10):
+    print(n, func(n, -KEY))
 
 seamless.close()
