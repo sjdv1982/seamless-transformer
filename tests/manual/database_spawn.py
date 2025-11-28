@@ -1,6 +1,6 @@
 from tqdm import tqdm
 from seamless_transformer import transformer
-from seamless_transformer.worker import spawn, shutdown_workers
+from seamless_transformer.worker import spawn
 
 import seamless.config
 import seamless

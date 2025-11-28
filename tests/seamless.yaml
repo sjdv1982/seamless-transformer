@@ -1,12 +1,8 @@
 - project: myproject
-#
-#
-# example for .seamless.yaml:
-#- stage test:
-#    - cluster: remote
-#
-#- stage test2:
-#    - cluster: local
-#
-#- stage test3:
-#    - cluster: local
+- execution: process
+
+- stage jobserver-test:
+    - execution: remote
+
+- stage spawn-config:
+    - execution: spawn
