@@ -30,6 +30,17 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
             "__format__",
             "__code_checksum__",
         ):
+            # TODO:
+            # __code_checksum__ is not really part of the transformation dict
+            #   two transformations with the same "code" but different __code_checksum__
+            #   have a different syntactic Python source buffer but the same AST (semantic buffer)
+            #   (this is the case for code after whitespace reformatting)
+            #     => __code_checksum__ must go to tf_dunder and be stripped from tf_get_buffer
+            #   HOWEVER: this will break linecache tracebacks for spawn and jobserver
+            #     (which surely must already be the case for nested transformations: test needed)
+            #   => sem2syn needs to be added to database.
+            #           Keep a per-client cache list of all written sem2syn, but otherwise do a blocking await
+            #      Maybe setup sem2syn messaging between spawn process and main, but probably YAGNI
             result[key] = value
             continue
         if key.startswith("SPECIAL__"):
