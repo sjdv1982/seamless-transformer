@@ -279,7 +279,9 @@ async def _child_initializer(channel: ChildChannel) -> None:
         except ConnectionClosed:
             # Parent is already closing; exit quietly.
             try:
-                channel.ready_notified = True  # prevent manager child_main from retrying
+                channel.ready_notified = (
+                    True  # prevent manager child_main from retrying
+                )
             except Exception:
                 pass
             return
@@ -457,7 +459,9 @@ class _WorkerManager:
                 pass
         return result
 
-    async def _handle_download(self, _handle, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_download(
+        self, _handle, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
         checksum = Checksum(payload["checksum"])
         data = self._prefetched_buffers.get(checksum.hex())
         if data is None:
@@ -499,7 +503,8 @@ class _WorkerManager:
         if length is None:
             raise ValueError("Buffer length is required for uploads")
         return await self._allocate_pointer(
-            length, {"checksum": checksum.hex(), "length": length, "direction": "upload"}
+            length,
+            {"checksum": checksum.hex(), "length": length, "direction": "upload"},
         )
 
     async def _handle_upload(self, _handle, payload: Dict[str, Any]) -> Dict[str, str]:
@@ -524,9 +529,16 @@ class _WorkerManager:
         async with self._pointer_lock:
             key = uuid.uuid4().hex
             shm = SharedMemory(create=True, size=size)
-            pointer = _Pointer(key=key, shm=shm, size=size, metadata=dict(metadata or {}))
+            pointer = _Pointer(
+                key=key, shm=shm, size=size, metadata=dict(metadata or {})
+            )
             self._pointers[key] = pointer
-            return {"key": key, "name": shm.name, "size": size, "metadata": dict(pointer.metadata)}
+            return {
+                "key": key,
+                "name": shm.name,
+                "size": size,
+                "metadata": dict(pointer.metadata),
+            }
 
     async def _release_pointer(self, key: str) -> None:
         if self._pointer_lock is None:
@@ -584,9 +596,8 @@ class _WorkerManager:
                 self._prefetched_buffers[cs_hex] = bytes(buf.content)
 
 
-def spawn(num_workers: Optional[int] = None) -> _WorkerManager:
-    ensure_open("spawn workers")
-    global _has_spawned, _worker_manager
+def spawn(num_workers: Optional[int] = None) -> None:
+    global _worker_manager
     proc = mp.current_process()
     if proc is not None and proc.name != "MainProcess":
         # Child interpreter re-imported __main__: just no-op to avoid recursive spawns.
@@ -594,13 +605,14 @@ def spawn(num_workers: Optional[int] = None) -> _WorkerManager:
             "seamless_transformer.worker.spawn() called outside MainProcess; ignoring (guard with if __name__ == '__main__')",
             file=sys.stderr,
         )
-        return _worker_manager
-    if _has_spawned:
+        return
+    if has_spawned():
         raise RuntimeError("Workers have already been spawned")
+    ensure_open("spawn workers")
     worker_count = num_workers or (os.cpu_count() or 1)
     _worker_manager = _WorkerManager(worker_count)
-    _has_spawned = True
-    return _worker_manager
+    _set_has_spawned(True)
+    return None
 
 
 def _require_manager() -> _WorkerManager:
@@ -610,7 +622,7 @@ def _require_manager() -> _WorkerManager:
 
 
 def _cleanup_workers() -> None:
-    global _worker_manager, _has_spawned
+    global _worker_manager, has_spawned
     if _worker_manager is None:
         return
     try:
@@ -618,14 +630,14 @@ def _cleanup_workers() -> None:
     except Exception:
         pass
     _worker_manager = None
-    _has_spawned = False
+    has_spawned = False
 
 
 def shutdown_workers() -> None:
     """Explicitly shut down the worker pool and clear the spawn flag."""
 
     ensure_open("shutdown workers")
-    global _has_spawned, _worker_manager
+    global has_spawned, _worker_manager
     if _worker_manager is None:
         return
     try:
@@ -633,7 +645,7 @@ def shutdown_workers() -> None:
     except Exception:
         pass
     _worker_manager = None
-    _has_spawned = False
+    has_spawned = False
 
 
 async def dispatch_to_workers(
