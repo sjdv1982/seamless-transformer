@@ -9,6 +9,7 @@ from seamless import CacheMissError, Checksum, is_worker
 
 from .run import run_transformation_dict_in_process
 from . import worker
+from seamless_config.select import get_execution
 
 try:
     from seamless.caching import buffer_writer as _buffer_writer
@@ -19,6 +20,11 @@ try:
     from seamless_remote import database_remote
 except ImportError:
     database_remote = None
+
+try:
+    from seamless_remote import jobserver_remote
+except ImportError:
+    jobserver_remote = None
 
 try:
     from seamless_remote.client import close_all_clients as _close_all_clients
@@ -90,7 +96,23 @@ class TransformationCache:
                         remote_result.tempref()
                     return remote_result
 
-        if worker.has_spawned() and not is_worker():
+        execution = get_execution()
+        if execution == "remote":
+            if jobserver_remote is None:
+                raise RuntimeError(
+                    "Remote execution requested but seamless_remote is not installed"
+                )
+            _debug("dispatching transformation to remote jobserver")
+            result_checksum = await jobserver_remote.run_transformation(
+                transformation_dict,
+                tf_checksum=tf_checksum,
+                tf_dunder=tf_dunder,
+                scratch=scratch,
+            )
+            if isinstance(result_checksum, str):
+                raise RuntimeError(result_checksum)
+            result_checksum = Checksum(result_checksum)
+        elif worker.has_spawned() and not is_worker():
             _debug("dispatching transformation to worker pool")
             result_checksum = await worker.dispatch_to_workers(
                 transformation_dict,
