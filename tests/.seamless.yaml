@@ -1,4 +1,7 @@
 - cluster: local
 
 - stage spawn-config:
-    - cluster: null
+        - cluster: null
+
+- stage jobserver-test:
+        - cluster: local
