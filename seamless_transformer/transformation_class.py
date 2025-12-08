@@ -274,7 +274,9 @@ class Transformation:
         except Exception:
             pass
 
-    def start(self, *, loop: asyncio.AbstractEventLoop | None = None) -> "Transformation":
+    def start(
+        self, *, loop: asyncio.AbstractEventLoop | None = None
+    ) -> "Transformation":
         """Ensure the computation task is scheduled; return self for chaining."""
         ensure_open("transformation start")
         for _depname, dep in self._upstream_dependencies.items():
@@ -405,6 +407,7 @@ def transformation_from_pretransformation(
     tf_dunder = {}
 
     def constructor_sync(transformation_obj):  # pylint: disable=unused-argument
+        # TODO: run dependencies as in /seamless/seamless/direct/Transformation.py:_run_dependencies
         nonlocal tf_dunder
         pre_transformation.prepare_transformation()
         tf_buffer = tf_get_buffer(pre_transformation.pretransformation_dict)
@@ -416,6 +419,7 @@ def transformation_from_pretransformation(
         return tf_checksum
 
     async def constructor_async(transformation_obj):
+        # TODO: run dependencies as in /seamless/seamless/direct/Transformation.py:_run_dependencies_async
         return constructor_sync(transformation_obj)
 
     def evaluator_sync(
