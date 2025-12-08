@@ -147,8 +147,14 @@ class TransformationCache:
             result_checksum = Checksum(result_checksum)
         else:
             _debug("running transformation in-process")
-            result_checksum = run_transformation_dict_in_process(
-                transformation_dict, tf_checksum, tf_dunder, scratch
+            loop = asyncio.get_running_loop()
+            result_checksum = await loop.run_in_executor(
+                None,
+                run_transformation_dict_in_process,
+                transformation_dict,
+                tf_checksum,
+                tf_dunder,
+                scratch,
             )
             result_checksum = Checksum(result_checksum)
 

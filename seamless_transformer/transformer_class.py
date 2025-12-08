@@ -324,10 +324,13 @@ class Transformer:
             except Exception:
                 pass
             if isinstance(value, Transformer):
-                try:
-                    globals_map[name] = worker.register_transformer_proxy(value)
-                except Exception:
-                    pass
+                if worker.has_spawned():
+                    try:
+                        globals_map[name] = worker.register_transformer_proxy(value)
+                        continue
+                    except Exception:
+                        pass
+                globals_map[name] = value
         return globals_map
 
 
