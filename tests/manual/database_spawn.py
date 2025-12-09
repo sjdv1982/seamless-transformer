@@ -1,6 +1,6 @@
 from tqdm import tqdm
-from seamless.transformer import direct, delayed
-from seamless.transformer.worker import spawn
+from seamless_transformer import direct, delayed
+from seamless_transformer.worker import spawn
 
 import seamless.config
 import seamless

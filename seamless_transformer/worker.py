@@ -378,6 +378,21 @@ class _WorkerManager:
                 flush=True,
             )
         _run_coro(lambda: self.loop.shutdown_default_executor(), 1.0 if wait else 0.2)
+
+        async def _drain_pending_tasks():
+            current = asyncio.current_task(loop=self.loop)
+            tasks = [
+                task
+                for task in asyncio.all_tasks(loop=self.loop)
+                if task is not current and not task.done()
+            ]
+            if not tasks:
+                return
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        _run_coro(lambda: _drain_pending_tasks(), 1.0 if wait else 0.5)
         try:
             self.loop.call_soon_threadsafe(self.loop.stop)
         except Exception:
