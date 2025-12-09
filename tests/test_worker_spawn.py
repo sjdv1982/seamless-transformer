@@ -2,8 +2,8 @@ import os
 
 import pytest
 
-from seamless_transformer import transformer
-from seamless_transformer.worker import has_spawned, spawn
+from seamless.transformer import direct, delayed
+from seamless.transformer.worker import has_spawned, spawn
 
 
 @pytest.fixture(scope="session")
@@ -17,7 +17,7 @@ def spawned_workers():
 def test_spawned_workers_execute_transformations(spawned_workers):
     main_pid = os.getpid()
 
-    @transformer
+    @direct
     def pid_and_sum(a, b):
         import os
 
@@ -31,13 +31,13 @@ def test_spawned_workers_execute_transformations(spawned_workers):
 def test_nested_transformations_round_trip_to_parent(spawned_workers):
     main_pid = os.getpid()
 
-    @transformer
+    @direct
     def inner(x):
         import os
 
         return os.getpid(), x + 1
 
-    @transformer
+    @direct
     def outer(x):
         pid_inner, intermediate = inner(x)
         import os

@@ -1,14 +1,14 @@
 import seamless
 import seamless_config
 from seamless import Buffer
-from seamless_transformer import transformer
+from seamless.transformer import direct, delayed
 from seamless_config.select import get_execution
 
 seamless_config.set_stage("jobserver-test")
 seamless_config.init()
 
 
-@transformer(return_transformation=True)
+@delayed
 def func(a, b):
     import subprocess
 

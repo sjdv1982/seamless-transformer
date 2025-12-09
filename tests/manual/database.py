@@ -1,5 +1,5 @@
 from tqdm import tqdm
-from seamless_transformer import transformer
+from seamless.transformer import direct, delayed
 
 import seamless
 import seamless.config
@@ -7,7 +7,7 @@ import seamless.config
 seamless.config.init()
 
 
-@transformer
+@direct
 def func(a, b):
     print("RUN", a, b)
     return 12 * a + 7 * b + 12

@@ -91,9 +91,6 @@ def run_transformation_dict_in_process(
     """
     assert code is not None
 
-    from . import transformer
-
-    namespace["transformer"] = transformer
     namespace.pop(output_name, None)
     with injector.active_workspace(module_workspace, namespace):
         exec_code(

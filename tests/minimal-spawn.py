@@ -1,5 +1,5 @@
 import seamless
-from seamless_transformer import spawn
+from seamless.transformer import spawn
 
 if __name__ == "__main__":
     spawn(5)

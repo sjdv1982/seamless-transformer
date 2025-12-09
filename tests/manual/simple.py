@@ -1,8 +1,8 @@
 import seamless
-from seamless_transformer import transformer
+from seamless.transformer import direct, delayed
 
 
-@transformer
+@direct
 def func(a, b):
     return 10000 * a + 4 * b
 

@@ -10,7 +10,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent
 
 
-def _run_script(script: str, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+def _run_script(
+    script: str, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("SEAMLESS_DEBUG_TRANSFORMATION", None)
     script_path = ROOT / script
@@ -38,9 +40,7 @@ def test_minimal_spawn_without_guard():
     result = _run_script("minimal-spawn2.py", timeout=10)
     assert result.returncode == 0, result.stderr
     combined = result.stdout + result.stderr
-    warning = (
-        "seamless_transformer.worker.spawn() called outside MainProcess; ignoring"
-    )
+    warning = "seamless.transformer.worker.spawn() called outside MainProcess; ignoring"
     assert warning in combined
 
     stop_lines = [line for line in result.stdout.splitlines() if line.strip()]

@@ -1,7 +1,7 @@
 import seamless
 import seamless.shutdown as shutdown
 import pytest
-from seamless_transformer import worker
+from seamless.transformer import worker
 
 
 @pytest.fixture(scope="session", autouse=True)

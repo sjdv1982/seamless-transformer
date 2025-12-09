@@ -1,4 +1,4 @@
-"""Minimal injector implementation ported for seamless_transformer."""
+"""Minimal injector implementation ported for seamless.transformer."""
 
 import sys
 from types import ModuleType

@@ -1,12 +1,12 @@
 import seamless
-from seamless_transformer import transformer
-from seamless_transformer.worker import spawn
+from seamless.transformer import direct, delayed
+from seamless.transformer.worker import spawn
 
 if __name__ == "__main__":
 
     spawn(1)
 
-    @transformer
+    @direct
     def func(a, b):
         raise Exception
         return 10000 * a + 4 * b

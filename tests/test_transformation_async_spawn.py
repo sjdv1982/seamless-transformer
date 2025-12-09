@@ -2,8 +2,8 @@ import pytest
 import time
 import asyncio
 
-from seamless_transformer import transformer
-from seamless_transformer.worker import spawn, has_spawned
+from seamless.transformer import direct, delayed
+from seamless.transformer.worker import spawn, has_spawned
 
 DELAY = 0.5
 WORKERS = 8  # make this no bigger than #cores on your system
@@ -21,8 +21,17 @@ def spawned_workers():
     yield True
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _close_seamless_session():
+    """Ensure Seamless shuts down once after the full test session."""
+    import seamless
+
+    yield
+    seamless.close()
+
+
 def test_transformation_async(spawned_workers):
-    @transformer(return_transformation=True)
+    @delayed
     def func(a, b, delay):
         import time
 

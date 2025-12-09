@@ -1,10 +1,7 @@
-"""Wraps a function in a direct transformer
-Direct transformers can be called as normal functions, but
-the source code of the function and the arguments are converted
-into a Seamless transformation."""
+"""Wrap a function in a Seamless transformer."""
 
 from copy import deepcopy
-from functools import partial, update_wrapper
+from functools import update_wrapper
 import inspect
 import pickle
 from seamless import Checksum, Buffer, CacheMissError, ensure_open
@@ -17,32 +14,29 @@ import multiprocessing as mp
 import sys
 
 
-def transformer(
-    func=None,
-    *,
-    scratch=False,
-    direct_print=False,
-    local=False,
-    return_transformation=False,
-) -> "Transformer":
-    """Wraps a function in a direct transformer
-    Direct transformers can be called as normal functions, but
-    the source code of the function and the arguments are converted
-    into a Seamless transformation."""
-    if func is None:
-        return partial(
-            transformer,
-            scratch=scratch,
-            direct_print=direct_print,
-            local=local,
-            return_transformation=return_transformation,
-        )
+def direct(func) -> "Transformer":
+    """Execute immediately, returning the result value."""
+
     result = Transformer(
         func,
-        scratch=scratch,
-        direct_print=direct_print,
-        local=local,
-        return_transformation=return_transformation,
+        scratch=False,
+        direct_print=False,
+        local=False,
+        return_transformation=False,
+    )
+    update_wrapper(result, func)
+    return result
+
+
+def delayed(func) -> "Transformer":
+    """Return a Transformation object that can be executed later."""
+
+    result = Transformer(
+        func,
+        scratch=False,
+        direct_print=False,
+        local=False,
+        return_transformation=True,
     )
     update_wrapper(result, func)
     return result

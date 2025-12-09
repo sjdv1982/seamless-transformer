@@ -1,6 +1,6 @@
 """Spawn and coordinate Seamless transformation workers.
 
-This module builds on :mod:`seamless_transformer.process` to manage a pool of
+This module builds on :mod:`seamless.transformer.process` to manage a pool of
 worker processes. Workers execute transformation requests sent from the parent
 process and forward buffer/checksum interactions back to the parent using
 shared memory.
@@ -261,10 +261,10 @@ async def _child_initializer(channel: ChildChannel) -> None:
             print("[worker] received quiet request", file=sys.stderr, flush=True)
         try:
             logging.getLogger(__name__).setLevel(logging.ERROR)
-            logging.getLogger("seamless_transformer.process.channel").setLevel(
+            logging.getLogger("seamless.transformer.process.channel").setLevel(
                 logging.ERROR
             )
-            logging.getLogger("seamless_transformer.process.manager").setLevel(
+            logging.getLogger("seamless.transformer.process.manager").setLevel(
                 logging.ERROR
             )
         except Exception:
@@ -602,7 +602,7 @@ def spawn(num_workers: Optional[int] = None) -> None:
     if proc is not None and proc.name != "MainProcess":
         # Child interpreter re-imported __main__: just no-op to avoid recursive spawns.
         print(
-            "seamless_transformer.worker.spawn() called outside MainProcess; ignoring (guard with if __name__ == '__main__')",
+            "seamless.transformer.worker.spawn() called outside MainProcess; ignoring (guard with if __name__ == '__main__')",
             file=sys.stderr,
         )
         return
@@ -636,7 +636,6 @@ def _cleanup_workers() -> None:
 def shutdown_workers() -> None:
     """Explicitly shut down the worker pool and clear the spawn flag."""
 
-    ensure_open("shutdown workers")
     global has_spawned, _worker_manager
     if _worker_manager is None:
         return

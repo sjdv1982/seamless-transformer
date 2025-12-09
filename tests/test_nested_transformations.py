@@ -1,7 +1,7 @@
 import os
 import pytest
 
-from seamless_transformer import transformer, worker
+from seamless.transformer import direct, delayed, worker
 
 
 def _close_worker_manager():
@@ -40,7 +40,7 @@ def test_nested_transformations_cached_in_process():
         _close_worker_manager()
     assert not worker.has_spawned()
 
-    @transformer
+    @direct
     def inner(label):
         import datetime
         import time
@@ -53,7 +53,7 @@ def test_nested_transformations_cached_in_process():
             time.perf_counter_ns(),
         )
 
-    @transformer
+    @direct
     def outer(label):
         first = inner(label)
         second = inner(label)
@@ -76,7 +76,7 @@ def test_nested_transformations_cached_in_process():
 def test_nested_transformations_cached_with_spawn(temporary_spawned_workers):
     main_pid = os.getpid()
 
-    @transformer
+    @direct
     def inner(label):
         import datetime
         import time
@@ -89,7 +89,7 @@ def test_nested_transformations_cached_with_spawn(temporary_spawned_workers):
             time.perf_counter_ns(),
         )
 
-    @transformer
+    @direct
     def outer(label):
         import os
 

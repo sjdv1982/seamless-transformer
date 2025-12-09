@@ -1,6 +1,6 @@
 from tqdm import tqdm
-from seamless_transformer import transformer
-from seamless_transformer.worker import spawn
+from seamless.transformer import direct, delayed
+from seamless.transformer.worker import spawn
 
 import seamless.config
 import seamless
@@ -14,7 +14,7 @@ N = 4
 OFFSET = 1  # vary this to force cache misses
 
 
-@transformer
+@direct
 def func(a, b, delay):
     import time
 

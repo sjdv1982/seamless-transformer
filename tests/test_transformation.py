@@ -1,6 +1,6 @@
 import time
 
-from seamless_transformer import transformer
+from seamless.transformer import direct, delayed
 
 DELAY = 1.0
 
@@ -8,12 +8,14 @@ DELAY = 1.0
 def test_transformation():
     """Test various forms of transformation execution"""
 
-    @transformer
+    @direct
     def func(a, b, delay):
         import time
+        from seamless.transformer import global_lock
 
-        print("RUN", a, b)
-        time.sleep(delay)
+        with global_lock:
+            print("RUN", a, b)
+            time.sleep(delay)
         return 10 * a + 2 * b
 
     assert func(30, 12, 0) == 324

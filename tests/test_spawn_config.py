@@ -2,7 +2,7 @@ import pytest
 import time
 import asyncio
 
-from seamless_transformer import transformer
+from seamless.transformer import direct, delayed
 import seamless_config
 
 DELAY = 0.5
@@ -13,11 +13,20 @@ N = 40  # make this no bigger than the WORKERS, or increase PARALLEL_FACTOR
 PARALLEL_FACTOR = 5
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _close_seamless_session():
+    """Ensure Seamless shuts down once after the full test session."""
+    import seamless
+
+    yield
+    seamless.close()
+
+
 def test_spawn_config():
     seamless_config.set_stage("spawn-config")
     seamless_config.init()
 
-    @transformer(return_transformation=True)
+    @delayed
     def func(a, b, delay):
         import time
 

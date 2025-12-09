@@ -1,19 +1,19 @@
 import time
 
-from seamless_transformer import transformer
+from seamless.transformer import direct, delayed
 
 
 def test_in_process_transformer_execution():
     """Simple smoke test mirroring the original Seamless direct test."""
 
-    @transformer
+    @direct
     def func(a, b):
         return 10 * a + 2 * b
 
     assert func(30, 12) == 324
     assert func(40, 2) == 404
 
-    @transformer
+    @direct
     def func2(a, b):
         import time
 

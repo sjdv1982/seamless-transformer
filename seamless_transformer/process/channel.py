@@ -87,7 +87,10 @@ class Endpoint:
                     break
                 except RuntimeError as exc:
                     # Happens during interpreter shutdown when loop is closing; exit quietly.
-                    if self._loop.is_closed() or "after interpreter shutdown" in str(exc).lower():
+                    if (
+                        self._loop.is_closed()
+                        or "after interpreter shutdown" in str(exc).lower()
+                    ):
                         break
                     raise
                 await self._handle_message(message)
