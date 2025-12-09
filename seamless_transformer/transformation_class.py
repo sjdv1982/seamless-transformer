@@ -13,6 +13,7 @@ import traceback
 from typing import Dict, Optional, TYPE_CHECKING
 
 from seamless import Checksum, Buffer, ensure_open
+from seamless.util.get_event_loop import get_event_loop
 
 if TYPE_CHECKING:
     from .pretransformation import PreTransformation
@@ -20,19 +21,6 @@ if TYPE_CHECKING:
 
 class TransformationError(RuntimeError):
     pass
-
-
-def get_event_loop():
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-    return loop
 
 
 class Transformation:
@@ -407,8 +395,10 @@ def transformation_from_pretransformation(
     tf_dunder = {}
 
     def constructor_sync(transformation_obj):  # pylint: disable=unused-argument
-        # TODO: run dependencies as in /seamless/seamless/direct/Transformation.py:_run_dependencies
         nonlocal tf_dunder
+        transformation_obj._run_dependencies()
+        if transformation_obj.exception is not None:
+            raise RuntimeError(transformation_obj.exception)
         pre_transformation.prepare_transformation()
         tf_buffer = tf_get_buffer(pre_transformation.pretransformation_dict)
         tf_checksum = tf_buffer.get_checksum()
@@ -419,7 +409,9 @@ def transformation_from_pretransformation(
         return tf_checksum
 
     async def constructor_async(transformation_obj):
-        # TODO: run dependencies as in /seamless/seamless/direct/Transformation.py:_run_dependencies_async
+        await transformation_obj._run_dependencies_async(require_value=True)
+        if transformation_obj.exception is not None:
+            raise RuntimeError(transformation_obj.exception)
         return constructor_sync(transformation_obj)
 
     def evaluator_sync(

@@ -89,6 +89,15 @@ class PreTransformation:
 
     # --- helpers --------------------------------------------------------------
     def _prepare_pin_value(self, argname: str, value, celltype: str):
+        # Convert upstream Transformation dependencies into their result checksum.
+        # Dependencies are ensured to have been computed earlier.
+        from .transformation_class import Transformation
+
+        if isinstance(value, Transformation):
+            if value.exception is not None:
+                msg = f"Dependency '{argname}' has an exception:\n{value.exception}"
+                raise RuntimeError(msg)
+            return value.result_checksum
         if argname == "code":
             return self._prepare_code(value)
         checksum = self._to_checksum(value, celltype)
