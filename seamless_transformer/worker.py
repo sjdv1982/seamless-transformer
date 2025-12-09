@@ -40,6 +40,7 @@ _primitives_patched = False
 _dummy_buffer_cache = None
 _transformer_registry: Dict[str, Any] = {}
 _quiet = False
+_DEBUG_SHUTDOWN = bool(os.environ.get("SEAMLESS_DEBUG_SHUTDOWN"))
 
 
 def _memory_provider(_key: str) -> None:
@@ -337,6 +338,13 @@ class _WorkerManager:
         await asyncio.gather(*(h.wait_until_ready() for h in self._handles))
 
     def close(self, *, wait: bool = False) -> None:
+        if _DEBUG_SHUTDOWN:
+            print(
+                f"[_WorkerManager.close] start wait={wait}",
+                file=sys.stderr,
+                flush=True,
+            )
+
         def _run_coro(factory, timeout: float) -> None:
             try:
                 coro = factory()
@@ -351,8 +359,24 @@ class _WorkerManager:
                 except Exception:
                     pass
 
+        if _DEBUG_SHUTDOWN:
+            print(
+                "[_WorkerManager.close] shutting down manager", file=sys.stderr, flush=True
+            )
         _run_coro(lambda: self._manager.aclose(), 3.0 if wait else 0.5)
+        if _DEBUG_SHUTDOWN:
+            print(
+                "[_WorkerManager.close] manager closed, shutting down asyncgens",
+                file=sys.stderr,
+                flush=True,
+            )
         _run_coro(lambda: self.loop.shutdown_asyncgens(), 1.0 if wait else 0.2)
+        if _DEBUG_SHUTDOWN:
+            print(
+                "[_WorkerManager.close] asyncgens closed, shutting down executor",
+                file=sys.stderr,
+                flush=True,
+            )
         _run_coro(lambda: self.loop.shutdown_default_executor(), 1.0 if wait else 0.2)
         try:
             self.loop.call_soon_threadsafe(self.loop.stop)
@@ -366,6 +390,10 @@ class _WorkerManager:
             self._executor.shutdown(wait=wait, cancel_futures=True)
         except Exception:
             pass
+        if _DEBUG_SHUTDOWN:
+            print(
+                "[_WorkerManager.close] finished", file=sys.stderr, flush=True
+            )
 
     def _select_handle(self):
         if not self._handles:
