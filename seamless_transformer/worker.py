@@ -387,7 +387,7 @@ class _WorkerManager:
         except Exception:
             pass
         try:
-            self._executor.shutdown(wait=wait, cancel_futures=True)
+            self._executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
         if _DEBUG_SHUTDOWN:
@@ -626,6 +626,12 @@ class _WorkerManager:
 
 def spawn(num_workers: Optional[int] = None) -> None:
     global _worker_manager
+    if _DEBUG_SHUTDOWN:
+        print(
+            f"[worker.spawn] entry has_spawned={has_spawned()} manager={_worker_manager}",
+            file=sys.stderr,
+            flush=True,
+        )
     proc = mp.current_process()
     if proc is not None and proc.name != "MainProcess":
         # Child interpreter re-imported __main__: just no-op to avoid recursive spawns.
@@ -640,6 +646,12 @@ def spawn(num_workers: Optional[int] = None) -> None:
     worker_count = num_workers or (os.cpu_count() or 1)
     _worker_manager = _WorkerManager(worker_count)
     _set_has_spawned(True)
+    if _DEBUG_SHUTDOWN:
+        print(
+            f"[worker.spawn] spawned manager={_worker_manager} workers={worker_count}",
+            file=sys.stderr,
+            flush=True,
+        )
     return None
 
 

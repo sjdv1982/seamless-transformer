@@ -6,6 +6,7 @@ import asyncio
 import logging
 import multiprocessing as mp
 import os
+import sys
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
 from typing import Any, Callable, Dict, Optional
@@ -235,6 +236,18 @@ class ProcessManager:
                 return
 
     async def _handle_worker_failure(self, handle: ProcessHandle, reason: str) -> None:
+        seamless_mod = sys.modules.get("seamless")
+        if seamless_mod is not None and reason == "connection closed":
+            if getattr(seamless_mod, "_closing", False) or getattr(
+                seamless_mod, "_closed", False
+            ):
+                return
+        if os.environ.get("SEAMLESS_DEBUG_SHUTDOWN"):
+            print(
+                f"[ProcessManager] worker failure {handle.name}: reason={reason} closing={self._closing} handle.closing={getattr(handle, 'closing', None)} restart={getattr(handle, 'restart', None)}",
+                file=sys.stderr,
+                flush=True,
+            )
         if handle.restarting or handle.closing or self._closing:
             return
         if not handle.restart:

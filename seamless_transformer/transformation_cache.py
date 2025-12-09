@@ -97,6 +97,9 @@ class TransformationCache:
                     return remote_result
 
         execution = get_execution()
+        _debug(
+            f"execution={execution} has_spawned={worker.has_spawned()} is_worker={is_worker()}"
+        )
         if execution == "remote":
             if jobserver_remote is None:
                 raise RuntimeError(
