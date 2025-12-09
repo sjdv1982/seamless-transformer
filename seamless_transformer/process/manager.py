@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Optional
 from .channel import ChildChannel, Endpoint, ConnectionClosed
 from .shared_memory import SharedMemoryRegistry
 from .utils import run_handler
+from seamless.util.get_event_loop import get_event_loop
 
 
 def _select_context() -> mp.context.BaseContext:
@@ -94,7 +95,7 @@ class ProcessManager:
         health_check_timeout: float = 1.0,
         default_initializer: Optional[Callable[[ChildChannel], Any]] = None,
     ) -> None:
-        self.loop = loop or asyncio.get_event_loop()
+        self.loop = loop or get_event_loop()
         self.memory_registry = SharedMemoryRegistry(memory_provider)
         self.health_check_interval = health_check_interval
         self.health_check_timeout = health_check_timeout
@@ -316,7 +317,7 @@ def _worker_bootstrap(
 async def _child_main(
     conn: Connection, initializer: Optional[Callable[[ChildChannel], Any]]
 ) -> None:
-    loop = asyncio.get_event_loop()
+    loop = get_event_loop()
     endpoint = Endpoint(conn, loop=loop, name=f"child[{os.getpid()}]")
     channel = ChildChannel(endpoint)
 

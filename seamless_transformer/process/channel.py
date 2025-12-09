@@ -12,6 +12,7 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from .utils import run_handler
+from seamless.util.get_event_loop import get_event_loop
 
 
 class ConnectionClosed(RuntimeError):
@@ -29,7 +30,7 @@ class Endpoint:
         name: Optional[str] = None,
     ) -> None:
         self._conn = conn
-        self._loop = loop or asyncio.get_event_loop()
+        self._loop = loop or get_event_loop()
         self._logger = logging.getLogger(__name__)
         self._name = name or f"endpoint-{id(self):x}"
         self._pending: Dict[int, asyncio.Future[Any]] = {}

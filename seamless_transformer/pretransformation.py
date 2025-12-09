@@ -208,6 +208,9 @@ def direct_transformer_to_pretransformation(
     for pinname, pin in tf_pins.items():
         if pinname == "result":
             continue
+        if pinname not in arguments2:
+            # optional arg
+            continue
         value = arguments2[pinname]
         pretransformation_dict[pinname] = (
             pin["celltype"],

@@ -159,6 +159,8 @@ class Transformation:
             loop = get_event_loop()
             self.start(loop=loop)
             for depname, dep in self._upstream_dependencies.items():
+                dep.start(loop=loop)
+            for depname, dep in self._upstream_dependencies.items():
                 dep.compute()
                 if dep.exception is not None:
                     msg = "Dependency '{}' has an exception:\n{}"

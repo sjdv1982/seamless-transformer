@@ -9,7 +9,7 @@ import inspect
 import pickle
 from seamless import Checksum, Buffer, CacheMissError, ensure_open
 from .pretransformation import direct_transformer_to_pretransformation
-from .transformation_class import transformation_from_pretransformation
+from .transformation_class import Transformation, transformation_from_pretransformation
 from .transformation_cache import run_sync
 from .transformation_utils import unpack_deep_structure, is_deep_celltype, tf_get_buffer
 from . import worker
@@ -145,17 +145,12 @@ class Transformer:
 
         ensure_open("transformer call")
         arguments = self._signature.bind(*args, **kwargs).arguments
-        deps = {}
-        """
-        STUB
-        for argname, arg in arguments.items():
-            if isinstance(arg, Transformation):
-                deps[argname] = arg
-
-        env = self._environment._to_lowlevel()
-        /STUB
-        """
-        env = None
+        deps = {
+            argname: arg
+            for argname, arg in arguments.items()
+            if isinstance(arg, Transformation)
+        }
+        env = None  # environment handling not ported
 
         result_celltype = self.celltypes["result"]
         meta = deepcopy(self._meta)
@@ -183,6 +178,8 @@ class Transformer:
                 scratch=self.scratch,
             )
         else:
+            for depname, dep in deps.items():
+                dep.start()
             for depname, dep in deps.items():
                 dep.compute()
                 if dep.exception is not None:
