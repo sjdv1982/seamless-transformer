@@ -1,6 +1,5 @@
 from tqdm import tqdm
-from seamless_transformer import direct, delayed
-from seamless_transformer.worker import spawn
+from seamless.transformer import direct, delayed, spawn
 
 import seamless.config
 import seamless
@@ -35,7 +34,7 @@ if __name__ == "__main__":
     print("START3")
     print(func(100 * OFFSET + 5, 18, DELAY))
 
-    func2 = func.copy(return_transformation=True)
+    func2 = delayed(func)
 
     print("ITER")
     for a in tqdm(list(range(16))):

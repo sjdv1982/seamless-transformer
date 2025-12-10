@@ -90,6 +90,7 @@ class Endpoint:
                     if (
                         self._loop.is_closed()
                         or "after interpreter shutdown" in str(exc).lower()
+                        or "shutdown has been called" in str(exc).lower()
                     ):
                         break
                     raise

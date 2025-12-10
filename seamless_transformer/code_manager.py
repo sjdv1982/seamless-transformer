@@ -100,7 +100,9 @@ class CodeManager:
         if semantic_checksum is None:
             return
         sem_key = semantic_checksum.hex()
-        self._semantic_guard_refs[sem_key] = self._semantic_guard_refs.get(sem_key, 0) + 1
+        self._semantic_guard_refs[sem_key] = (
+            self._semantic_guard_refs.get(sem_key, 0) + 1
+        )
         self._update_semantic_state(sem_key, semantic_checksum)
 
     def decref_syntactic(self, checksum) -> None:
@@ -147,9 +149,9 @@ class CodeManager:
     # --- activity management --------------------------------------------------
     def _update_syntactic_state(self, key: str, checksum: Checksum) -> None:
         """Ensure syntactic checksum incref/decref matches combined refcounts."""
-        total = self._syntactic_direct_refs.get(key, 0) + self._syntactic_guard_refs.get(
+        total = self._syntactic_direct_refs.get(
             key, 0
-        )
+        ) + self._syntactic_guard_refs.get(key, 0)
         active = key in self._syntactic_active
         if total > 0 and not active:
             checksum.incref()

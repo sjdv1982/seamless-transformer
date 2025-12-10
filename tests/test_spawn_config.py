@@ -3,7 +3,7 @@ import time
 import asyncio
 
 from seamless.transformer import direct, delayed
-import seamless_config
+import seamless.config
 
 DELAY = 0.5
 N = 40  # make this no bigger than the WORKERS, or increase PARALLEL_FACTOR
@@ -23,8 +23,8 @@ def _close_seamless_session():
 
 
 def test_spawn_config():
-    seamless_config.set_stage("spawn-config")
-    seamless_config.init()
+    seamless.config.set_stage("spawn-config")
+    seamless.config.init()
 
     @delayed
     def func(a, b, delay):

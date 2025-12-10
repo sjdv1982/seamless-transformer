@@ -1,6 +1,6 @@
 import seamless
 from seamless.transformer import direct, delayed
-from seamless.transformer.worker import spawn
+from seamless.transformer import spawn
 
 if __name__ == "__main__":
 

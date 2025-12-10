@@ -9,7 +9,7 @@ def test_transformation():
     """Test various forms of transformation execution"""
 
     @direct
-    def func(a, b, delay):
+    def func(a, b, delay) -> int:
         import time
         from seamless.transformer import global_lock
 
@@ -20,8 +20,10 @@ def test_transformation():
 
     assert func(30, 12, 0) == 324
     assert func(40, 2, 0) == 404
+    x = func(1, 2, 3)
+    assert x == 14
 
-    func2 = func.copy(return_transformation=True)
+    func2 = delayed(func)
     start = time.perf_counter()
 
     result1 = func2(3, 12, DELAY).run()
@@ -41,7 +43,8 @@ def test_transformation():
     start = time.perf_counter()
     tfs = [func2(n, -1, DELAY) for n in range(4)]
     for tf in tfs:
-        print(tf.run())
+        y = tf.run()
+        print(y)
     duration1 = time.perf_counter() - start
     print(duration1)
     assert 4 * DELAY < duration1 < 4 * DELAY + 1, duration1

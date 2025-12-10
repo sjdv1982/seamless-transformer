@@ -1,7 +1,8 @@
 import os
 import pytest
 
-from seamless.transformer import direct, delayed, worker
+from seamless.transformer import direct, delayed
+from seamless_transformer import worker
 
 
 def _close_worker_manager():

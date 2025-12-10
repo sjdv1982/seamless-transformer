@@ -1,94 +1,100 @@
 """Wrap a function in a Seamless transformer."""
 
-from copy import deepcopy
-from functools import update_wrapper
+from __future__ import annotations
+
 import inspect
 import pickle
-from seamless import Checksum, Buffer, CacheMissError, ensure_open
+from copy import deepcopy
+from functools import update_wrapper
+from typing import Callable, Generic, ParamSpec, TypeVar, cast
+
+from seamless import Checksum, Buffer, ensure_open
 from .pretransformation import direct_transformer_to_pretransformation
 from .transformation_class import Transformation, transformation_from_pretransformation
-from .transformation_cache import run_sync
 from .transformation_utils import unpack_deep_structure, is_deep_celltype, tf_get_buffer
+from .transformation_cache import run_sync
 from . import worker
-import multiprocessing as mp
-import sys
 
 
-def direct(func) -> "Transformer":
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def direct(func: Callable[P, R]) -> Callable[P, R]:
     """Execute immediately, returning the result value."""
 
-    result = Transformer(
-        func,
-        scratch=False,
-        direct_print=False,
-        local=False,
-        return_transformation=False,
-    )
+    if isinstance(func, Transformer):
+        result = DirectTransformer.__new__(DirectTransformer)
+        for k, v in func.__dict__.items():
+            setattr(result, k, v)
+    else:
+        result = DirectTransformer(func, scratch=False, direct_print=False, local=False)
     update_wrapper(result, func)
     return result
 
 
-def delayed(func) -> "Transformer":
+def delayed(func: Callable[P, R]) -> "Transformer[P, R]":
     """Return a Transformation object that can be executed later."""
 
-    result = Transformer(
-        func,
-        scratch=False,
-        direct_print=False,
-        local=False,
-        return_transformation=True,
-    )
+    if isinstance(func, Transformer):
+        result = Transformer.__new__(Transformer)
+        for k, v in func.__dict__.items():
+            setattr(result, k, v)
+    else:
+        result = Transformer(func, scratch=False, direct_print=False, local=False)
     update_wrapper(result, func)
     return result
 
 
-class Transformer:
+class Transformer(Generic[P, R]):
     """Transformer.
     Transformers can be called as normal functions, but
     the source code of the function and the arguments are converted
-    into a Seamless transformation. Doing so imports seamless.workflow."""
+    into a Seamless Transformation that is returned."""
 
-    def __init__(self, func, *, scratch, direct_print, local, return_transformation):
+    def __init__(
+        self,
+        func: Callable[P, R],
+        *,
+        scratch: bool,
+        direct_print: bool,
+        local: bool,
+    ):
         """Transformer.
         Transformers can be called as normal functions, but
         the source code of the function and the arguments are converted
-        into a Seamless transformation. Doing so imports seamless.workflow.
+        into a Seamless Transformation that is returned.
 
-        Parameters:
+            Parameters:
 
-        - local. If True, transformations are executed in the local
-                    Seamless instance.
-                If False (default), they are executed remotely if possible.
+            - local. If True, transformations are executed in the local
+                        Seamless instance.
+                    If False (default), they are executed remotely if possible.
 
-        - return_transformation.
-                If False (default), calling the function executes it immediately,
-                    returning its value.
-                If True, it returns a Transformation object.
-
-        - scratch.
-                If True, only the checksum is preserved. This is for cases where
-                  the result is bulky, but can be recomputed easily
-                If False (default), the buffers are preserved, so that the value
-                  can be accessed if needed.
+            - scratch.
+                    If True, only the checksum is preserved. This is for cases where
+                      the result is bulky, but can be recomputed easily
+                    If False (default), the buffers are preserved, so that the value
+                      can be accessed if needed.
 
 
-        - direct_print: If True, it is attempted to print stdout and stderr
-                while the transformation runs.
+            - direct_print: If True, it is attempted to print stdout and stderr
+                    while the transformation runs.
 
-        Attributes:
+            Attributes:
 
-        - meta. Accesses all meta-information (including local)
+            - meta. Accesses all meta-information (including local)
 
-        - celltypes. Returns a wrapper where you can set the celltypes
-                of the individual transformer pins.
-            The syntax is: Transformer.celltypes.a = "text"
-            (or Transformer.celltypes["a"] = "text")
-            for pin "a".
+            - celltypes. Returns a wrapper where you can set the celltypes
+                    of the individual transformer pins.
+                The syntax is: Transformer.celltypes.a = "text"
+                (or Transformer.celltypes["a"] = "text")
+                for pin "a".
 
-        - modules: Returns a wrapper where you can define Python modules
-            to be imported into the transformation
+            - modules: Returns a wrapper where you can define Python modules
+                to be imported into the transformation
 
-        - environment  ...
+            - environment  ...
 
         """
         from .getsource import getsource
@@ -97,7 +103,6 @@ class Transformer:
         codebuf = Buffer(code, "python")
 
         signature = inspect.signature(func)
-        self._return_transformation = return_transformation
         self._signature = signature
         self._codebuf = codebuf
         self._celltypes = {k: "mixed" for k in signature.parameters}
@@ -132,7 +137,7 @@ class Transformer:
     /STUB
     '''
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args, **kwargs) -> Transformation[R]:
         """
         from seamless.workflow.core.direct.module import get_module_definition
         """
@@ -164,51 +169,16 @@ class Transformer:
             self._codebuf, meta, self._celltypes, modules, arguments, env
         )
         tf_dunder = {"globals": self._collect_execution_globals()}
-        if self._return_transformation:
-            return transformation_from_pretransformation(
+        return cast(
+            Transformation[R],
+            transformation_from_pretransformation(
                 pre_transformation,
                 upstream_dependencies=deps,
                 meta=meta,
                 scratch=self.scratch,
                 tf_dunder=tf_dunder,
-            )
-        else:
-            for depname, dep in deps.items():
-                dep.start()
-            for depname, dep in deps.items():
-                dep.compute()
-                if dep.exception is not None:
-                    msg = "Dependency '{}' has an exception: {}"
-                    raise RuntimeError(msg.format(depname, dep.exception))
-
-            try:
-                pre_transformation.prepare_transformation()
-
-                ### increfed, tf_checksum = register_transformation_dict(pre_transformation.pretransformation_dict,)
-                tf_buffer = tf_get_buffer(pre_transformation.pretransformation_dict)
-                tf_buffer.tempref()
-                tf_checksum = tf_buffer.get_checksum()
-                result_checksum = run_sync(
-                    pre_transformation.pretransformation_dict,
-                    tf_checksum=tf_checksum,
-                    tf_dunder=tf_dunder,
-                    scratch=self.scratch,
-                    require_fingertip=True,
-                )
-            finally:
-                pre_transformation.release()
-            result_checksum = Checksum(result_checksum)
-            if not result_checksum:
-                raise RuntimeError("Result is empty")
-            buf = result_checksum.resolve()
-            assert isinstance(buf, Buffer)
-            target_celltype = result_celltype
-            if result_celltype == "folder":
-                target_celltype = "plain"
-            value = buf.get_value(target_celltype)
-            if is_deep_celltype(result_celltype):
-                value = unpack_deep_structure(value, result_celltype)
-            return value
+            ),
+        )
 
     @property
     def meta(self):
@@ -257,40 +227,6 @@ class Transformer:
     def local(self, value: bool | None):
         self.meta["local"] = value
 
-    @property
-    def return_transformation(self) -> bool:
-        """If True, calling this Transformer returns a Transformation object.
-        Otherwise, calling causes a direct transformation execution, returning its result.
-        """
-        return self._return_transformation
-
-    @return_transformation.setter
-    def return_transformation(self, value: bool):
-        self._return_transformation = value
-
-    def copy(
-        self,
-        scratch=None,
-        direct_print=None,
-        local=None,
-        return_transformation=False,
-    ):
-        """Make a copy of the Transformer.
-
-        If other parameters are provided, their attributes on the copy
-        are set to the provided value.
-        """
-        transformer = deepcopy(self)
-        if scratch is not None:
-            transformer.scratch = scratch
-        if direct_print is not None:
-            transformer.direct_print = direct_print
-        if local is not None:
-            transformer.local = local
-        if return_transformation is not None:
-            transformer.return_transformation = return_transformation
-        return transformer
-
     def _collect_execution_globals(self) -> dict[str, object]:
         func = getattr(self, "__wrapped__", None)
         if func is None or not hasattr(func, "__code__"):
@@ -324,6 +260,82 @@ class Transformer:
                         pass
                 globals_map[name] = value
         return globals_map
+
+
+class DirectTransformer(Transformer[P, R]):
+    """Transformer that can be called and gives an immediate result"""
+
+    def __call__(self, *args, **kwargs) -> R:
+        """
+        from seamless.workflow.core.direct.module import get_module_definition
+        """
+
+        ensure_open("transformer call")
+        arguments = self._signature.bind(*args, **kwargs).arguments
+        deps = {
+            argname: arg
+            for argname, arg in arguments.items()
+            if isinstance(arg, Transformation)
+        }
+        env = None  # environment handling not ported
+
+        result_celltype = self.celltypes["result"]
+        meta = deepcopy(self._meta)
+        modules = {}
+        """
+        STUB
+        for module_name, module in self._modules.items():
+            if isinstance(module, dict):
+                module_definition = module
+            else:
+                module_definition = get_module_definition(module)
+            modules[module_name] = module_definition
+        /STUB
+        """
+
+        pre_transformation = direct_transformer_to_pretransformation(
+            self._codebuf, meta, self._celltypes, modules, arguments, env
+        )
+        tf_dunder = {"globals": self._collect_execution_globals()}
+
+        # up to here, identical to the base class
+
+        for depname, dep in deps.items():
+            dep.start()
+        for depname, dep in deps.items():
+            dep.compute()
+            if dep.exception is not None:
+                msg = "Dependency '{}' has an exception: {}"
+                raise RuntimeError(msg.format(depname, dep.exception))
+
+        try:
+            pre_transformation.prepare_transformation()
+
+            ### increfed, tf_checksum = register_transformation_dict(pre_transformation.pretransformation_dict,)
+            tf_buffer = tf_get_buffer(pre_transformation.pretransformation_dict)
+            tf_buffer.tempref()
+            tf_checksum = tf_buffer.get_checksum()
+            result_checksum = run_sync(
+                pre_transformation.pretransformation_dict,
+                tf_checksum=tf_checksum,
+                tf_dunder=tf_dunder,
+                scratch=self.scratch,
+                require_fingertip=True,
+            )
+        finally:
+            pre_transformation.release()
+        result_checksum = Checksum(result_checksum)
+        if not result_checksum:
+            raise RuntimeError("Result is empty")
+        buf = result_checksum.resolve()
+        assert isinstance(buf, Buffer)
+        target_celltype = result_celltype
+        if result_celltype == "folder":
+            target_celltype = "plain"
+        value = buf.get_value(target_celltype)
+        if is_deep_celltype(result_celltype):
+            value = unpack_deep_structure(value, result_celltype)
+        return value
 
 
 class CelltypesWrapper:

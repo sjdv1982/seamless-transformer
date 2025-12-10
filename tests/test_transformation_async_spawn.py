@@ -3,7 +3,7 @@ import time
 import asyncio
 
 from seamless.transformer import direct, delayed
-from seamless.transformer.worker import spawn, has_spawned
+from seamless.transformer import spawn, has_spawned
 
 DELAY = 0.5
 WORKERS = 8  # make this no bigger than #cores on your system

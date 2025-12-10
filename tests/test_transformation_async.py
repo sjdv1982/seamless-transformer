@@ -15,7 +15,7 @@ def test_transformation_async():
 
         with global_lock:
             time.sleep(delay)
-        return 10 * a + 2 * b + 0
+        return 2 * b + 10 * a
 
     async def main():
         tasks = [func(n, -1, DELAY).task() for n in range(N)]

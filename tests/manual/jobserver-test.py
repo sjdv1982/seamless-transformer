@@ -1,11 +1,10 @@
 import seamless
-import seamless_config
-from seamless import Buffer
+import seamless.config
 from seamless.transformer import direct, delayed
 from seamless_config.select import get_execution
 
-seamless_config.set_stage("jobserver-test")
-seamless_config.init()
+seamless.config.set_stage("jobserver-test")
+seamless.config.init()
 
 
 @delayed
@@ -29,7 +28,7 @@ print(tf.transformation_checksum)
 print(tf.run())
 
 KEY = 1  # change this to enforce cache misses
-func = func.copy(return_transformation=False)
+func = direct(func)
 for n in range(10):
     print(n, func(n, -KEY))
 

@@ -137,9 +137,7 @@ class PreTransformation:
         checksum = self._to_checksum(value, celltype)
         return checksum
 
-    def _prepare_pin_value_for_dask(
-        self, argname: str, value, celltype: str
-    ):
+    def _prepare_pin_value_for_dask(self, argname: str, value, celltype: str):
         """Like `_prepare_pin_value` but leaves dependencies unresolved."""
         from .transformation_class import Transformation
 

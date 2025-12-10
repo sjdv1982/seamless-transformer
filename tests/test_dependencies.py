@@ -1,6 +1,7 @@
 import pytest
 
-from seamless.transformer import direct, delayed, worker
+from seamless.transformer import direct, delayed
+from seamless_transformer import worker
 
 
 def _close_worker_manager():
@@ -27,8 +28,8 @@ def temporary_spawned_workers():
 def _test_dependencies(offset, is_parallel):
     import time
 
-    @direct
-    def slow_add(a, b, c=None, d=None, e=None):
+    @delayed
+    def slow_add_delayed(a, b, c=None, d=None, e=None):
         import time
         from seamless.transformer import global_lock
 
@@ -36,7 +37,7 @@ def _test_dependencies(offset, is_parallel):
             time.sleep(1)
         return sum([x for x in (a, b, c, d, e) if x is not None])
 
-    slow_add_delayed = slow_add.copy(return_transformation=True)
+    slow_add = direct(slow_add_delayed)
 
     @direct
     def fast_add(a, b, c=None, d=None, e=None):
@@ -44,7 +45,7 @@ def _test_dependencies(offset, is_parallel):
 
     assert fast_add(10, 20) == 30
 
-    fast_add_delayed = fast_add.copy(return_transformation=True)
+    fast_add_delayed = delayed(fast_add)
     print()
 
     start = time.perf_counter()

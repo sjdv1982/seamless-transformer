@@ -1,6 +1,6 @@
 from .transformer_class import direct, delayed
 from .transformation_class import Transformation
-from .worker import spawn, shutdown_workers, has_spawned
+from .worker import spawn, has_spawned
 import threading
 
 global_lock = (
@@ -12,7 +12,6 @@ __all__ = [
     "delayed",
     "Transformation",
     "spawn",
-    "shutdown_workers",
     "has_spawned",
     "global_lock",
 ]

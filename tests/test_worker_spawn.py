@@ -2,8 +2,7 @@ import os
 
 import pytest
 
-from seamless.transformer import direct, delayed
-from seamless.transformer.worker import has_spawned, spawn
+from seamless.transformer import direct, delayed, has_spawned, spawn
 
 
 @pytest.fixture(scope="session")

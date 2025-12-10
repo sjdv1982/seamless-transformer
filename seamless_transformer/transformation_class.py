@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import traceback
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Dict, Generic, Optional, TYPE_CHECKING, TypeVar
 
 from seamless import Checksum, Buffer, ensure_open
 from seamless.util.get_event_loop import get_event_loop
@@ -37,6 +37,9 @@ except Exception:  # pragma: no cover - allow operation without seamless-dask
     def get_dask_client():
         return None
 
+T = TypeVar("T")
+
+
 if TYPE_CHECKING:
     from .pretransformation import PreTransformation
     from seamless_dask.client import SeamlessDaskClient
@@ -46,7 +49,7 @@ class TransformationError(RuntimeError):
     pass
 
 
-class Transformation(TransformationDaskMixin):
+class Transformation(TransformationDaskMixin, Generic[T]):
     """Resolve and evaluate transformation checksums, sync or async.
 
     Lifecycle:
@@ -362,18 +365,18 @@ class Transformation(TransformationDaskMixin):
         return buf
 
     @property
-    def value(self):
+    def value(self) -> T:
         buf = self.buffer
         return buf.get_value(self.celltype)
 
-    async def _run(self):
+    async def _run(self) -> T:
         await self.computation(require_value=True)
         checksum = self.result_checksum  # Will raise an exception if there is one
         buf = await checksum.resolution()
         assert isinstance(buf, Buffer)
         return await buf.get_value_async(self.celltype)
 
-    def task(self) -> asyncio.Task:
+    def task(self) -> asyncio.Task[T]:
         """Create a Task Run the transformation and returns the result,
 
         First runs .compute, then resolve the result checksum into a value.
@@ -381,7 +384,7 @@ class Transformation(TransformationDaskMixin):
         ensure_open("transformation task")
         return get_event_loop().create_task(self._run())
 
-    def run(self):
+    def run(self) -> T:
         """Run the transformation and returns the result,
 
         First runs .compute, then resolve the result checksum into a value.
@@ -436,7 +439,7 @@ def transformation_from_pretransformation(
     meta: dict,
     scratch: bool,
     tf_dunder: dict | None = None,
-) -> Transformation:
+) -> Transformation[T]:
     """Build a Transformation from a PreTransformation"""
     from .transformation_utils import tf_get_buffer
     from .transformation_cache import run_sync, run

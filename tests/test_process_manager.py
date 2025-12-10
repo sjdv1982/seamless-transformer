@@ -12,7 +12,7 @@ PROJECT_ROOT = os.path.dirname(TESTS_DIR)
 
 import pytest
 
-from seamless.transformer.process import ChildChannel, MemoryPayload, ProcessManager
+from seamless_transformer.process import ChildChannel, MemoryPayload, ProcessManager
 
 
 def run(coro):

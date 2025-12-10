@@ -1,4 +1,4 @@
-from seamless.transformer.util import in_spawned_main_toplevel, is_spawned
+from seamless_transformer.util import in_spawned_main_toplevel, is_spawned
 
 
 def func():
