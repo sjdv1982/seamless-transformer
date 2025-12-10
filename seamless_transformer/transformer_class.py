@@ -170,6 +170,7 @@ class Transformer:
                 upstream_dependencies=deps,
                 meta=meta,
                 scratch=self.scratch,
+                tf_dunder=tf_dunder,
             )
         else:
             for depname, dep in deps.items():

@@ -87,6 +87,40 @@ class PreTransformation:
             # Suppress destructor errors
             pass
 
+    def build_partial_transformation(
+        self, upstream_dependencies: Optional[Dict[str, "Transformation"]] = None
+    ) -> tuple[Dict[str, Any], Dict[str, "Transformation"]]:
+        """Prepare a transformation dict, keeping upstream transformations unresolved.
+
+        Non-transformation inputs are converted to checksums, while dependencies are
+        left as placeholders so they can be resolved lazily by a Dask client.
+        """
+        from .transformation_class import Transformation
+
+        tf_dict: Dict[str, Any] = {}
+        dependencies: Dict[str, Transformation] = {}
+        upstream_dependencies = upstream_dependencies or {}
+        for argname in list(self._pretransformation_dict.keys()):
+            raw_value = self._pretransformation_dict[argname]
+            if argname in NON_CHECKSUM_ITEMS:
+                tf_dict[argname] = raw_value
+                continue
+            celltype, subcelltype, value = raw_value
+            prepared_value = self._prepare_pin_value_for_dask(argname, value, celltype)
+            if isinstance(prepared_value, Transformation):
+                dependency = upstream_dependencies.get(argname, prepared_value)
+                dependencies[argname] = dependency
+                tf_dict[argname] = (celltype, subcelltype, None)
+                continue
+            if isinstance(prepared_value, Checksum):
+                prepared_value = prepared_value.hex()
+            tf_dict[argname] = (celltype, subcelltype, prepared_value)
+        if "__code_checksum__" in self._pretransformation_dict:
+            tf_dict["__code_checksum__"] = self._pretransformation_dict[
+                "__code_checksum__"
+            ]
+        return tf_dict, dependencies
+
     # --- helpers --------------------------------------------------------------
     def _prepare_pin_value(self, argname: str, value, celltype: str):
         # Convert upstream Transformation dependencies into their result checksum.
@@ -102,6 +136,16 @@ class PreTransformation:
             return self._prepare_code(value)
         checksum = self._to_checksum(value, celltype)
         return checksum
+
+    def _prepare_pin_value_for_dask(
+        self, argname: str, value, celltype: str
+    ):
+        """Like `_prepare_pin_value` but leaves dependencies unresolved."""
+        from .transformation_class import Transformation
+
+        if isinstance(value, Transformation):
+            return value
+        return self._prepare_pin_value(argname, value, celltype)
 
     def _prepare_code(self, value) -> Checksum:
         code_buffer = value if isinstance(value, Buffer) else Buffer(value, "python")

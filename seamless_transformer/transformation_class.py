@@ -14,16 +14,39 @@ from typing import Dict, Optional, TYPE_CHECKING
 
 from seamless import Checksum, Buffer, ensure_open
 from seamless.util.get_event_loop import get_event_loop
+from .transformation_utils import tf_get_buffer
+try:  # Optional Dask integration
+    from seamless_dask.transformation_mixin import TransformationDaskMixin
+    from seamless_dask.transformer_client import get_dask_client
+except Exception:  # pragma: no cover - allow operation without seamless-dask
+    class TransformationDaskMixin:  # type: ignore
+        _dask_futures = None
+
+        def _dask_client(self):
+            raise RuntimeError("Dask integration is unavailable")
+
+        def _compute_with_dask(self, require_value: bool):
+            raise RuntimeError("Dask integration is unavailable")
+
+        async def _compute_with_dask_async(self, require_value: bool):
+            raise RuntimeError("Dask integration is unavailable")
+
+        def _ensure_dask_futures(self, *args, **kwargs):
+            raise RuntimeError("Dask integration is unavailable")
+
+    def get_dask_client():
+        return None
 
 if TYPE_CHECKING:
     from .pretransformation import PreTransformation
+    from seamless_dask.client import SeamlessDaskClient
 
 
 class TransformationError(RuntimeError):
     pass
 
 
-class Transformation:
+class Transformation(TransformationDaskMixin):
     """Resolve and evaluate transformation checksums, sync or async.
 
     Lifecycle:
@@ -49,6 +72,8 @@ class Transformation:
         *,
         destructor=None,
         meta=None,
+        pretransformation: "PreTransformation | None" = None,
+        tf_dunder: dict | None = None,
     ) -> None:
         self._result_celltype = result_celltype
         self._upstream_dependencies = (upstream_dependencies or {}).copy()
@@ -65,6 +90,9 @@ class Transformation:
         self._exception = None
         self._meta = meta
         self._destructor = destructor
+        self._pretransformation = pretransformation
+        self._tf_dunder = tf_dunder or {}
+        self._dask_futures: TransformationFutures | None = None
 
     @property
     def scratch(self) -> bool:
@@ -214,6 +242,9 @@ class Transformation:
         ensure_open("transformation compute")
         if self._evaluated:
             return self._result_checksum
+        dask_client = get_dask_client()
+        if dask_client is not None:
+            return self._compute_with_dask(require_value=True)
         if self._computation_task is None:
             task_loop = get_event_loop()
             self.start(loop=task_loop)
@@ -234,6 +265,9 @@ class Transformation:
         return self._result_checksum
 
     async def _computation(self, require_value: bool) -> Checksum | None:
+        dask_client = get_dask_client()
+        if dask_client is not None:
+            return await self._compute_with_dask_async(require_value=require_value)
         await self._run_dependencies_async(require_value=require_value)
         await self._evaluation(require_value=require_value)
         return self._result_checksum
@@ -249,6 +283,9 @@ class Transformation:
         (If only the checksum is available, the transformation will be recomputed.)
         """
         ensure_open("transformation computation")
+        dask_client = get_dask_client()
+        if dask_client is not None:
+            return await self._compute_with_dask_async(require_value=require_value)
         if self._computation_task is not None:
             await self._computation_task
             return self._result_checksum
@@ -271,6 +308,15 @@ class Transformation:
         ensure_open("transformation start")
         for _depname, dep in self._upstream_dependencies.items():
             dep.start()
+        dask_client = get_dask_client()
+        if dask_client is not None:
+            if self._computation_task is None:
+                loop = loop or get_event_loop()
+                self._computation_task = loop.create_task(
+                    self._compute_with_dask_async(require_value=True)
+                )
+                self._computation_task.add_done_callback(self._future_cleanup)
+            return self
         if self._computation_task is not None:
             return self
         loop = loop or get_event_loop()
@@ -389,12 +435,13 @@ def transformation_from_pretransformation(
     upstream_dependencies: dict,
     meta: dict,
     scratch: bool,
+    tf_dunder: dict | None = None,
 ) -> Transformation:
     """Build a Transformation from a PreTransformation"""
     from .transformation_utils import tf_get_buffer
     from .transformation_cache import run_sync, run
 
-    tf_dunder = {}
+    tf_dunder = tf_dunder or {}
 
     def constructor_sync(transformation_obj):  # pylint: disable=unused-argument
         nonlocal tf_dunder
@@ -406,7 +453,7 @@ def transformation_from_pretransformation(
         tf_checksum = tf_buffer.get_checksum()
         tf_buffer.tempref()
         ### tf_dunder = extract_dunder(pre_transformation.pretransformation_dict)
-        tf_dunder = {}  # TODO
+        # TODO: populate tf_dunder from transformation metadata if needed
 
         return tf_checksum
 
@@ -451,6 +498,8 @@ def transformation_from_pretransformation(
         upstream_dependencies=upstream_dependencies,
         meta=meta,
         destructor=destructor,
+        pretransformation=pre_transformation,
+        tf_dunder=tf_dunder,
     )
     tf.scratch = scratch
     return tf
