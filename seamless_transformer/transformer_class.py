@@ -6,7 +6,7 @@ import inspect
 import pickle
 from copy import deepcopy
 from functools import update_wrapper
-from typing import Callable, Generic, ParamSpec, TypeVar, cast
+from typing import Callable, Generic, ParamSpec, TypeVar, cast, overload
 
 from seamless import Checksum, Buffer, ensure_open
 from .pretransformation import direct_transformer_to_pretransformation
@@ -20,7 +20,17 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-def direct(func: Callable[P, R]) -> Callable[P, R]:
+@overload
+def direct(func: "Transformer[P, R]") -> "DirectTransformer[P, R]":
+    ...
+
+
+@overload
+def direct(func: Callable[P, R]) -> "DirectTransformer[P, R]":
+    ...
+
+
+def direct(func: Callable[P, R] | "Transformer[P, R]") -> "DirectTransformer[P, R]":
     """Execute immediately, returning the result value."""
 
     if isinstance(func, Transformer):

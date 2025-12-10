@@ -1,6 +1,6 @@
 import pytest
 
-from seamless.transformer import direct, delayed
+from seamless.transformer import direct, delayed, has_spawned, spawn
 from seamless_transformer import worker
 
 
@@ -17,8 +17,8 @@ def temporary_spawned_workers():
     """Spawn workers for the duration of a test and clean them up afterwards."""
 
     spawned_here = False
-    if not worker.has_spawned():
-        worker.spawn(3)
+    if not has_spawned():
+        spawn(3)
         spawned_here = True
     yield
     if spawned_here:
@@ -29,7 +29,7 @@ def _test_dependencies(offset, is_parallel):
     import time
 
     @delayed
-    def slow_add_delayed(a, b, c=None, d=None, e=None):
+    def slow_add_delayed(a, b, c=None, d=None, e=None) -> float:
         import time
         from seamless.transformer import global_lock
 
@@ -93,9 +93,9 @@ def _test_dependencies(offset, is_parallel):
 
 
 def test_dependencies_in_process():
-    if worker.has_spawned():
+    if has_spawned():
         _close_worker_manager()
-    assert not worker.has_spawned()
+    assert not has_spawned()
     _test_dependencies(1000, is_parallel=False)
 
 

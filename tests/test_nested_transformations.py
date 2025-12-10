@@ -1,7 +1,7 @@
 import os
 import pytest
 
-from seamless.transformer import direct, delayed
+from seamless.transformer import direct, delayed, has_spawned, spawn
 from seamless_transformer import worker
 
 
@@ -18,8 +18,8 @@ def temporary_spawned_workers():
     """Spawn workers for the duration of a test and clean them up afterwards."""
 
     spawned_here = False
-    if not worker.has_spawned():
-        worker.spawn(2)
+    if not has_spawned():
+        spawn(2)
         spawned_here = True
     yield
     if spawned_here:
@@ -37,9 +37,9 @@ def _canonical_result(value):
 
 
 def test_nested_transformations_cached_in_process():
-    if worker.has_spawned():
+    if has_spawned():
         _close_worker_manager()
-    assert not worker.has_spawned()
+    assert not has_spawned()
 
     @direct
     def inner(label):
