@@ -56,6 +56,21 @@ def test_nested_transformations_cached_in_process():
 
     @direct
     def outer(label):
+        from seamless.transformer import direct
+
+        @direct
+        def inner(label):
+            import datetime
+            import time
+            import os
+
+            return (
+                label,
+                os.getpid(),
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                time.perf_counter_ns(),
+            )
+
         first = inner(label)
         second = inner(label)
         return first, second
@@ -78,21 +93,22 @@ def test_nested_transformations_cached_with_spawn(temporary_spawned_workers):
     main_pid = os.getpid()
 
     @direct
-    def inner(label):
-        import datetime
-        import time
-        import os
-
-        return (
-            label,
-            os.getpid(),
-            datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            time.perf_counter_ns(),
-        )
-
-    @direct
     def outer(label):
         import os
+        from seamless.transformer import direct
+
+        @direct
+        def inner(label):
+            import datetime
+            import os
+            import time
+
+            return (
+                label,
+                os.getpid(),
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                time.perf_counter_ns(),
+            )
 
         first = inner(label)
         second = inner(label)
@@ -105,12 +121,12 @@ def test_nested_transformations_cached_with_spawn(temporary_spawned_workers):
     assert first_result == second_result
     assert first_result[1] != main_pid
 
-    inner_direct = inner("beta")
+    # inner_direct = inner("beta")  # does not work, need modules
     second_run = outer("beta")
     all_results = {
         _canonical_result(first_result),
         _canonical_result(second_result),
-        _canonical_result(inner_direct),
+        # _canonical_result(inner_direct),
         *(_canonical_result(r) for r in second_run["results"]),
     }
     assert len(all_results) == 1

@@ -53,9 +53,6 @@ def run_transformation_dict_in_process(
             flush=True,
         )
 
-    extra_globals = {}
-    if isinstance(tf_dunder, dict):
-        extra_globals = tf_dunder.get("globals", {}) or {}
     transformation: Dict[str, Any] = {}
     transformation.update(transformation_dict)
 
@@ -71,9 +68,24 @@ def run_transformation_dict_in_process(
     )
     tf_namespace = build_transformation_namespace_sync(transformation)
     code, namespace, modules_to_build, _ = tf_namespace
-
-    if extra_globals:
-        namespace.update(extra_globals)
+    if isinstance(code, str) and len(code) == 64:
+        # Defensive fallback: recover code text if a checksum hex string leaked through.
+        tf_dict_fallback = None
+        try:
+            tf_dict_fallback = tf_checksum.resolve(celltype="plain")
+        except Exception:
+            tf_dict_fallback = None
+        if isinstance(tf_dict_fallback, dict):
+            code_text = tf_dict_fallback.get("__code_text__")
+            if isinstance(code_text, str):
+                code = code_text
+        if isinstance(code, str) and len(code) == 64:
+            try:
+                buf = Checksum(code).resolve()
+                if buf is not None:
+                    code = buf.get_value("python")
+            except Exception:
+                pass
 
     module_workspace = {}
     """
@@ -163,7 +175,12 @@ def get_transformation_inputs_output(
             "__format__",
         ):
             continue
-        if pinname in ("__language__", "__output__", "__code_checksum__"):
+        if pinname in (
+            "__language__",
+            "__output__",
+            "__code_checksum__",
+            "__code_text__",
+        ):
             continue
         if pinname == "code":
             continue

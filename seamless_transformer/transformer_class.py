@@ -176,7 +176,7 @@ class Transformer(Generic[P, R]):
         pre_transformation = direct_transformer_to_pretransformation(
             self._codebuf, meta, self._celltypes, modules, arguments, env
         )
-        tf_dunder = {"globals": self._collect_execution_globals()}
+        tf_dunder = {}
         return cast(
             Transformation[R],
             transformation_from_pretransformation(
@@ -235,40 +235,6 @@ class Transformer(Generic[P, R]):
     def local(self, value: bool | None):
         self.meta["local"] = value
 
-    def _collect_execution_globals(self) -> dict[str, object]:
-        func = getattr(self, "__wrapped__", None)
-        if func is None or not hasattr(func, "__code__"):
-            return {}
-        names = set(func.__code__.co_freevars) | set(func.__code__.co_names)
-        closure_cells = dict(zip(func.__code__.co_freevars, func.__closure__ or []))
-        globals_map: dict[str, object] = {}
-        for name in names:
-            value = None
-            if name in closure_cells:
-                try:
-                    value = closure_cells[name].cell_contents
-                except ValueError:
-                    continue
-            elif name in func.__globals__:
-                value = func.__globals__[name]
-            if value is None:
-                continue
-            try:
-                pickle.dumps(value)
-                globals_map[name] = value
-                continue
-            except Exception:
-                pass
-            if isinstance(value, Transformer):
-                if worker.has_spawned():
-                    try:
-                        globals_map[name] = worker.register_transformer_proxy(value)
-                        continue
-                    except Exception:
-                        pass
-                globals_map[name] = value
-        return globals_map
-
 
 class DirectTransformer(Transformer[P, R]):
     """Transformer that can be called and gives an immediate result"""
@@ -304,7 +270,7 @@ class DirectTransformer(Transformer[P, R]):
         pre_transformation = direct_transformer_to_pretransformation(
             self._codebuf, meta, self._celltypes, modules, arguments, env
         )
-        tf_dunder = {"globals": self._collect_execution_globals()}
+        tf_dunder = {}
 
         # up to here, identical to the base class
 

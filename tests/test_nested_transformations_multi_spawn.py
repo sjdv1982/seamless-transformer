@@ -10,7 +10,7 @@ def test_nested_transformations_multi():
     """Stress nested + nested-nested execution with many small jobs."""
 
     main_pid = os.getpid()
-    job_count = 30
+    job_count = 100
     spawn_workers = 5
 
     spawn(spawn_workers)
@@ -30,8 +30,7 @@ def test_nested_transformations_multi():
                     import os
                     from seamless.transformer import global_lock
 
-                    with global_lock:
-                        time.sleep(0.5)
+                    time.sleep(0.5)
                     return label, os.getpid()
 
                 leaf = delayed(leaf)
@@ -68,7 +67,7 @@ def test_nested_transformations_multi():
 
         assert expected_labels == seen_labels
         assert len(seen_pids) >= 2  # should run on spawned workers
-        assert duration < 2 * job_count / (
+        assert duration < 0.5 * job_count / (
             spawn_workers * 0.5
         )  # should complete with reasonable (half of spawn workers) concurrency
     finally:

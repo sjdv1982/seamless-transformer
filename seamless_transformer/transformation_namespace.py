@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Any, Dict, Tuple
 
 from seamless import CacheMissError, Checksum
@@ -26,6 +28,7 @@ def build_transformation_namespace_sync(
     namespace["FILESYSTEM"] = {}
     code_manager = get_code_manager()
     fallback_syntactic = transformation.get("__code_checksum__")
+    fallback_code_text = transformation.get("__code_text__")
 
     for pinname in sorted(transformation.keys()):
         if pinname in (
@@ -37,7 +40,7 @@ def build_transformation_namespace_sync(
             "__format__",
         ):
             continue
-        if pinname in ("__language__", "__output__", "__code_checksum__"):
+        if pinname in ("__language__", "__output__", "__code_checksum__", "__code_text__"):
             continue
 
         celltype, subcelltype, checksum_value = transformation[pinname]
@@ -46,17 +49,63 @@ def build_transformation_namespace_sync(
 
         checksum = Checksum(checksum_value)
         if pinname == "code":
-            syntactic_options = code_manager.get_syntactic_checksums(checksum)
-            if not syntactic_options and fallback_syntactic:
-                syntactic_options = [Checksum(fallback_syntactic)]
-            checksum = syntactic_options[0] if syntactic_options else checksum
+            if fallback_syntactic:
+                checksum = Checksum(fallback_syntactic)
+            else:
+                syntactic_options = code_manager.get_syntactic_checksums(checksum)
+                if syntactic_options:
+                    checksum = syntactic_options[0]
 
-        buffer = checksum.resolve()
+        try:
+            buffer = checksum.resolve()
+        except Exception:
+            if pinname == "code" and fallback_code_text is not None:
+                code = fallback_code_text
+                continue
+            raise
         if buffer is None:
             raise CacheMissError(checksum.hex())
 
         if pinname == "code":
             value = buffer.get_value("python")
+            if isinstance(value, str) and len(value) == 64:
+                if os.environ.get("SEAMLESS_DEBUG_HEXCODE"):
+                    import pprint
+                    print(
+                        "[transformer code hex]",
+                        "fallback_syntactic",
+                        fallback_syntactic,
+                        "fallback_text",
+                        fallback_code_text is not None,
+                        "transformation_keys",
+                        sorted(transformation.keys()),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    pprint.pprint(transformation, stream=sys.stderr)
+                candidates: list[str] = []
+                if fallback_syntactic:
+                    candidates.append(fallback_syntactic)
+                candidates.append(value)
+                for candidate in candidates:
+                    try:
+                        buf2 = Checksum(candidate).resolve()
+                    except Exception:
+                        continue
+                    if buf2 is None:
+                        continue
+                    try:
+                        value = buf2.get_value("python")
+                    except Exception:
+                        continue
+                    break
+                else:
+                    raise CacheMissError(value)
+                if isinstance(value, str) and len(value) == 64:
+                    if fallback_code_text is not None:
+                        value = fallback_code_text
+                    else:
+                        raise CacheMissError(value)
             code = value
             continue
 

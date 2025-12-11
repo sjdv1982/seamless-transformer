@@ -70,7 +70,6 @@ def test_nested_transformations_multi():
 
         assert expected_labels == seen_labels
         assert len(seen_pids) >= 2  # should run on spawned workers
-        print("Duration!", duration)
         assert duration < 2 * job_count / (
             spawn_workers * 0.5
         )  # should complete with reasonable (half of spawn workers) concurrency

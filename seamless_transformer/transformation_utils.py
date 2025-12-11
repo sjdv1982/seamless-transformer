@@ -43,6 +43,9 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
             #      Maybe setup sem2syn messaging between spawn process and main, but probably YAGNI
             result[key] = value
             continue
+        if key == "__code_text__":
+            result[key] = value
+            continue
         if key.startswith("SPECIAL__"):
             continue
 

@@ -42,6 +42,7 @@ _transformer_registry: Dict[str, Any] = {}
 _quiet = False
 _DEBUG_SHUTDOWN = bool(os.environ.get("SEAMLESS_DEBUG_SHUTDOWN"))
 _DELEGATION_REFUSED = "_DELEGATION_REFUSED"
+_LOCAL_BUFFERS: Dict[str, bytes] = {}
 
 
 def _memory_provider(_key: str) -> None:
@@ -88,25 +89,6 @@ class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
             self._threads.add(t)
 
 
-class _TransformerProxy:
-    """Callable placeholder for Transformer globals used inside workers."""
-
-    def __init__(self, proxy_id: str) -> None:
-        self._proxy_id = proxy_id
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return _request_parent_sync(
-            "call_transformer_proxy",
-            {"proxy_id": self._proxy_id, "args": args, "kwargs": kwargs},
-        )
-
-
-def register_transformer_proxy(obj: Any) -> _TransformerProxy:
-    proxy_id = uuid.uuid4().hex
-    _transformer_registry[proxy_id] = obj
-    return _TransformerProxy(proxy_id)
-
-
 def has_spawned() -> bool:
     """Return True if workers have been spawned in this process."""
 
@@ -145,6 +127,11 @@ def _upload_buffer_to_parent(buf: Buffer, pointer: Dict[str, Any]) -> None:
 
 def _buffer_ref_op(buf: Buffer, op: str) -> None:
     checksum = buf.get_checksum()
+    try:
+        if op == "tempref" and len(buf.content) <= 1024 * 1024:
+            _LOCAL_BUFFERS[checksum.hex()] = bytes(buf.content)
+    except Exception:
+        pass
     response = _request_parent_sync(
         "ref_op",
         {
@@ -170,6 +157,12 @@ def _buffer_tempref(self: Buffer, **_kwargs: Any) -> None:
 
 
 def _checksum_resolve(self: Checksum, celltype=None):
+    data = _LOCAL_BUFFERS.get(self.hex())
+    if data is not None:
+        buf = Buffer(data, checksum=self)
+        if celltype is None:
+            return buf
+        return buf.get_value(celltype)
     pointer = _request_parent_sync("download", {"checksum": self.hex()})
     if not isinstance(pointer, dict):
         raise CacheMissError(self)
@@ -234,8 +227,30 @@ def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
     tf_checksum = Checksum(payload["tf_checksum"])
     scratch = bool(payload.get("scratch", False))
     tf_dunder = payload.get("tf_dunder", {}) or {}
+    transformation_dict = payload.get("transformation_dict")
     try:
-        transformation_dict = tf_checksum.resolve(celltype="plain")
+        if transformation_dict is None or "__code_text__" not in transformation_dict:
+            # Merge missing code text from the serialized transformation buffer if available.
+            try:
+                tf_dict_resolved = tf_checksum.resolve(celltype="plain")
+            except Exception:
+                tf_dict_resolved = None
+            if isinstance(tf_dict_resolved, dict):
+                if transformation_dict is None:
+                    transformation_dict = tf_dict_resolved
+                elif (
+                    "__code_text__" not in transformation_dict
+                    and "__code_text__" in tf_dict_resolved
+                ):
+                    transformation_dict = dict(transformation_dict)
+                    transformation_dict["__code_text__"] = tf_dict_resolved[
+                        "__code_text__"
+                    ]
+    except Exception:
+        pass
+    try:
+        if transformation_dict is None:
+            transformation_dict = tf_checksum.resolve(celltype="plain")
         result = run_transformation_dict_in_process(
             transformation_dict, tf_checksum, tf_dunder, scratch
         )
@@ -335,7 +350,7 @@ class _WorkerManager:
             handle = await self._manager.start_worker(name=f"worker-{idx + 1}")
             self._handles.append(handle)
             self._load[handle.name] = 0
-            self._limits[handle.name] = asyncio.Semaphore(2)
+            self._limits[handle.name] = asyncio.Semaphore(3)
         await asyncio.gather(*(h.wait_until_ready() for h in self._handles))
 
     def close(self, *, wait: bool = False) -> None:
@@ -362,7 +377,9 @@ class _WorkerManager:
 
         if _DEBUG_SHUTDOWN:
             print(
-                "[_WorkerManager.close] shutting down manager", file=sys.stderr, flush=True
+                "[_WorkerManager.close] shutting down manager",
+                file=sys.stderr,
+                flush=True,
             )
         _run_coro(lambda: self._manager.aclose(), 3.0 if wait else 0.5)
         if _DEBUG_SHUTDOWN:
@@ -407,9 +424,7 @@ class _WorkerManager:
         except Exception:
             pass
         if _DEBUG_SHUTDOWN:
-            print(
-                "[_WorkerManager.close] finished", file=sys.stderr, flush=True
-            )
+            print("[_WorkerManager.close] finished", file=sys.stderr, flush=True)
 
     def _select_handle(self):
         if not self._handles:
@@ -434,6 +449,7 @@ class _WorkerManager:
         self._load[handle.name] = self._load.get(handle.name, 0) + 1
         try:
             payload = {
+                "transformation_dict": transformation_dict,
                 "tf_checksum": Checksum(tf_checksum),
                 "tf_dunder": tf_dunder,
                 "scratch": scratch,
@@ -488,35 +504,56 @@ class _WorkerManager:
     ) -> Checksum | str:
         try:
             transformation_dict = payload.get("transformation_dict") or {}
-            meta = transformation_dict.get("__meta__") if isinstance(
-                transformation_dict, dict
-            ) else None
-            if not isinstance(meta, dict) or "local" not in meta:
-                raise RuntimeError("Delegated transformation has unset 'local' flag")
-            local = meta.get("local")
-            if local is None:
-                raise RuntimeError("Delegated transformation has unset 'local' flag")
+            meta = (
+                transformation_dict.get("__meta__")
+                if isinstance(transformation_dict, dict)
+                else None
+            )
+            local = False
+            if isinstance(meta, dict):
+                local = bool(meta.get("local", False))
             if local:
-                return _DELEGATION_REFUSED
-            use_dask = False
-            try:
-                from seamless_dask.transformer_client import get_dask_client
-
-                use_dask = get_dask_client() is not None
-            except Exception:
-                use_dask = False
-            if not use_dask:
                 return _DELEGATION_REFUSED
         except Exception:
             return traceback.format_exc()
         try:
-            result = await self._dispatch(
-                payload.get("transformation_dict"),
-                Checksum(payload["tf_checksum"]),
-                payload.get("tf_dunder", {}) or {},
-                bool(payload.get("scratch", False)),
-                enforce_limit=False,  # delegate requests bypass limit to avoid deadlock
-            )
+            transformation_dict = payload.get("transformation_dict")
+            tf_checksum = Checksum(payload["tf_checksum"])
+            tf_dunder = payload.get("tf_dunder", {}) or {}
+            scratch = bool(payload.get("scratch", False))
+            await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
+            # try to find a handle with available throttle; refuse only if all are at cap
+            result = None
+            tried: set[str] = set()
+            for _ in range(len(self._handles)):
+                handle = self._select_handle()
+                if handle.name in tried:
+                    continue
+                tried.add(handle.name)
+                await handle.wait_until_ready()
+                limit = self._limits.get(handle.name)
+                if limit is not None and limit.locked():
+                    continue
+                acquired = False
+                if limit is not None:
+                    await limit.acquire()
+                    acquired = True
+                self._load[handle.name] = self._load.get(handle.name, 0) + 1
+                try:
+                    payload2 = {
+                        "transformation_dict": transformation_dict,
+                        "tf_checksum": tf_checksum,
+                        "tf_dunder": tf_dunder,
+                        "scratch": scratch,
+                    }
+                    result = await handle.request("execute_transformation", payload2)
+                finally:
+                    self._load[handle.name] = max(0, self._load.get(handle.name, 0) - 1)
+                    if acquired and limit is not None:
+                        limit.release()
+                break
+            else:
+                return _DELEGATION_REFUSED
         except Exception:
             return traceback.format_exc()
         if isinstance(result, Checksum):
@@ -586,6 +623,12 @@ class _WorkerManager:
         checksum = Checksum(checksum_hex) if checksum_hex is not None else None
         buffer_obj = Buffer(data, checksum=checksum)
         checksum = buffer_obj.get_checksum()
+        try:
+            cache = get_buffer_cache()
+            cache.register(checksum, buffer_obj, size=len(data))
+            cache.incref(checksum, buffer_obj)
+        except Exception:
+            pass
         return {"checksum": checksum.hex()}
 
     async def _allocate_pointer(
@@ -753,9 +796,12 @@ async def forward_to_parent(
         "scratch": scratch,
     }
     result = await _request_parent_async("delegate_transformation", payload)
-    if result == _DELEGATION_REFUSED:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _execute_transformation, payload)
+    if isinstance(result, str):
+        if result == _DELEGATION_REFUSED:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, _execute_transformation, payload)
+        # any other string is an error/traceback
+        raise RuntimeError(result)
     return result
 
 

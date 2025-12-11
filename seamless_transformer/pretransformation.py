@@ -146,12 +146,28 @@ class PreTransformation:
         return self._prepare_pin_value(argname, value, celltype)
 
     def _prepare_code(self, value) -> Checksum:
+        # Allow passing a checksum hex / Checksum pointing to a code buffer.
+        if isinstance(value, (Checksum, str, bytes)) and not isinstance(value, Buffer):
+            try:
+                if isinstance(value, str) and len(value) != 64:
+                    raise ValueError
+                cs = Checksum(value)
+                buf = cs.resolve()
+                if isinstance(buf, Buffer):
+                    value = buf
+            except Exception:
+                pass
         code_buffer = value if isinstance(value, Buffer) else Buffer(value, "python")
         if is_worker():
             try:
                 code_buffer.tempref()  # upload to parent so nested workers can resolve
             except Exception:
                 pass
+        try:
+            # Keep a plain-text fallback in case the code buffer cannot be resolved later.
+            self._pretransformation_dict.setdefault("__code_text__", code_buffer.decode())
+        except Exception:
+            pass
         semantic_checksum, syntactic_checksum = self._code_manager.track_code_buffer(
             code_buffer
         )
@@ -159,7 +175,8 @@ class PreTransformation:
         self._code_manager.incref_semantic(semantic_checksum)
         self._code_refs.append((semantic_checksum, syntactic_checksum))
         self._pretransformation_dict["__code_checksum__"] = syntactic_checksum.hex()
-        return semantic_checksum
+        # Prefer syntactic checksum for execution; semantic guard remains tracked.
+        return syntactic_checksum
 
     def _to_checksum(self, value, celltype: str) -> Checksum | None:
         if value is None:
