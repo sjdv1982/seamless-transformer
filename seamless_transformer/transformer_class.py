@@ -21,13 +21,11 @@ R = TypeVar("R")
 
 
 @overload
-def direct(func: "Transformer[P, R]") -> "DirectTransformer[P, R]":
-    ...
+def direct(func: "Transformer[P, R]") -> "DirectTransformer[P, R]": ...
 
 
 @overload
-def direct(func: Callable[P, R]) -> "DirectTransformer[P, R]":
-    ...
+def direct(func: Callable[P, R]) -> "DirectTransformer[P, R]": ...
 
 
 def direct(func: Callable[P, R] | "Transformer[P, R]") -> "DirectTransformer[P, R]":
@@ -36,7 +34,7 @@ def direct(func: Callable[P, R] | "Transformer[P, R]") -> "DirectTransformer[P, 
     if isinstance(func, Transformer):
         result = DirectTransformer.__new__(DirectTransformer)
         for k, v in func.__dict__.items():
-            setattr(result, k, v)
+            setattr(result, k, deepcopy(v))
     else:
         result = DirectTransformer(func, scratch=False, direct_print=False, local=False)
     update_wrapper(result, func)

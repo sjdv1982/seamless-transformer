@@ -334,7 +334,7 @@ class _WorkerManager:
             handle = await self._manager.start_worker(name=f"worker-{idx + 1}")
             self._handles.append(handle)
             self._load[handle.name] = 0
-            self._limits[handle.name] = asyncio.Semaphore(5)
+            self._limits[handle.name] = asyncio.Semaphore(2)
         await asyncio.gather(*(h.wait_until_ready() for h in self._handles))
 
     def close(self, *, wait: bool = False) -> None:

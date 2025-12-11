@@ -50,7 +50,9 @@ def analyze_code(code, identifier):
     return mode, func_name
 
 
-def exec_code(code, identifier, namespace, inputs, output, *, with_ipython_kernel=False):
+def exec_code(
+    code, identifier, namespace, inputs, output, *, with_ipython_kernel=False
+):
     """Execute Python code in a namespace."""
     mode, func_name = analyze_code(code, identifier)
     inputs2 = [inp for inp in sorted(list(inputs)) if not inp.endswith("_SCHEMA")]
@@ -70,6 +72,7 @@ def exec_code(code, identifier, namespace, inputs, output, *, with_ipython_kerne
     elif mode == "expression":
         assert output is not None
         code2 = f"{output} = " + code
+
     if with_ipython_kernel:
         ipython_execute(code2, namespace)
     else:

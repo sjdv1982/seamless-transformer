@@ -92,10 +92,22 @@ def run_transformation_dict_in_process(
     assert code is not None
 
     namespace.pop(output_name, None)
+
+    identifier = "transformer-in-process"
+    code_checksum = transformation.get("__code_checksum__")
+    if code_checksum is None:
+        code_checksum = tf_checksum
+    try:
+        checksum_hex = code_checksum.hex()
+    except AttributeError:
+        checksum_hex = str(code_checksum) if code_checksum is not None else None
+    if checksum_hex:
+        identifier = f"{identifier}-{checksum_hex}"
+
     with injector.active_workspace(module_workspace, namespace):
         exec_code(
             code,
-            "transformer-in-process",
+            identifier,
             namespace,
             inputs,
             output_name,

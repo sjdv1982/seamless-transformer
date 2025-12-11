@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, Optional
 
-from seamless import Buffer, Checksum
+from seamless import Buffer, Checksum, is_worker
 
 from .code_manager import CodeManager, get_code_manager
 
@@ -147,6 +147,11 @@ class PreTransformation:
 
     def _prepare_code(self, value) -> Checksum:
         code_buffer = value if isinstance(value, Buffer) else Buffer(value, "python")
+        if is_worker():
+            try:
+                code_buffer.tempref()  # upload to parent so nested workers can resolve
+            except Exception:
+                pass
         semantic_checksum, syntactic_checksum = self._code_manager.track_code_buffer(
             code_buffer
         )
@@ -163,14 +168,16 @@ class PreTransformation:
             checksum = value
         elif isinstance(value, str) and len(value) == 64:
             checksum = Checksum(value)
-        elif isinstance(value, Buffer):
-            buffer = value
-            checksum = buffer.get_checksum()
         else:
-            buffer = Buffer(value, celltype or "mixed")
+            buffer = value if isinstance(value, Buffer) else Buffer(value, celltype or "mixed")
             checksum = buffer.get_checksum()
-
-        checksum.incref()
+            if is_worker():
+                try:
+                    buffer.tempref()  # ensure parent sees worker-created buffers
+                except Exception:
+                    pass
+        if not is_worker():
+            checksum.incref()
         self._value_refs.append(checksum)
         return checksum
 
