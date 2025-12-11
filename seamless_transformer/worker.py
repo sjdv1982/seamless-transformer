@@ -503,20 +503,6 @@ class _WorkerManager:
         self, _handle, payload: Dict[str, Any]
     ) -> Checksum | str:
         try:
-            transformation_dict = payload.get("transformation_dict") or {}
-            meta = (
-                transformation_dict.get("__meta__")
-                if isinstance(transformation_dict, dict)
-                else None
-            )
-            local = False
-            if isinstance(meta, dict):
-                local = bool(meta.get("local", False))
-            if local:
-                return _DELEGATION_REFUSED
-        except Exception:
-            return traceback.format_exc()
-        try:
             transformation_dict = payload.get("transformation_dict")
             tf_checksum = Checksum(payload["tf_checksum"])
             tf_dunder = payload.get("tf_dunder", {}) or {}
