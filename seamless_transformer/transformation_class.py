@@ -9,12 +9,15 @@ are intentionally omitted or stubbed.
 from __future__ import annotations
 
 import asyncio
+import threading
 import traceback
+import concurrent.futures as _cf
 from typing import Dict, Generic, Optional, TYPE_CHECKING, TypeVar
 
-from seamless import Checksum, Buffer, ensure_open
+from seamless import Checksum, Buffer, ensure_open, is_worker
 from seamless.util.get_event_loop import get_event_loop
 from .transformation_utils import tf_get_buffer
+from . import worker
 
 try:  # Optional Dask integration
     from seamless_dask.transformation_mixin import TransformationDaskMixin
@@ -50,6 +53,28 @@ if TYPE_CHECKING:
 
 class TransformationError(RuntimeError):
     pass
+
+
+_LOOP_THREADS: dict[asyncio.AbstractEventLoop, threading.Thread] = {}
+_COMPUTE_EXECUTOR = _cf.ThreadPoolExecutor()
+
+
+def _ensure_loop_running(loop: asyncio.AbstractEventLoop) -> None:
+    """Run the given event loop in a background thread if it is not already running."""
+
+    if loop.is_running():
+        return
+    thread = _LOOP_THREADS.get(loop)
+    if thread and thread.is_alive():
+        return
+
+    def _runner():
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+
+    thread = threading.Thread(target=_runner, daemon=True, name="seamless-loop")
+    _LOOP_THREADS[loop] = thread
+    thread.start()
 
 
 class Transformation(TransformationDaskMixin, Generic[T]):
@@ -99,6 +124,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._pretransformation = pretransformation
         self._tf_dunder = tf_dunder or {}
         self._dask_futures: TransformationFutures | None = None
+        self._computation_task: Optional[asyncio.Task] = None
+        self._computation_future: Optional[asyncio.Future] = None
 
     @property
     def scratch(self) -> bool:
@@ -164,6 +191,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 raise ValueError("Result is empty")
             result_checksum = Checksum(result_checksum_raw)
             self._result_checksum = result_checksum
+            self._exception = None
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception:
@@ -186,6 +214,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 raise ValueError("Result is empty")
             result_checksum = Checksum(result_checksum_raw)
             self._result_checksum = result_checksum
+            self._exception = None
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception:
@@ -275,23 +304,37 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                     self._computation_task = None
                 return self._result_checksum
             return self._compute_with_dask(require_value=True)
-        if self._computation_task is None:
+        if self._computation_task is None and self._computation_future is None:
             task_loop = get_event_loop()
             self.start(loop=task_loop)
-        else:
-            task_loop = self._computation_task.get_loop()
+        if self._computation_future is not None:
+            self._computation_future.result()
+            self._computation_future = None
+            return self._result_checksum
+        assert self._computation_task is not None
+        task_loop = self._computation_task.get_loop()
+        if task_loop.is_running():
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is task_loop:
+                if not self._computation_task.done():
+                    raise RuntimeError(
+                        "Cannot block on compute() from within the running event loop"
+                    )
+            else:
+                async def _await_task(task):
+                    return await task
 
-        if not task_loop.is_running():
-            assert self._computation_task is not None
-            task_loop.run_until_complete(self._computation_task)
+                fut = asyncio.run_coroutine_threadsafe(
+                    _await_task(self._computation_task), task_loop
+                )
+                fut.result()
             self._computation_task = None
-        else:
-            self._run_dependencies()
-            if self._exception is None:
-                self._evaluate()
-            if self._computation_task is not None:
-                self._computation_task.cancel()
-                self._computation_task = None
+            return self._result_checksum
+        task_loop.run_until_complete(self._computation_task)
+        self._computation_task = None
         return self._result_checksum
 
     async def _computation(self, require_value: bool) -> Checksum | None:
@@ -301,6 +344,20 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         await self._run_dependencies_async(require_value=require_value)
         await self._evaluation(require_value=require_value)
         return self._result_checksum
+
+    def _compute_in_thread(self, require_value: bool) -> None:
+        """Run the computation in a dedicated event loop in a worker thread."""
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self._computation(require_value=require_value))
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            loop.close()
 
     async def computation(self, require_value: bool = False) -> Checksum | None:
         """Run the transformation and return the checksum.
@@ -320,11 +377,28 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 self._computation_task = None
                 return self._result_checksum
             return await self._compute_with_dask_async(require_value=require_value)
-        if self._computation_task is not None:
-            await self._computation_task
-            return self._result_checksum
-        else:
+        if self._computation_task is None:
             return await self._computation(require_value=require_value)
+        if self._computation_future is not None:
+            await asyncio.wrap_future(self._computation_future)
+            self._computation_future = None
+            return self._result_checksum
+        task_loop = self._computation_task.get_loop()
+        if task_loop.is_running():
+            if asyncio.get_running_loop() is task_loop:
+                await self._computation_task
+            else:
+                async def _await_task(task):
+                    return await task
+
+                fut = asyncio.run_coroutine_threadsafe(
+                    _await_task(self._computation_task), task_loop
+                )
+                await asyncio.wrap_future(fut)
+        else:
+            task_loop.run_until_complete(self._computation_task)
+        self._computation_task = None
+        return self._result_checksum
 
     def _future_cleanup(self, fut) -> None:
         """Swallow task exceptions to avoid 'Task exception was never retrieved'."""
@@ -351,10 +425,19 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 )
                 self._computation_task.add_done_callback(self._future_cleanup)
             return self
-        if self._computation_task is not None:
+        if self._computation_task is not None or self._computation_future is not None:
+            return self
+        if is_worker() or worker.has_spawned():
+            # Offload to a thread with its own event loop for concurrency.
+            self._computation_future = _COMPUTE_EXECUTOR.submit(
+                self._compute_in_thread, True
+            )
             return self
         loop = loop or get_event_loop()
-        self._computation_task = loop.create_task(self._computation(require_value=True))
+        _ensure_loop_running(loop)
+        self._computation_task = loop.create_task(
+            self._computation(require_value=True)
+        )
         self._computation_task.add_done_callback(self._future_cleanup)
         return self
 
@@ -378,7 +461,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 )
             raise TransformationError("Transformation has not been constructed")
         if self._result_checksum is not None:
-            assert self._exception is None
+            # If a result exists, prefer it and clear any stale exception.
+            self._exception = None
             return self._result_checksum
 
         if self._exception is not None:

@@ -41,6 +41,7 @@ _dummy_buffer_cache = None
 _transformer_registry: Dict[str, Any] = {}
 _quiet = False
 _DEBUG_SHUTDOWN = bool(os.environ.get("SEAMLESS_DEBUG_SHUTDOWN"))
+_DELEGATION_REFUSED = "_DELEGATION_REFUSED"
 
 
 def _memory_provider(_key: str) -> None:
@@ -486,6 +487,29 @@ class _WorkerManager:
         self, _handle, payload: Dict[str, Any]
     ) -> Checksum | str:
         try:
+            transformation_dict = payload.get("transformation_dict") or {}
+            meta = transformation_dict.get("__meta__") if isinstance(
+                transformation_dict, dict
+            ) else None
+            if not isinstance(meta, dict) or "local" not in meta:
+                raise RuntimeError("Delegated transformation has unset 'local' flag")
+            local = meta.get("local")
+            if local is None:
+                raise RuntimeError("Delegated transformation has unset 'local' flag")
+            if local:
+                return _DELEGATION_REFUSED
+            use_dask = False
+            try:
+                from seamless_dask.transformer_client import get_dask_client
+
+                use_dask = get_dask_client() is not None
+            except Exception:
+                use_dask = False
+            if not use_dask:
+                return _DELEGATION_REFUSED
+        except Exception:
+            return traceback.format_exc()
+        try:
             result = await self._dispatch(
                 payload.get("transformation_dict"),
                 Checksum(payload["tf_checksum"]),
@@ -728,7 +752,11 @@ async def forward_to_parent(
         "tf_dunder": tf_dunder,
         "scratch": scratch,
     }
-    return await _request_parent_async("delegate_transformation", payload)
+    result = await _request_parent_async("delegate_transformation", payload)
+    if result == _DELEGATION_REFUSED:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _execute_transformation, payload)
+    return result
 
 
 __all__ = [
