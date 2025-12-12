@@ -13,17 +13,17 @@ Parent requests are always Checksum objects, accompanied by two parameters: `scr
 - `/seamless1/seamless-transformer/seamless_transformer/run.py::run_transformation_dict_in_process` is called.
 After the thread has ended,`.tempref()` is called on the result checksum. The result checksum is returned, or an exception traceback serialized as string. In the latter case, the parent process re-raises the exception in the caller frame that made the request.
 
-In the parent process, a `has_spawned` flag is set in `seamless_transformer.worker`. Future calls to `spawn()` check against this flag and raise a RuntimeError.
+In the parent process, a `has_spawned()` flag is set in `seamless_transformer.worker`. Future calls to `spawn()` check against this flag and raise a RuntimeError.
 In `seamless_transformer/transformation_cache.py::run`, the local cache and database cache are
 checked as usual (the database cache only if `is_worker` is False).
 If they miss, the following code paths are considered:
 
-- If `has_spawned` is True:
+- If `has_spawned()` is True:
     Assert that `is_worker` is False. Then, forward the call parameters (minus `require_fingertip`) to the worker manager, awaiting the result.
     The manager will select one of the workers that has the least number of running requests, and send the request to that worker, and return the request checksum.
 
 - If `is_worker` is True:
-    Assert that `has_spawned` is False. Then forward the call parameters (minus `require_fingertip`) as a request to the parent process, awaiting the result.
+    Assert that `has_spawned()` is False. Then forward the call parameters (minus `require_fingertip`) as a request to the parent process, awaiting the result.
     The parent process forwards this request to the worker manager, who will handle it as described above.
     The resulting transformation checksum or exception string is returned to the worker that made the request to the parent. Right before, in case of a transformation checksum, the parent does a `.tempref()` on the checksum.
     In case of an exception string, the worker re-raises the exception in the caller frame that made the request.

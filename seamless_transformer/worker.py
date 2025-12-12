@@ -324,6 +324,7 @@ class _WorkerManager:
         self._pointer_lock: Optional[asyncio.Lock] = None
         self._prefetched_buffers: Dict[str, bytes] = {}
         self._limits: Dict[str, asyncio.Semaphore] = {}
+        self._limit_capacity = 3
 
         init_future = asyncio.run_coroutine_threadsafe(
             self._async_init(worker_count), self.loop
@@ -350,7 +351,7 @@ class _WorkerManager:
             handle = await self._manager.start_worker(name=f"worker-{idx + 1}")
             self._handles.append(handle)
             self._load[handle.name] = 0
-            self._limits[handle.name] = asyncio.Semaphore(3)
+            self._limits[handle.name] = asyncio.Semaphore(self._limit_capacity)
         await asyncio.gather(*(h.wait_until_ready() for h in self._handles))
 
     def close(self, *, wait: bool = False) -> None:
@@ -696,7 +697,7 @@ def spawn(num_workers: Optional[int] = None) -> None:
     global _worker_manager
     if _DEBUG_SHUTDOWN:
         print(
-            f"[worker.spawn] entry has_spawned={has_spawned()} manager={_worker_manager}",
+            f"[worker.spawn] entry has_spawned()={has_spawned()} manager={_worker_manager}",
             file=sys.stderr,
             flush=True,
         )
@@ -730,7 +731,7 @@ def _require_manager() -> _WorkerManager:
 
 
 def _cleanup_workers() -> None:
-    global _worker_manager, has_spawned
+    global _worker_manager, _has_spawned
     if _worker_manager is None:
         return
     try:
@@ -738,21 +739,35 @@ def _cleanup_workers() -> None:
     except Exception:
         pass
     _worker_manager = None
-    has_spawned = False
+    _has_spawned = False
 
 
-def shutdown_workers() -> None:
+def shutdown_workers(*, wait: bool = True) -> None:
     """Explicitly shut down the worker pool and clear the spawn flag."""
 
-    global has_spawned, _worker_manager
+    global _has_spawned, _worker_manager
     if _worker_manager is None:
         return
     try:
-        _worker_manager.close(wait=True)
+        _worker_manager.close(wait=wait)
     except Exception:
         pass
     _worker_manager = None
-    has_spawned = False
+    _has_spawned = False
+
+
+def get_throttle_load() -> tuple[int, int]:
+    """Return (used_slots, total_slots) for the worker throttle semaphores."""
+
+    manager = _worker_manager
+    if manager is None:
+        return 0, 0
+    total = len(manager._limits) * manager._limit_capacity  # type: ignore[attr-defined]
+    used = 0
+    for limit in manager._limits.values():  # type: ignore[attr-defined]
+        current = getattr(limit, "_value", manager._limit_capacity)
+        used += max(0, manager._limit_capacity - int(current))  # type: ignore[attr-defined]
+    return used, total
 
 
 async def dispatch_to_workers(
@@ -796,5 +811,6 @@ __all__ = [
     "dispatch_to_workers",
     "forward_to_parent",
     "has_spawned",
+    "get_throttle_load",
     "shutdown_workers",
 ]
