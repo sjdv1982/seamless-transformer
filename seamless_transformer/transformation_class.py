@@ -289,7 +289,21 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             return self._result_checksum
         dask_client = get_dask_client()
         if dask_client is not None:
-            raise NotImplementedError("Dask scheduler support is disabled")
+            if self._computation_task is not None:
+                task = self._computation_task
+                task_loop = task.get_loop()
+                try:
+                    if task_loop.is_running():
+                        fut = asyncio.run_coroutine_threadsafe(
+                            asyncio.shield(task), task_loop
+                        )
+                        fut.result()
+                    else:
+                        task_loop.run_until_complete(task)
+                finally:
+                    self._computation_task = None
+                return self._result_checksum
+            return self._compute_with_dask(require_value=True)
         if self._computation_task is None and self._computation_future is None:
             task_loop = get_event_loop()
             self.start(loop=task_loop)
@@ -310,6 +324,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                         "Cannot block on compute() from within the running event loop"
                     )
             else:
+
                 async def _await_task(task):
                     return await task
 
@@ -358,7 +373,11 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         ensure_open("transformation computation")
         dask_client = get_dask_client()
         if dask_client is not None:
-            raise NotImplementedError("Dask scheduler support is disabled")
+            if self._computation_task is not None:
+                await self._computation_task
+                self._computation_task = None
+                return self._result_checksum
+            return await self._compute_with_dask_async(require_value=require_value)
         if self._computation_task is None:
             return await self._computation(require_value=require_value)
         if self._computation_future is not None:
@@ -370,6 +389,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             if asyncio.get_running_loop() is task_loop:
                 await self._computation_task
             else:
+
                 async def _await_task(task):
                     return await task
 
@@ -417,9 +437,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             return self
         loop = loop or get_event_loop()
         _ensure_loop_running(loop)
-        self._computation_task = loop.create_task(
-            self._computation(require_value=True)
-        )
+        self._computation_task = loop.create_task(self._computation(require_value=True))
         self._computation_task.add_done_callback(self._future_cleanup)
         return self
 
@@ -539,6 +557,12 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     def __del__(self):
         if self._destructor is not None:
             self._destructor(self)
+        try:
+            from seamless_dask.permissions import shutdown_permission_manager
+
+            shutdown_permission_manager()
+        except Exception:
+            pass
 
 
 def transformation_from_pretransformation(
