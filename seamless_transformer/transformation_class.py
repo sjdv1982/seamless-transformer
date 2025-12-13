@@ -504,12 +504,12 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 self._computation_task = None
                 return self._result_checksum
             return await self._compute_with_dask_async(require_value=require_value)
-        if self._computation_task is None:
-            return await self._computation(require_value=require_value)
         if self._computation_future is not None:
             await asyncio.wrap_future(self._computation_future)
             self._computation_future = None
             return self._result_checksum
+        if self._computation_task is None:
+            return await self._computation(require_value=require_value)
         task_loop = self._computation_task.get_loop()
         if task_loop.is_running():
             if asyncio.get_running_loop() is task_loop:
@@ -563,7 +563,6 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             return self
         loop = loop or get_event_loop()
         _ensure_loop_running(loop)
-        print("LOOP", loop, id(loop))
         self._computation_task = loop.create_task(self._computation(require_value=True))
         self._computation_task.add_done_callback(self._future_cleanup)
         return self

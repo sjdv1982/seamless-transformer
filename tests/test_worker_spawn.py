@@ -31,13 +31,15 @@ def test_nested_transformations_round_trip_to_parent(spawned_workers):
     main_pid = os.getpid()
 
     @direct
-    def inner(x):
-        import os
-
-        return os.getpid(), x + 1
-
-    @direct
     def outer(x):
+        from seamless.transformer import direct
+
+        @direct
+        def inner(x):
+            import os
+
+            return os.getpid(), x + 1
+
         pid_inner, intermediate = inner(x)
         import os
 

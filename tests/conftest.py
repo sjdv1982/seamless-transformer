@@ -2,6 +2,7 @@ import seamless
 import seamless.shutdown as shutdown
 import pytest
 from seamless_transformer import worker
+from multiprocessing import resource_tracker
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -16,3 +17,26 @@ def _close_seamless_once():
     worker._worker_manager = None
     yield
     seamless.close()
+
+
+@pytest.fixture(autouse=True)
+def _reopen_seamless_between_tests():
+    """Re-open Seamless if a previous test called seamless.close()."""
+
+    seamless._closed = False
+    seamless._require_close = False
+    shutdown._closed = False
+    shutdown._closing = False
+    # Restart the multiprocessing resource tracker if a previous close shut it down.
+    try:
+        fd = getattr(resource_tracker._resource_tracker, "_fd", None)  # type: ignore[attr-defined]
+    except Exception:
+        fd = None
+    if fd is None:
+        try:
+            resource_tracker._resource_tracker = None  # type: ignore[attr-defined]
+            resource_tracker.ensure_running()
+        except Exception:
+            pass
+    # do not touch worker manager here; individual tests manage spawning/cleanup
+    yield
