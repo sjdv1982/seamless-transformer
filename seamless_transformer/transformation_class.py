@@ -102,6 +102,9 @@ def loop_is_nested(loop: asyncio.AbstractEventLoop) -> bool:
 
 _LOOP_THREADS: dict[asyncio.AbstractEventLoop, threading.Thread] = {}
 _COMPUTE_EXECUTOR = _cf.ThreadPoolExecutor()
+_COMPUTE_LOOP: asyncio.AbstractEventLoop | None = None
+_COMPUTE_LOOP_THREAD: threading.Thread | None = None
+_COMPUTE_LOOP_LOCK = threading.Lock()
 
 
 def _ensure_loop_running(loop: asyncio.AbstractEventLoop) -> None:
@@ -120,6 +123,27 @@ def _ensure_loop_running(loop: asyncio.AbstractEventLoop) -> None:
     thread = threading.Thread(target=_runner, daemon=True, name="seamless-loop")
     _LOOP_THREADS[loop] = thread
     thread.start()
+
+
+def _get_compute_loop() -> asyncio.AbstractEventLoop:
+    """Return a dedicated background event loop for in-process computations."""
+
+    global _COMPUTE_LOOP, _COMPUTE_LOOP_THREAD
+    with _COMPUTE_LOOP_LOCK:
+        thread_alive = _COMPUTE_LOOP_THREAD is not None and _COMPUTE_LOOP_THREAD.is_alive()
+        if _COMPUTE_LOOP is None or not thread_alive:
+            loop = asyncio.new_event_loop()
+
+            def _runner():
+                asyncio.set_event_loop(loop)
+                loop.run_forever()
+
+            thread = threading.Thread(target=_runner, daemon=True, name="seamless-compute-loop")
+            _COMPUTE_LOOP = loop
+            _COMPUTE_LOOP_THREAD = thread
+            thread.start()
+    # If a previous thread died but the loop is still marked running, leave it alone.
+    return _COMPUTE_LOOP
 
 
 class Transformation(TransformationDaskMixin, Generic[T]):
@@ -276,7 +300,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         if all_evaluated:
             return
         try:
-            loop = get_event_loop()
+            loop = _get_compute_loop()
             self._verify_sync_construct(loop)
             self.start(loop=loop)
             for depname, dep in self._upstream_dependencies.items():
@@ -402,7 +426,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             dask_client = get_dask_client()
             if dask_client is not None:
                 return self._compute_with_dask(require_value=True)
-            task_loop = get_event_loop()
+            task_loop = _get_compute_loop()
             self.start(loop=task_loop)
 
         if self._computation_future is not None:
@@ -561,8 +585,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 self._compute_in_thread, True
             )
             return self
-        loop = loop or get_event_loop()
-        _ensure_loop_running(loop)
+        loop = loop or _get_compute_loop()
+        if loop is not _COMPUTE_LOOP:
+            _ensure_loop_running(loop)
         self._computation_task = loop.create_task(self._computation(require_value=True))
         self._computation_task.add_done_callback(self._future_cleanup)
         return self

@@ -1,0 +1,21 @@
+This branch contains a fix that allows Jupyter to use the sync API.
+
+test_nested_transformations_multi.py now hangs.
+
+All other test timings are unaffected within a few hundredths.
+
+test_nested_transformations_multi_spawn.py runs fine, and so does 
+seamless-dask/tests/test_nested_transformations_multi.py.
+
+I am leaving this TODO note in place.
+
+Perhaps the root cause can be found and this fix can become integrated fully.
+
+Or we could disallow nested in-process transformations if Jupyter is running.
+It really seems to be "nested in-process transformations". The fact that the sync API is used top-level 
+doesn't play a role: I have added test_nested_transformations_multi_async.py and it also hangs.
+In contrast, the spawn version and Dask version both run fine.
+
+I have verified that test_nested_transformations_multi_async.py runs fine in the main branch.
+It even runs under Jupyter if you make the test function code top-level 
+and replace the `asyncio.run(get_results())` by `await get_results()`
