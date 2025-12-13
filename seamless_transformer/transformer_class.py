@@ -243,73 +243,9 @@ class DirectTransformer(Transformer[P, R]):
         """
         from seamless.workflow.core.direct.module import get_module_definition
         """
-
-        ensure_open("transformer call")
-        arguments = self._signature.bind(*args, **kwargs).arguments
-        deps = {
-            argname: arg
-            for argname, arg in arguments.items()
-            if isinstance(arg, Transformation)
-        }
-        env = None  # environment handling not ported
-
-        result_celltype = self.celltypes["result"]
-        meta = deepcopy(self._meta)
-        modules = {}
-        """
-        STUB
-        for module_name, module in self._modules.items():
-            if isinstance(module, dict):
-                module_definition = module
-            else:
-                module_definition = get_module_definition(module)
-            modules[module_name] = module_definition
-        /STUB
-        """
-
-        pre_transformation = direct_transformer_to_pretransformation(
-            self._codebuf, meta, self._celltypes, modules, arguments, env
-        )
-        tf_dunder = {}
-
-        # up to here, identical to the base class
-
-        for depname, dep in deps.items():
-            dep.start()
-        for depname, dep in deps.items():
-            dep.compute()
-            if dep.exception is not None:
-                msg = "Dependency '{}' has an exception: {}"
-                raise RuntimeError(msg.format(depname, dep.exception))
-
-        try:
-            pre_transformation.prepare_transformation()
-
-            ### increfed, tf_checksum = register_transformation_dict(pre_transformation.pretransformation_dict,)
-            tf_buffer = tf_get_buffer(pre_transformation.pretransformation_dict)
-            tf_buffer.tempref()
-            tf_checksum = tf_buffer.get_checksum()
-            result_checksum = run_sync(
-                pre_transformation.pretransformation_dict,
-                tf_checksum=tf_checksum,
-                tf_dunder=tf_dunder,
-                scratch=self.scratch,
-                require_fingertip=True,
-            )
-        finally:
-            pre_transformation.release()
-        result_checksum = Checksum(result_checksum)
-        if not result_checksum:
-            raise RuntimeError("Result is empty")
-        buf = result_checksum.resolve()
-        assert isinstance(buf, Buffer)
-        target_celltype = result_celltype
-        if result_celltype == "folder":
-            target_celltype = "plain"
-        value = buf.get_value(target_celltype)
-        if is_deep_celltype(result_celltype):
-            value = unpack_deep_structure(value, result_celltype)
-        return value
+        tf = super().__call__(*args, **kwargs)
+        tf._compute(api_origin="call")
+        return tf.run()
 
 
 class CelltypesWrapper:

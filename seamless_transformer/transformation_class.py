@@ -12,7 +12,7 @@ import asyncio
 import threading
 import traceback
 import concurrent.futures as _cf
-from typing import Dict, Generic, Optional, TYPE_CHECKING, TypeVar
+from typing import Any, Dict, Generic, Optional, TYPE_CHECKING, TypeVar
 
 from seamless import Checksum, Buffer, ensure_open, is_worker
 from seamless.util.get_event_loop import get_event_loop
@@ -53,6 +53,51 @@ if TYPE_CHECKING:
 
 class TransformationError(RuntimeError):
     pass
+
+
+def running_in_jupyter() -> bool:
+    """Function to detect Jupyter-like environments:
+
+    - That have default running event loop. This prevents
+    sync evaluation because that blocks on coroutines running in the same loop
+
+    - That support top-level await as a go-to alternative
+    """
+    import sys
+    import asyncio
+
+    try:
+        import pyodide
+
+        return True
+    except ImportError:
+        pass
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running() and hasattr(loop, "_asyncio_runner"):
+            return True
+    except Exception:
+        return False
+
+    try:
+        from IPython import get_ipython
+    except ImportError:
+        return False
+
+    ip = get_ipython()
+    if ip is None:
+        return False
+    # ipykernel shells: ZMQInteractiveShell, module ipykernel.zmqshell
+    return (
+        "ipykernel" in sys.modules
+        and hasattr(ip, "kernel")
+        and type(ip).__name__ == "ZMQInteractiveShell"
+    )
+
+
+def loop_is_nested(loop: asyncio.AbstractEventLoop) -> bool:
+    return getattr(loop, "_nest_patched", False)
 
 
 _LOOP_THREADS: dict[asyncio.AbstractEventLoop, threading.Thread] = {}
@@ -224,8 +269,15 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         return self._result_checksum
 
     def _run_dependencies(self) -> None:
+        all_evaluated = True
+        for depname, dep in self._upstream_dependencies.items():
+            if not dep._evaluated:
+                all_evaluated = False
+        if all_evaluated:
+            return
         try:
             loop = get_event_loop()
+            self._verify_sync_construct(loop)
             self.start(loop=loop)
             for depname, dep in self._upstream_dependencies.items():
                 dep.start(loop=loop)
@@ -275,6 +327,132 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 self._meta.pop(k)
         return self._meta
 
+    def _verify_sync(self, task_loop0, err_msg: str, jupyter_err_msg: str):
+        task_loops: dict[str | None, Any] = {None: task_loop0}
+        for depname, dep in self._upstream_dependencies.items():
+            assert isinstance(dep, Transformation)
+            dep_task_loop = None
+            if dep._computation_future is not None:
+                try:
+                    dep_task_loop = dep._computation_future.get_loop()
+                except (
+                    AttributeError
+                ):  # not an asyncio Future, but a concurrent.futures Future
+                    pass
+            elif dep._computation_task is not None:
+                dep_task_loop = dep._computation_task.get_loop()
+            if dep_task_loop is not None:
+                task_loops[depname] = dep_task_loop
+
+        for dep_name, task_loop in task_loops.items():
+            if task_loop is None:
+                continue
+            if task_loop.is_running():
+                if loop_is_nested(task_loop):
+                    # nest_asyncio is running. Deadlocks are now the user's responsibility, not ours
+                    return
+                try:
+                    running_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    running_loop = None
+                if running_loop is task_loop:
+                    err = jupyter_err_msg if running_in_jupyter() else err_msg
+                    if dep_name is not None:
+                        err = f"Dependency {dep_name}: " + err
+                    raise RuntimeError(err)
+
+    def _verify_sync_construct(self, task_loop):
+        return self._verify_sync(
+            task_loop0=task_loop,
+            err_msg="Cannot block on construct() from within the running event loop",
+            jupyter_err_msg="'tf.construct()' is not supported within Jupyter. Use 'await tf.construction()' instead.",
+        )
+
+    def _verify_sync_compute(self, task_loop):
+        return self._verify_sync(
+            task_loop0=task_loop,
+            err_msg="Cannot block on compute() from within the running event loop",
+            jupyter_err_msg="'tf.compute()' is not supported within Jupyter. Use 'await tf.computation()' instead.",
+        )
+
+    def _verify_sync_run(self, task_loop):
+        return self._verify_sync(
+            task_loop0=task_loop,
+            err_msg="Cannot block on run() from within the running event loop",
+            jupyter_err_msg="'tf.run()' is not supported within Jupyter. Use 'await tf.task()' instead.",
+        )
+
+    def _verify_sync_call(self, task_loop):
+        return self._verify_sync(
+            task_loop0=task_loop,
+            err_msg="Cannot block on func() from within the running event loop",
+            jupyter_err_msg="""'func()' is not supported within Jupyter. Use instead:"
+
+    from seamless.transformer import delayed
+    await delayed(func).task()
+
+""",
+        )
+
+    def _compute(self, api_origin: str) -> Checksum | None:
+        ensure_open("transformation compute")
+        if self._evaluated:
+            return self._result_checksum
+        if self._computation_task is None and self._computation_future is None:
+            dask_client = get_dask_client()
+            if dask_client is not None:
+                return self._compute_with_dask(require_value=True)
+            task_loop = get_event_loop()
+            self.start(loop=task_loop)
+
+        if self._computation_future is not None:
+            assert self._computation_task is None
+            try:
+                task_loop = self._computation_future.get_loop()
+            except (
+                AttributeError
+            ):  # not an asyncio Future, but a concurrent.futures Future
+                task_loop = None
+        else:
+            assert self._computation_task is not None
+            task_loop = self._computation_task.get_loop()
+
+        if api_origin == "call":
+            self._verify_sync_call(task_loop)
+        elif api_origin == "run":
+            self._verify_sync_run(task_loop)
+        else:
+            self._verify_sync_compute(task_loop)
+
+        if self._computation_future is not None:
+            self._computation_future.result()
+            self._computation_future = None
+            return self._result_checksum
+
+        assert self._computation_task is not None
+        if task_loop.is_running():
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if not loop_is_nested(running_loop):
+                assert running_loop is not task_loop  # must have been detected earlier
+
+            async def _await_task(task):
+                return await task
+
+            fut = asyncio.run_coroutine_threadsafe(
+                _await_task(self._computation_task), task_loop
+            )
+            fut.result()
+            self._computation_task = None
+            return self._result_checksum
+
+        assert self._computation_task is not None
+        task_loop.run_until_complete(self._computation_task)
+        self._computation_task = None
+        return self._result_checksum
+
     def compute(self) -> Checksum | None:
         """Run the transformation and return the checksum.
 
@@ -284,59 +462,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
         It is made sure that the result value will be available upon Checksum.resolve().
         """
-        ensure_open("transformation compute")
-        if self._evaluated:
-            return self._result_checksum
-        dask_client = get_dask_client()
-        if dask_client is not None:
-            if self._computation_task is not None:
-                task = self._computation_task
-                task_loop = task.get_loop()
-                try:
-                    if task_loop.is_running():
-                        fut = asyncio.run_coroutine_threadsafe(
-                            asyncio.shield(task), task_loop
-                        )
-                        fut.result()
-                    else:
-                        task_loop.run_until_complete(task)
-                finally:
-                    self._computation_task = None
-                return self._result_checksum
-            return self._compute_with_dask(require_value=True)
-        if self._computation_task is None and self._computation_future is None:
-            task_loop = get_event_loop()
-            self.start(loop=task_loop)
-        if self._computation_future is not None:
-            self._computation_future.result()
-            self._computation_future = None
-            return self._result_checksum
-        assert self._computation_task is not None
-        task_loop = self._computation_task.get_loop()
-        if task_loop.is_running():
-            try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                running_loop = None
-            if running_loop is task_loop:
-                if not self._computation_task.done():
-                    raise RuntimeError(
-                        "Cannot block on compute() from within the running event loop"
-                    )
-            else:
-
-                async def _await_task(task):
-                    return await task
-
-                fut = asyncio.run_coroutine_threadsafe(
-                    _await_task(self._computation_task), task_loop
-                )
-                fut.result()
-            self._computation_task = None
-            return self._result_checksum
-        task_loop.run_until_complete(self._computation_task)
-        self._computation_task = None
-        return self._result_checksum
+        return self._compute(api_origin="compute")
 
     async def _computation(self, require_value: bool) -> Checksum | None:
         dask_client = get_dask_client()
@@ -437,6 +563,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             return self
         loop = loop or get_event_loop()
         _ensure_loop_running(loop)
+        print("LOOP", loop, id(loop))
         self._computation_task = loop.create_task(self._computation(require_value=True))
         self._computation_task.add_done_callback(self._future_cleanup)
         return self
@@ -518,7 +645,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         Raise RuntimeError in case of an exception."""
 
         ensure_open("transformation run")
-        self.compute()
+        self._compute(api_origin="run")
         return self.value
 
     @property

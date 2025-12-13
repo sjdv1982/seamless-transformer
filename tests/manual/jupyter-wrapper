@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""It takes a command line argument "jupyterfile". First, it starts a Jupyter kernel (Python by default; a --kernel argument allows other kernels).
+
+Then, it reads jupyterfile, splits it into cells using lines containing #### as a separator. Then, one by one, each cell is printed and then fed into the kernel.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+from queue import Empty
+from typing import List
+
+try:
+    from jupyter_client import KernelManager
+except ImportError as exc:  # pragma: no cover - import guard
+    print(
+        "jupyter-wrapper requires jupyter-client. Install it with `pip install jupyter-client`.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1) from exc
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Feed a jupyterfile into a Jupyter kernel cell by cell."
+    )
+    parser.add_argument(
+        "jupyterfile",
+        type=Path,
+        help='File containing cells separated by lines containing "####".',
+    )
+    parser.add_argument(
+        "--kernel",
+        default="python3",
+        help="Kernel name to start (default: python3).",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="Seconds to wait for kernel replies before giving up.",
+    )
+    return parser.parse_args()
+
+
+def load_cells(jupyterfile: Path) -> List[str]:
+    if not jupyterfile.exists():
+        raise FileNotFoundError(f"{jupyterfile} does not exist")
+
+    content = jupyterfile.read_text()
+    cells: List[str] = []
+    current: List[str] = []
+    for line in content.splitlines():
+        if "####" in line:
+            cells.append("\n".join(current))
+            current = []
+            continue
+        current.append(line)
+
+    cells.append("\n".join(current))
+    return [cell for cell in cells if cell.strip()]
+
+
+def start_kernel(kernel_name: str, timeout: float):
+    km = KernelManager(kernel_name=kernel_name)
+    km.start_kernel()
+    kc = km.client()
+    kc.start_channels()
+    kc.wait_for_ready(timeout=timeout)
+    return km, kc
+
+
+def stream_cell_output(kc, msg_id: str, timeout: float) -> None:
+    while True:
+        try:
+            msg = kc.get_iopub_msg(timeout=timeout)
+        except Empty:
+            raise TimeoutError("Timed out waiting for kernel IOPub message")
+
+        if msg["parent_header"].get("msg_id") != msg_id:
+            continue
+
+        msg_type = msg["msg_type"]
+        content = msg["content"]
+
+        if msg_type == "status" and content.get("execution_state") == "idle":
+            break
+        if msg_type == "stream":
+            stream_name = content.get("name")
+            text = content.get("text", "")
+            if stream_name == "stderr":
+                sys.stderr.write(text)
+                sys.stderr.flush()
+            else:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+        elif msg_type in {"execute_result", "display_data"}:
+            data = content.get("data", {})
+            if "text/plain" in data:
+                print(data["text/plain"])
+        elif msg_type == "error":
+            traceback = content.get("traceback", [])
+            print("\n".join(traceback), file=sys.stderr)
+
+
+def wait_for_execute_reply(kc, msg_id: str, timeout: float) -> None:
+    while True:
+        try:
+            reply = kc.get_shell_msg(timeout=timeout)
+        except Empty:
+            raise TimeoutError("Timed out waiting for execute_reply message")
+
+        if reply["parent_header"].get("msg_id") != msg_id:
+            continue
+
+        status = reply.get("content", {}).get("status")
+        if status == "error":
+            traceback = reply["content"].get("traceback", [])
+            if traceback:
+                print("\n".join(traceback), file=sys.stderr)
+        break
+
+
+def run_cells(kc, cells: List[str], timeout: float) -> None:
+    for index, cell in enumerate(cells, start=1):
+        if not cell.strip():
+            continue
+
+        print(f"\n#### Cell {index} ####")
+        print(cell)
+        sys.stdout.flush()
+        print("\n%%%%%%%%%%%%%%%%%%\n")
+
+        msg_id = kc.execute(cell, store_history=True)
+        stream_cell_output(kc, msg_id, timeout=timeout)
+        wait_for_execute_reply(kc, msg_id, timeout=timeout)
+
+
+def main() -> int:
+    args = parse_args()
+    cells = load_cells(args.jupyterfile)
+
+    km = kc = None
+    try:
+        km, kc = start_kernel(args.kernel, timeout=args.timeout)
+        run_cells(kc, cells, timeout=args.timeout)
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if kc is not None:
+            kc.stop_channels()
+        if km is not None:
+            km.shutdown_kernel(now=True)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
