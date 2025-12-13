@@ -324,6 +324,7 @@ class _WorkerManager:
         self._pointer_lock: Optional[asyncio.Lock] = None
         self._prefetched_buffers: Dict[str, bytes] = {}
         self._limits: Dict[str, asyncio.Semaphore] = {}
+        # Throttle how many concurrent tasks a single worker can handle.
         self._limit_capacity = 3
 
         init_future = asyncio.run_coroutine_threadsafe(
@@ -442,11 +443,42 @@ class _WorkerManager:
         enforce_limit: bool = True,
     ) -> Checksum | str:
         await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
-        handle = self._select_handle()
+        handles_sorted = sorted(
+            self._handles,
+            key=lambda h: (self._load.get(h.name, 0), h.name),
+        )
+        handle = None
+        limit: asyncio.Semaphore | None = None
+        acquired = False
+        # Prefer an available semaphore; if all are saturated, wait until one frees up.
+        while handle is None:
+            for candidate in handles_sorted:
+                cand_limit = self._limits.get(candidate.name)
+                if not enforce_limit or cand_limit is None or not cand_limit.locked():
+                    handle = candidate
+                    limit = cand_limit
+                    break
+            if handle is None:
+                await asyncio.sleep(0.01)
+        if bool(os.environ.get("SEAMLESS_DEBUG_TRANSFORMATION")):
+            if not hasattr(self, "_debug_handles_printed"):
+                print(
+                    f"[dispatch] handles={[h.name for h in self._handles]}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                self._debug_handles_printed = True
+            print(
+                f"[dispatch] selecting {getattr(handle, 'name', '?')} "
+                f"load={self._load.get(getattr(handle, 'name', None), 0)}",
+                file=sys.stderr,
+                flush=True,
+            )
         await handle.wait_until_ready()
-        limit = self._limits.get(handle.name)
         if enforce_limit and limit is not None:
             await limit.acquire()
+            acquired = True
+
         self._load[handle.name] = self._load.get(handle.name, 0) + 1
         try:
             payload = {
@@ -458,7 +490,7 @@ class _WorkerManager:
             result = await handle.request("execute_transformation", payload)
         finally:
             self._load[handle.name] = max(0, self._load.get(handle.name, 0) - 1)
-            if enforce_limit and limit is not None:
+            if acquired and limit is not None:
                 limit.release()
         return result
 

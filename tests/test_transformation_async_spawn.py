@@ -7,11 +7,8 @@ from seamless.transformer import spawn, has_spawned
 
 DELAY = 0.5
 WORKERS = 8  # make this no bigger than #cores on your system
-N = 40  # make this no bigger than the WORKERS, or increase PARALLEL_FACTOR
-# COMMENT: beyond N=80 or so, the system starts to run into slowdowns...
-#   => increase PARALLEL_FACTOR beyond N/WORKERS,e.g. to 100 for N=400
-#   => need seamless-multi pools
-PARALLEL_FACTOR = 5
+N = 640  # make this no bigger than the WORKERS, or increase PARALLEL_FACTOR to N/WORKERS
+PARALLEL_FACTOR = 80
 
 
 @pytest.fixture(scope="module")
@@ -33,13 +30,30 @@ def _close_seamless_session():
 def test_transformation_async(spawned_workers):
     @delayed
     def func(a, b, delay):
+        from seamless_transformer import global_lock
         import time
 
-        time.sleep(delay)
+        with global_lock:
+            time.sleep(delay)
         return 10000 * a + 2 * b
 
     async def main():
         tasks = [func(n, -1, DELAY).task() for n in range(N)]
+        report_progress = False
+        if N >= 100:
+            try:
+                import tqdm
+
+                report_progress = True
+            except ImportError:
+                pass
+        if report_progress:
+            with tqdm.tqdm(total=N) as progress:
+                while 1:
+                    done, pending = await asyncio.wait(tasks, timeout=0.5)
+                    progress.update(len(done) - progress.n)
+                    if not len(pending):
+                        break
         results = await asyncio.gather(*tasks)
         return results
 
