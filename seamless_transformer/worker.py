@@ -4,6 +4,12 @@ This module builds on :mod:`seamless.transformer.process` to manage a pool of
 worker processes. Workers execute transformation requests sent from the parent
 process and forward buffer/checksum interactions back to the parent using
 shared memory.
+
+TODO: implement shared memory refcount
+Would replace the current prefetch+write shared mem + worker download+confirm+cleanup cycle,
+  which is transport-oriented, not resource-oriented.
+Current mechanism for worker upload untouched.
+Would be a seamless-base (buffer cache) feature.
 """
 
 from __future__ import annotations
@@ -43,6 +49,13 @@ _quiet = False
 _DEBUG_SHUTDOWN = bool(os.environ.get("SEAMLESS_DEBUG_SHUTDOWN"))
 _DELEGATION_REFUSED = "_DELEGATION_REFUSED"
 _LOCAL_BUFFERS: Dict[str, bytes] = {}
+
+
+# Throttle how many concurrent tasks a single worker can handle.
+# Not to be changed dynamically
+TRANSFORMATION_THROTTLE = int(
+    os.environ.get("SEAMLESS_WORKER_TRANSFORMATION_THROTTLE"), 3
+)
 
 
 def _memory_provider(_key: str) -> None:
@@ -324,8 +337,6 @@ class _WorkerManager:
         self._pointer_lock: Optional[asyncio.Lock] = None
         self._prefetched_buffers: Dict[str, bytes] = {}
         self._limits: Dict[str, asyncio.Semaphore] = {}
-        # Throttle how many concurrent tasks a single worker can handle.
-        self._limit_capacity = 3
 
         init_future = asyncio.run_coroutine_threadsafe(
             self._async_init(worker_count), self.loop
@@ -352,7 +363,7 @@ class _WorkerManager:
             handle = await self._manager.start_worker(name=f"worker-{idx + 1}")
             self._handles.append(handle)
             self._load[handle.name] = 0
-            self._limits[handle.name] = asyncio.Semaphore(self._limit_capacity)
+            self._limits[handle.name] = asyncio.Semaphore(TRANSFORMATION_THROTTLE)
         await asyncio.gather(*(h.wait_until_ready() for h in self._handles))
 
     def close(self, *, wait: bool = False) -> None:
@@ -794,11 +805,11 @@ def get_throttle_load() -> tuple[int, int]:
     manager = _worker_manager
     if manager is None:
         return 0, 0
-    total = len(manager._limits) * manager._limit_capacity  # type: ignore[attr-defined]
+    total = len(manager._limits) * TRANSFORMATION_THROTTLE  # type: ignore[attr-defined]
     used = 0
     for limit in manager._limits.values():  # type: ignore[attr-defined]
-        current = getattr(limit, "_value", manager._limit_capacity)
-        used += max(0, manager._limit_capacity - int(current))  # type: ignore[attr-defined]
+        current = getattr(limit, "_value", TRANSFORMATION_THROTTLE)
+        used += max(0, TRANSFORMATION_THROTTLE - int(current))  # type: ignore[attr-defined]
     return used, total
 
 
