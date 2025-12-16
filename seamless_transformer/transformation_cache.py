@@ -17,14 +17,9 @@ except ImportError:  # pragma: no cover - optional dependency
     _buffer_writer = None
 
 try:
-    from seamless_remote import database_remote
+    from seamless_remote import database_remote, jobserver_remote, buffer_remote
 except ImportError:
-    database_remote = None
-
-try:
-    from seamless_remote import jobserver_remote
-except ImportError:
-    jobserver_remote = None
+    database_remote = jobserver_remote = buffer_remote = None
 
 try:
     from seamless_remote.client import close_all_clients as _close_all_clients
@@ -74,6 +69,7 @@ class TransformationCache:
         if cached_result is not None:
             _debug(f"cache hit {tf_checksum.hex()}")
             if not scratch:
+                await buffer_remote.promise(cached_result)
                 cached_result.tempref()
             return cached_result
 
@@ -168,26 +164,21 @@ class TransformationCache:
             except Exception:
                 _debug("fingertip resolution failed; will continue")
 
+        if not scratch:
+            result_checksum.tempref()
+
         if database_remote is not None and not is_worker():
             await database_remote.set_transformation_result(
                 tf_checksum, result_checksum
             )
+            # TODO:
+            #     buffer_cache.guarantee_buffer_info(
+            #         result_checksum, output_celltype, sync_to_remote=True
+            #     )
 
-        if not scratch:
-            result_checksum.tempref()
         self._transformation_cache[tf_checksum] = result_checksum
         await _await_buffer_writer(result_checksum)
 
-        if database_remote is not None and not is_worker() and not scratch:
-            try:
-                buf = result_checksum.resolve()
-            except Exception:
-                buf = None
-            if buf is not None:
-                try:
-                    await buf.write()
-                except Exception:
-                    pass
         return result_checksum
 
     def run_sync(

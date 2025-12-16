@@ -147,14 +147,6 @@ def run_transformation_dict_in_process(
         # Keep the result buffer around so resolve() can find it.
         result_buffer.tempref()
 
-    # database.set_transformation_result(tf_checksum, result_checksum)
-    # if not scratch:
-    #     buffer_cache.guarantee_buffer_info(
-    #         result_checksum, output_celltype, sync_to_remote=True
-    #     )
-    #     buffer_cache.cache_buffer(result_checksum, result_buffer)
-    #     buffer_remote.write_buffer(result_checksum, result_buffer)
-
     return result_checksum
 
 
