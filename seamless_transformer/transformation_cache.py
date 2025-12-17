@@ -97,6 +97,7 @@ class TransformationCache:
             f"execution={execution} has_spawned()={worker.has_spawned()} is_worker={is_worker()}"
         )
         if execution == "remote":
+            # NOTE: this branch is only hit if no seamless Dask client has been defined
             if jobserver_remote is None:
                 raise RuntimeError(
                     "Remote execution requested but seamless_remote is not installed"

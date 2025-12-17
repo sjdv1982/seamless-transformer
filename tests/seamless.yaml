@@ -2,7 +2,12 @@
 - execution: process
 
 - stage jobserver-test:
-    - execution: remote
+          - execution: remote
+          - remote: jobserver
+
+- stage simple-remote:
+          - execution: remote
+          - remote: daskserver
 
 - stage spawn-config:
-    - execution: spawn
+          - execution: spawn
