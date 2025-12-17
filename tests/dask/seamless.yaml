@@ -1,0 +1,5 @@
+- project: myproject
+- execution: remote
+- remote: daskserver
+# .seamless.yaml: define a cluster, e.g.
+# - cluster: local
