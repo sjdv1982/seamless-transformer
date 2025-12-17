@@ -21,7 +21,7 @@ from . import worker
 
 try:  # Optional Dask integration
     from seamless_dask.transformation_mixin import TransformationDaskMixin
-    from seamless_dask.transformer_client import get_dask_client
+    from seamless_dask.transformer_client import get_seamless_dask_client
 except Exception:  # pragma: no cover - allow operation without seamless-dask
 
     class TransformationDaskMixin:  # type: ignore
@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover - allow operation without seamless-dask
         def _ensure_dask_futures(self, *args, **kwargs):
             raise RuntimeError("Dask integration is unavailable")
 
-    def get_dask_client():
+    def get_seamless_dask_client():
         return None
 
 
@@ -399,7 +399,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         if self._evaluated:
             return self._result_checksum
         if self._computation_task is None and self._computation_future is None:
-            dask_client = get_dask_client()
+            dask_client = get_seamless_dask_client()
             if dask_client is not None:
                 return self._compute_with_dask(require_value=True)
             task_loop = get_event_loop()
@@ -465,7 +465,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         return self._compute(api_origin="compute")
 
     async def _computation(self, require_value: bool) -> Checksum | None:
-        dask_client = get_dask_client()
+        dask_client = get_seamless_dask_client()
         if dask_client is not None:
             return await self._compute_with_dask_async(require_value=require_value)
         await self._run_dependencies_async(require_value=require_value)
@@ -497,7 +497,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         (If only the checksum is available, the transformation will be recomputed.)
         """
         ensure_open("transformation computation")
-        dask_client = get_dask_client()
+        dask_client = get_seamless_dask_client()
         if dask_client is not None:
             if self._computation_task is not None:
                 await self._computation_task
@@ -544,7 +544,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         ensure_open("transformation start")
         for _depname, dep in self._upstream_dependencies.items():
             dep.start()
-        dask_client = get_dask_client()
+        dask_client = get_seamless_dask_client()
         if dask_client is not None:
             if self._computation_task is None:
                 loop = loop or get_event_loop()
