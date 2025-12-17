@@ -54,7 +54,7 @@ _LOCAL_BUFFERS: Dict[str, bytes] = {}
 # Throttle how many concurrent tasks a single worker can handle.
 # Not to be changed dynamically
 TRANSFORMATION_THROTTLE = int(
-    os.environ.get("SEAMLESS_WORKER_TRANSFORMATION_THROTTLE"), 3
+    os.environ.get("SEAMLESS_WORKER_TRANSFORMATION_THROTTLE", 3)
 )
 
 
