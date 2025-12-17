@@ -29,6 +29,7 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
             "__as__",
             "__format__",
             "__code_checksum__",
+            "__code_text__",  # keep out of the checksum-defining payload
         ):
             # TODO:
             # __code_checksum__ is not really part of the transformation dict
@@ -41,10 +42,6 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
             #   => sem2syn needs to be added to database.
             #           Keep a per-client cache list of all written sem2syn, but otherwise do a blocking await
             #      Maybe setup sem2syn messaging between spawn process and main, but probably YAGNI
-            result[key] = value
-            continue
-        if key == "__code_text__":
-            result[key] = value
             continue
         if key.startswith("SPECIAL__"):
             continue
