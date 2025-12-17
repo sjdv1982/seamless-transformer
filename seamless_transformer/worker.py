@@ -744,19 +744,6 @@ def spawn(num_workers: Optional[int] = None) -> None:
             file=sys.stderr,
             flush=True,
         )
-    proc = mp.current_process()
-    if proc is not None and proc.name != "MainProcess":
-        allow_child_spawn = bool(
-            os.environ.get("SEAMLESS_ALLOW_CHILD_SPAWN", "").lower()
-            in ("1", "true", "yes")
-        )
-        if not allow_child_spawn:
-            # Child interpreter re-imported __main__: just no-op to avoid recursive spawns.
-            print(
-                "seamless.transformer.worker.spawn() called outside MainProcess; ignoring (guard with if __name__ == '__main__')",
-                file=sys.stderr,
-            )
-            return
     if has_spawned():
         raise RuntimeError("Workers have already been spawned")
     ensure_open("spawn workers")

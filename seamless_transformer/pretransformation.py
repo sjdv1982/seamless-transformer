@@ -16,6 +16,8 @@ NON_CHECKSUM_ITEMS = (
     "__meta__",
     "__env__",
     "__format__",
+    "__code_text__",
+    "__code_checksum__",
 )
 
 
