@@ -71,6 +71,15 @@ class _Pointer:
     metadata: Dict[str, Any]
 
 
+def _close_shm(shm: SharedMemory) -> None:
+    """Best-effort close wrapper that tolerates already-closed handles."""
+
+    try:
+        shm.close()
+    except Exception:
+        pass
+
+
 def _require_child_channel() -> tuple[ChildChannel, asyncio.AbstractEventLoop]:
     if _child_channel is None or _child_loop is None:
         raise RuntimeError("Worker channel is not initialized")
@@ -606,7 +615,13 @@ class _WorkerManager:
             len(data), {"checksum": checksum.hex(), "direction": "download"}
         )
         block = self._pointers[pointer["key"]]
-        block.shm.buf[: len(data)] = data
+        view = block.shm.buf
+        try:
+            view[: len(data)] = data
+        finally:
+            # Release the creator's handle; the shared segment stays alive until unlink.
+            del view
+            _close_shm(block.shm)
         return pointer
 
     async def _handle_downloaded(self, _handle, payload: Dict[str, Any]) -> None:
@@ -646,8 +661,13 @@ class _WorkerManager:
         if not pointer or "key" not in pointer:
             raise KeyError("Upload request missing pointer")
         block = await self._pop_pointer(pointer["key"])
-        data = bytes(block.shm.buf[: block.size])
-        block.shm.close()
+        # Ensure the creator's handle does not hold an FD before re-opening to read.
+        _close_shm(block.shm)
+        reader = SharedMemory(name=block.shm.name)
+        try:
+            data = bytes(reader.buf[: block.size])
+        finally:
+            reader.close()
         block.shm.unlink()
         checksum_hex = block.metadata.get("checksum")
         checksum = Checksum(checksum_hex) if checksum_hex is not None else None
@@ -673,6 +693,10 @@ class _WorkerManager:
                 key=key, shm=shm, size=size, metadata=dict(metadata or {})
             )
             self._pointers[key] = pointer
+            # For upload pointers we don't need to keep the creator's handle open.
+            direction = pointer.metadata.get("direction")
+            if direction == "upload":
+                _close_shm(pointer.shm)
             return {
                 "key": key,
                 "name": shm.name,
@@ -688,7 +712,7 @@ class _WorkerManager:
         if block is None:
             return
         try:
-            block.shm.close()
+            _close_shm(block.shm)
         finally:
             block.shm.unlink()
 
