@@ -58,6 +58,26 @@ TRANSFORMATION_THROTTLE = int(
 )
 
 
+def _bump_nofile_limit(min_soft: int = 4096) -> None:
+    """Try to lift the soft RLIMIT_NOFILE to reduce FD exhaustion."""
+
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = max(soft, min_soft)
+        if hard not in (-1, resource.RLIM_INFINITY):
+            target = min(target, hard)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except Exception:
+        # Best-effort; ignore on platforms without resource or on failure.
+        pass
+
+
+_bump_nofile_limit()
+
+
 def _memory_provider(_key: str) -> None:
     # Shared memory registry is unused for the worker pool.
     return None
