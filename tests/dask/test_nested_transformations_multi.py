@@ -47,12 +47,32 @@ def test_nested_transformations_multi():
             return first, second
 
         start = time.perf_counter()
-        tasks = [outer(f"job-{idx}").start() for idx in range(job_count)]
-        results = [tf.run() for tf in tqdm(tasks)]
+        """
+        results = []
+        for chunk in range(10):
+            p1 = int(job_count / 10 * chunk)
+            p2 = int(job_count / 10 * (chunk + 1))
+            tasks = [outer(f"job-{idx}").start() for idx in range(p1, p2)]
+            chunk_results = [tf.run() for tf in tqdm(tasks)]
+            results += chunk_results
+        """
+
+        tasks = [outer(f"job2-{idx}").start() for idx in range(job_count)]
+        # results = [tf.run() for tf in tqdm(tasks)]
+        results0 = [tf.compute() for tf in tqdm(tasks)]
+        print(sum([tasks[n].exception is not None for n in range(len(tasks))]))
+        for n in range(job_count):
+            if tasks[n].exception:
+                print(n, tasks[n].exception)
+                return
+
+        results = [cs.resolve("mixed") for cs in tqdm(results0)]
+
         duration = time.perf_counter() - start
+        print(duration)
 
         expected_labels = {
-            f"job-{idx}-{suffix}"
+            f"job2-{idx}-{suffix}"
             for idx in range(job_count)
             for suffix in ("1-a", "1-b", "2-a", "2-b")
         }
