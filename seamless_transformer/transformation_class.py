@@ -9,7 +9,6 @@ are intentionally omitted or stubbed.
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 import traceback
 import concurrent.futures as _cf
@@ -54,16 +53,6 @@ if TYPE_CHECKING:
 
 class TransformationError(RuntimeError):
     pass
-
-
-_PURE_DASK_ENV = "SEAMLESS_PURE_DASK"
-
-
-def _ensure_not_pure_dask() -> None:
-    if os.environ.get(_PURE_DASK_ENV):
-        raise TransformationError(
-            "Seamless transformers are unavailable in pure Dask mode"
-        )
 
 
 def running_in_jupyter() -> bool:
@@ -162,7 +151,6 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         pretransformation: "PreTransformation | None" = None,
         tf_dunder: dict | None = None,
     ) -> None:
-        _ensure_not_pure_dask()
         self._result_celltype = result_celltype
         self._upstream_dependencies = (upstream_dependencies or {}).copy()
         self._constructor_sync = constructor_sync
@@ -183,6 +171,12 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._dask_futures: TransformationFutures | None = None
         self._computation_task: Optional[asyncio.Task] = None
         self._computation_future: Optional[asyncio.Future] = None
+
+    def _prefer_local_execution(self) -> bool:
+        try:
+            return self._meta is not None and self._meta.get("local") is True
+        except Exception:
+            return False
 
     @property
     def scratch(self) -> bool:
@@ -412,7 +406,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             return self._result_checksum
         if self._computation_task is None and self._computation_future is None:
             dask_client = get_seamless_dask_client()
-            if dask_client is not None:
+            if dask_client is not None and not self._prefer_local_execution():
                 return self._compute_with_dask(require_value=True)
             task_loop = get_event_loop()
             self.start(loop=task_loop)
@@ -478,7 +472,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     async def _computation(self, require_value: bool) -> Checksum | None:
         dask_client = get_seamless_dask_client()
-        if dask_client is not None:
+        if dask_client is not None and not self._prefer_local_execution():
             return await self._compute_with_dask_async(require_value=require_value)
         await self._run_dependencies_async(require_value=require_value)
         await self._evaluation(require_value=require_value)
@@ -510,7 +504,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         """
         ensure_open("transformation computation")
         dask_client = get_seamless_dask_client()
-        if dask_client is not None:
+        if dask_client is not None and not self._prefer_local_execution():
             if self._computation_task is not None:
                 await self._computation_task
                 self._computation_task = None
@@ -557,7 +551,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         for _depname, dep in self._upstream_dependencies.items():
             dep.start()
         dask_client = get_seamless_dask_client()
-        if dask_client is not None:
+        if dask_client is not None and not self._prefer_local_execution():
             if self._computation_task is None:
                 loop = loop or get_event_loop()
                 self._computation_task = loop.create_task(

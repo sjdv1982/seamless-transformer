@@ -93,6 +93,9 @@ class TransformationCache:
                     return remote_result
 
         execution = get_execution()
+        meta = transformation_dict.get("__meta__") if isinstance(transformation_dict, dict) else None
+        if isinstance(meta, dict) and meta.get("local") is True:
+            execution = "process"
         _debug(
             f"execution={execution} has_spawned()={worker.has_spawned()} is_worker={is_worker()}"
         )
@@ -101,6 +104,18 @@ class TransformationCache:
             if jobserver_remote is None:
                 raise RuntimeError(
                     "Remote execution requested but seamless_remote is not installed"
+                )
+            if buffer_remote is None or database_remote is None:
+                raise RuntimeError(
+                    "Remote execution requires hashserver and database server"
+                )
+            if not buffer_remote.has_write_server():
+                raise RuntimeError(
+                    "Remote execution requires an active hashserver"
+                )
+            if not database_remote.has_write_server():
+                raise RuntimeError(
+                    "Remote execution requires an active database server"
                 )
             _debug("dispatching transformation to remote jobserver")
 
