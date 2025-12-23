@@ -9,6 +9,7 @@ are intentionally omitted or stubbed.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import traceback
 import concurrent.futures as _cf
@@ -53,6 +54,16 @@ if TYPE_CHECKING:
 
 class TransformationError(RuntimeError):
     pass
+
+
+_PURE_DASK_ENV = "SEAMLESS_PURE_DASK"
+
+
+def _ensure_not_pure_dask() -> None:
+    if os.environ.get(_PURE_DASK_ENV):
+        raise TransformationError(
+            "Seamless transformers are unavailable in pure Dask mode"
+        )
 
 
 def running_in_jupyter() -> bool:
@@ -151,6 +162,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         pretransformation: "PreTransformation | None" = None,
         tf_dunder: dict | None = None,
     ) -> None:
+        _ensure_not_pure_dask()
         self._result_celltype = result_celltype
         self._upstream_dependencies = (upstream_dependencies or {}).copy()
         self._constructor_sync = constructor_sync
