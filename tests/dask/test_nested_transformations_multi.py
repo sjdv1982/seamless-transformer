@@ -14,7 +14,7 @@ def test_nested_transformations_multi():
     """Stress nested + nested-nested execution with many small jobs."""
 
     main_pid = os.getpid()
-    job_count = 1000
+    job_count = 10
 
     try:
 

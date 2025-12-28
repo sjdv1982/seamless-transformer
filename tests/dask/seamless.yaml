@@ -1,5 +1,7 @@
 - project: myproject
 - execution: remote
 - remote: daskserver
+# for pure-dask test:
+# - persistent: false
 # .seamless.yaml: define a cluster, e.g.
 # - cluster: local

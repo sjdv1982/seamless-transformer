@@ -4,7 +4,7 @@ seamless.config.init()
 
 from seamless.transformer import direct, delayed
 
-OFFSET = 0  # increment to force cache misses
+OFFSET = 25  # increment to force cache misses
 
 
 def test_dependencies():

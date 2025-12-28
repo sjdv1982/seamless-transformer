@@ -93,7 +93,11 @@ class TransformationCache:
                     return remote_result
 
         execution = get_execution()
-        meta = transformation_dict.get("__meta__") if isinstance(transformation_dict, dict) else None
+        meta = (
+            transformation_dict.get("__meta__")
+            if isinstance(transformation_dict, dict)
+            else None
+        )
         if isinstance(meta, dict) and meta.get("local") is True:
             execution = "process"
         _debug(
@@ -110,9 +114,7 @@ class TransformationCache:
                     "Remote execution requires hashserver and database server"
                 )
             if not buffer_remote.has_write_server():
-                raise RuntimeError(
-                    "Remote execution requires an active hashserver"
-                )
+                raise RuntimeError("Remote execution requires an active hashserver")
             if not database_remote.has_write_server():
                 raise RuntimeError(
                     "Remote execution requires an active database server"

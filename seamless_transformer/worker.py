@@ -37,7 +37,13 @@ from seamless.caching.buffer_cache import get_buffer_cache
 from .process import ChildChannel, ProcessManager, ConnectionClosed
 from .run import run_transformation_dict_in_process
 
+_DASK_AVAILABLE_ENV = "SEAMLESS_DASK_AVAILABLE"
+_DASK_SCHEDULER_ENV = "SEAMLESS_DASK_SCHEDULER"
+_DASK_WORKERS_ENV = "SEAMLESS_DASK_WORKERS"
+_DASK_REMOTE_CLIENTS_ENV = "SEAMLESS_DASK_REMOTE_CLIENTS"
+_ALLOW_REMOTE_CLIENTS_ENV = "SEAMLESS_ALLOW_REMOTE_CLIENTS_IN_WORKER"
 _has_spawned = False
+_dask_available = os.environ.get(_DASK_AVAILABLE_ENV) == "1"
 
 _worker_manager: "_WorkerManager | None" = None
 _child_channel: Optional[ChildChannel] = None
@@ -137,11 +143,74 @@ def has_spawned() -> bool:
     return _has_spawned
 
 
+def dask_available() -> bool:
+    """Return True if Dask submission is available in this process."""
+
+    return _dask_available
+
+
 def _set_has_spawned(value: bool) -> None:
     """Internal helper to reset spawn flag (testing/cleanup)."""
 
     global _has_spawned
     _has_spawned = bool(value)
+
+
+def _set_dask_available(value: bool) -> None:
+    """Internal helper to set the Dask availability flag."""
+
+    global _dask_available
+    _dask_available = bool(value)
+    if _dask_available:
+        os.environ[_DASK_AVAILABLE_ENV] = "1"
+    else:
+        os.environ.pop(_DASK_AVAILABLE_ENV, None)
+
+
+def _configure_remote_clients_from_env() -> None:
+    payload = os.environ.get(_DASK_REMOTE_CLIENTS_ENV)
+    if not payload:
+        return
+    try:
+        import json
+        from seamless.config import set_remote_clients
+
+        set_remote_clients(json.loads(payload))
+    except Exception:
+        pass
+
+
+def _configure_dask_client_from_env() -> None:
+    scheduler_address = os.environ.get(_DASK_SCHEDULER_ENV)
+    if not scheduler_address:
+        return
+    try:
+        from seamless_dask.transformer_client import (
+            get_seamless_dask_client,
+            set_seamless_dask_client,
+        )
+    except Exception:
+        return
+    if get_seamless_dask_client() is not None:
+        return
+    try:
+        from distributed import Client as DistributedClient
+        from seamless_dask.client import SeamlessDaskClient
+
+        try:
+            worker_count = int(os.environ.get(_DASK_WORKERS_ENV, "1") or 1)
+        except Exception:
+            worker_count = 1
+        dask_client = DistributedClient(
+            scheduler_address, timeout="10s", set_as_default=False
+        )
+        sd_client = SeamlessDaskClient(
+            dask_client,
+            worker_plugin_workers=worker_count,
+        )
+        set_seamless_dask_client(sd_client)
+    except Exception:
+        pass
 
 
 def _request_parent_sync(op: str, payload: Any) -> Any:
@@ -309,6 +378,8 @@ async def _child_initializer(channel: ChildChannel) -> None:
     _child_loop = asyncio.get_running_loop()
     set_is_worker(True)
     _patch_worker_primitives()
+    _configure_remote_clients_from_env()
+    _configure_dask_client_from_env()
 
     async def handle_execute(payload: Dict[str, Any]) -> Checksum | str:
         loop = asyncio.get_running_loop()
@@ -780,7 +851,7 @@ class _WorkerManager:
                 self._prefetched_buffers[cs_hex] = bytes(buf.content)
 
 
-def spawn(num_workers: Optional[int] = None) -> None:
+def spawn(num_workers: Optional[int] = None, dask_available: bool = False) -> None:
     global _worker_manager
     if _DEBUG_SHUTDOWN:
         print(
@@ -792,7 +863,14 @@ def spawn(num_workers: Optional[int] = None) -> None:
         raise RuntimeError("Workers have already been spawned")
     ensure_open("spawn workers")
     worker_count = num_workers or (os.cpu_count() or 1)
-    _worker_manager = _WorkerManager(worker_count)
+    _set_dask_available(dask_available)
+    if dask_available:
+        os.environ.setdefault(_ALLOW_REMOTE_CLIENTS_ENV, "1")
+    try:
+        _worker_manager = _WorkerManager(worker_count)
+    except Exception:
+        _set_dask_available(False)
+        raise
     _set_has_spawned(True)
     if _DEBUG_SHUTDOWN:
         print(
@@ -819,6 +897,7 @@ def _cleanup_workers() -> None:
         pass
     _worker_manager = None
     _has_spawned = False
+    _set_dask_available(False)
 
 
 def shutdown_workers(*, wait: bool = True) -> None:
@@ -833,6 +912,7 @@ def shutdown_workers(*, wait: bool = True) -> None:
         pass
     _worker_manager = None
     _has_spawned = False
+    _set_dask_available(False)
 
 
 def get_throttle_load() -> tuple[int, int]:
@@ -890,6 +970,7 @@ __all__ = [
     "dispatch_to_workers",
     "forward_to_parent",
     "has_spawned",
+    "dask_available",
     "get_throttle_load",
     "shutdown_workers",
 ]

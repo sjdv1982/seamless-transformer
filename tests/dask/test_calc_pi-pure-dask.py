@@ -5,8 +5,9 @@ import seamless.config
 
 seamless.config.init()
 
-import seamless
-from seamless.transformer import delayed
+from distributed import as_completed, get_client
+
+from dask import delayed
 from tqdm import tqdm
 
 
@@ -31,7 +32,7 @@ def calc_pi(seed, ndots):
 def test_calc_pi():
     import numpy as np
 
-    seed = 86246
+    seed = 0
     np.random.seed(seed)
     # ntrials = 1000 ### doesn't work
     ntrials = 300
@@ -39,17 +40,22 @@ def test_calc_pi():
     ndots = 1000000000
 
     start = time.perf_counter()
-    tasks = [calc_pi(seeds[idx], ndots).start() for idx in range(ntrials)]
-    results0 = [tf.compute() for tf in tqdm(tasks)]
-    print(sum([tasks[n].exception is not None for n in range(len(tasks))]))
-    for n in range(ntrials):
-        if tasks[n].exception:
-            print(n, tasks[n].exception)
-            return
+    tasks = [calc_pi(seeds[idx], ndots) for idx in range(ntrials)]
 
-    results = [cs.resolve("mixed") for cs in tqdm(results0)]
+    import distributed
+
+    client = distributed.get_client()
+    assert client is not None
+    futures = client.compute(tasks)
+    results = []
+    for fut in tqdm(as_completed(futures), total=len(futures)):
+        results.append(fut.result())
     results = np.array(results)
 
     duration = time.perf_counter() - start
     print(duration)
     print(results.mean(), results.std(), np.pi)
+
+
+if __name__ == "__main__":
+    test_calc_pi()
