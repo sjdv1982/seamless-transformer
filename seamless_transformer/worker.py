@@ -853,6 +853,18 @@ class _WorkerManager:
 
 def spawn(num_workers: Optional[int] = None, dask_available: bool = False) -> None:
     global _worker_manager
+    if not dask_available:
+        try:
+            if mp.parent_process() is not None or mp.current_process().name != "MainProcess":
+                print(
+                    "seamless.transformer.worker.spawn() called outside MainProcess; ignoring",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return None
+        except Exception:
+            # If process inspection fails, fall back to attempting spawn.
+            pass
     if _DEBUG_SHUTDOWN:
         print(
             f"[worker.spawn] entry has_spawned()={has_spawned()} manager={_worker_manager}",

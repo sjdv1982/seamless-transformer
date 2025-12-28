@@ -11,7 +11,7 @@ def test_remote_requires_storage(monkeypatch):
 
     tf = add(1, 2)
     monkeypatch.setattr(transformation_cache, "get_execution", lambda: "remote")
-    monkeypatch.setattr(transformation_class, "get_seamless_dask_client", lambda: None)
+    monkeypatch.setattr(transformation_class, "_dask_available", lambda: False)
     monkeypatch.setattr(transformation_cache, "jobserver_remote", object())
     monkeypatch.setattr(transformation_cache, "buffer_remote", None)
     monkeypatch.setattr(transformation_cache, "database_remote", None)
@@ -29,7 +29,7 @@ def test_local_bypasses_remote_storage(monkeypatch):
     add.local = True
     tf = add(1, 2)
     monkeypatch.setattr(transformation_cache, "get_execution", lambda: "remote")
-    monkeypatch.setattr(transformation_class, "get_seamless_dask_client", lambda: None)
+    monkeypatch.setattr(transformation_class, "_dask_available", lambda: False)
     monkeypatch.setattr(transformation_cache, "jobserver_remote", object())
     monkeypatch.setattr(transformation_cache, "buffer_remote", None)
     monkeypatch.setattr(transformation_cache, "database_remote", None)
