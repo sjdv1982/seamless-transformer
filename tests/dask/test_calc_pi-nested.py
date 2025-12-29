@@ -32,13 +32,6 @@ def calc_pi_all(seed, ntrials, *, checksum_only, ndots=1000000000):
         pi = 4 * frac
         return pi
 
-    from seamless_config.select import select_execution
-
-    if os.environ.get("SEAMLESS_TEST_REMOTE") == "1":
-        select_execution("remote")
-    else:
-        select_execution("process")
-
     np.random.seed(seed)
     seeds = np.random.randint(0, 999999, ntrials)
 
@@ -61,10 +54,10 @@ def calc_pi_all(seed, ntrials, *, checksum_only, ndots=1000000000):
 
 
 def test_calc_pi():
-    seed = 226
-    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_NESTED_TRIALS", "3"))
-    checksum_only = True
-    ndots = int(os.environ.get("SEAMLESS_TEST_PI_NESTED_DOTS", "200000"))
+    seed = 229
+    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_NESTED_TRIALS", "1000"))
+    checksum_only = False
+    ndots = int(os.environ.get("SEAMLESS_TEST_PI_NESTED_DOTS", "1000000000"))
     result = calc_pi_all(seed, ntrials, checksum_only=checksum_only, ndots=ndots)
     print(result)
 

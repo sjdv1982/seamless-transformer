@@ -111,6 +111,6 @@ def test_nested_transformations_cached():
     base_keys = {
         entry.get("key")
         for entry in task_stream
-        if str(entry.get("key", "")).startswith("base-")
+        if str(entry.get("key", "")).startswith("base_")
     }
     assert len(base_keys) >= 2, base_keys
