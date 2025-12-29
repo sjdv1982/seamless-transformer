@@ -119,11 +119,13 @@ def _ensure_loop_running(loop: asyncio.AbstractEventLoop) -> None:
 
 
 def _dask_available() -> bool:
+    if is_worker():
+        return False
     try:
         from seamless_dask.transformer_client import get_seamless_dask_client
     except Exception:
-        return worker.dask_available()
-    return get_seamless_dask_client() is not None or worker.dask_available()
+        return False
+    return get_seamless_dask_client() is not None
 
 
 class Transformation(TransformationDaskMixin, Generic[T]):

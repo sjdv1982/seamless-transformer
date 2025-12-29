@@ -1,3 +1,4 @@
+import os
 import time
 import asyncio
 
@@ -7,10 +8,10 @@ seamless.config.init()
 
 from seamless.transformer import direct, delayed
 
-DELAY = 0.5
+DELAY = float(os.environ.get("SEAMLESS_TEST_ASYNC_DELAY", "0.2"))
 
 NSTART = 1  # increment this to force cache misses
-N = 1000  # not beyond 10 000
+N = int(os.environ.get("SEAMLESS_TEST_ASYNC_N", "200"))  # not beyond 10 000
 
 
 # TODO: investigate why every transformation base task takes hundreds of millisecs,

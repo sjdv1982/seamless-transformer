@@ -137,6 +137,13 @@ class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
             self._threads.add(t)
 
 
+_DASK_DELEGATE_MAX_WORKERS = min(64, (os.cpu_count() or 1) * 4)
+_DASK_DELEGATE_EXECUTOR = _DaemonThreadPoolExecutor(
+    max_workers=_DASK_DELEGATE_MAX_WORKERS,
+    thread_name_prefix="dask-delegate",
+)
+
+
 def has_spawned() -> bool:
     """Return True if workers have been spawned in this process."""
 
@@ -181,6 +188,13 @@ def _configure_remote_clients_from_env() -> None:
 
 
 def _configure_dask_client_from_env() -> None:
+    try:
+        from seamless import is_worker
+
+        if is_worker():
+            return
+    except Exception:
+        return
     scheduler_address = os.environ.get(_DASK_SCHEDULER_ENV)
     if not scheduler_address:
         return
@@ -652,6 +666,77 @@ class _WorkerManager:
             tf_dunder = payload.get("tf_dunder", {}) or {}
             scratch = bool(payload.get("scratch", False))
             await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
+            if transformation_dict is None:
+                try:
+                    resolved = tf_checksum.resolve(celltype="plain")
+                except Exception:
+                    resolved = None
+                if isinstance(resolved, dict):
+                    transformation_dict = resolved
+            dask_client = None
+            if isinstance(transformation_dict, dict):
+                try:
+                    from seamless_dask.transformer_client import (
+                        get_seamless_dask_client,
+                    )
+                    from seamless_dask.types import TransformationSubmission
+                except Exception:
+                    dask_client = None
+                else:
+                    dask_client = get_seamless_dask_client()
+            if dask_client is not None:
+                submission = TransformationSubmission(
+                    transformation_dict=transformation_dict,
+                    inputs={},
+                    input_futures={},
+                    tf_checksum=tf_checksum.hex(),
+                    tf_dunder=tf_dunder,
+                    scratch=scratch,
+                    require_value=False,
+                )
+
+                permission_denied = object()
+
+                def _submit():
+                    permission_granted = False
+                    try:
+                        from seamless_dask.permissions import (
+                            try_request_permission,
+                            release_permission,
+                        )
+                    except Exception:
+                        try_request_permission = release_permission = None
+
+                    if try_request_permission is not None:
+                        permission_granted = try_request_permission()
+                        if not permission_granted:
+                            return permission_denied
+
+                    try:
+                        futures = dask_client.submit_transformation(
+                            submission, need_fat=False
+                        )
+                        _tf_checksum_hex, result_checksum_hex, exc = (
+                            futures.thin.result()
+                        )
+                        if exc:
+                            return exc
+                        if result_checksum_hex is None:
+                            return "Result checksum unavailable"
+                        return Checksum(result_checksum_hex)
+                    finally:
+                        if permission_granted and release_permission is not None:
+                            release_permission()
+
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(_DASK_DELEGATE_EXECUTOR, _submit)
+                if result is not permission_denied:
+                    if isinstance(result, Checksum):
+                        try:
+                            result.tempref()
+                        except Exception:
+                            pass
+                    return result
             # try to find a handle with available throttle; refuse only if all are at cap
             result = None
             tried: set[str] = set()
@@ -855,7 +940,10 @@ def spawn(num_workers: Optional[int] = None, dask_available: bool = False) -> No
     global _worker_manager
     if not dask_available:
         try:
-            if mp.parent_process() is not None or mp.current_process().name != "MainProcess":
+            if (
+                mp.parent_process() is not None
+                or mp.current_process().name != "MainProcess"
+            ):
                 print(
                     "seamless.transformer.worker.spawn() called outside MainProcess; ignoring",
                     file=sys.stderr,

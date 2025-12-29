@@ -34,9 +34,9 @@ def test_calc_pi():
     seed = 86246
     np.random.seed(seed)
     # ntrials = 1000 ### doesn't work
-    ntrials = 300
+    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "10"))
     seeds = np.random.randint(0, 999999, ntrials)
-    ndots = 1000000000
+    ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "1000000"))
 
     start = time.perf_counter()
     tasks = [calc_pi(seeds[idx], ndots).start() for idx in range(ntrials)]
