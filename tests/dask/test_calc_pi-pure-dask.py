@@ -35,9 +35,9 @@ def test_calc_pi():
     seed = 0
     np.random.seed(seed)
     # ntrials = 1000 ### doesn't work
-    ntrials = 300
+    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "300"))
     seeds = np.random.randint(0, 999999, ntrials)
-    ndots = 1000000000
+    ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "100000000"))
 
     start = time.perf_counter()
     tasks = [calc_pi(seeds[idx], ndots) for idx in range(ntrials)]
@@ -55,7 +55,3 @@ def test_calc_pi():
     duration = time.perf_counter() - start
     print(duration)
     print(results.mean(), results.std(), np.pi)
-
-
-if __name__ == "__main__":
-    test_calc_pi()

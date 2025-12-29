@@ -54,10 +54,10 @@ def calc_pi_all(seed, ntrials, *, checksum_only, ndots=1000000000):
 
 
 def test_calc_pi():
-    seed = 229
-    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_NESTED_TRIALS", "1000"))
+    seed = 0
+    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "1000"))
     checksum_only = False
-    ndots = int(os.environ.get("SEAMLESS_TEST_PI_NESTED_DOTS", "1000000000"))
+    ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "1000000000"))
     result = calc_pi_all(seed, ntrials, checksum_only=checksum_only, ndots=ndots)
     print(result)
 

@@ -31,10 +31,10 @@ def calc_pi(seed, ndots):
 def test_calc_pi():
     import numpy as np
 
-    seed = 1234
+    seed = 0
     np.random.seed(seed)
     # ntrials = 1000 ### doesn't work
-    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "100"))
+    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "300"))
     seeds = np.random.randint(0, 999999, ntrials)
     ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "100000000"))
 
