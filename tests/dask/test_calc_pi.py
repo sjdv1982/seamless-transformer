@@ -31,12 +31,12 @@ def calc_pi(seed, ndots):
 def test_calc_pi():
     import numpy as np
 
-    seed = 86246
+    seed = 1234
     np.random.seed(seed)
     # ntrials = 1000 ### doesn't work
-    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "10"))
+    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "100"))
     seeds = np.random.randint(0, 999999, ntrials)
-    ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "1000000"))
+    ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "100000000"))
 
     start = time.perf_counter()
     tasks = [calc_pi(seeds[idx], ndots).start() for idx in range(ntrials)]
