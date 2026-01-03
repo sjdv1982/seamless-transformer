@@ -93,6 +93,9 @@ class Transformer(Generic[P, R]):
 
             - meta. Accesses all meta-information (including local)
 
+            - driver. If True, marks the transformer as a driver script so
+                    its transformations bypass Dask throttling.
+
             - celltypes. Returns a wrapper where you can set the celltypes
                     of the individual transformer pins.
                 The syntax is: Transformer.celltypes.a = "text"
@@ -221,6 +224,17 @@ class Transformer(Generic[P, R]):
         if not isinstance(value, bool) and value is not None:
             raise TypeError(type(value))
         self.meta = {"__direct_print__": value}
+
+    @property
+    def driver(self) -> bool:
+        """Marks the transformer as a driver script (bypasses Dask throttling)."""
+        return self._meta.get("driver", False)
+
+    @driver.setter
+    def driver(self, value):
+        if not isinstance(value, bool) and value is not None:
+            raise TypeError(type(value))
+        self.meta = {"driver": value}
 
     @property
     def local(self) -> bool | None:

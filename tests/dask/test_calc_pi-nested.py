@@ -51,6 +51,7 @@ def calc_pi_all(seed, ntrials, *, checksum_only, ndots=1000000000):
 
 
 # calc_pi_all.celltypes["result"] = "bytes"
+calc_pi_all.driver = True
 
 
 def test_calc_pi():
