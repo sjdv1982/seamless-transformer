@@ -692,6 +692,15 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     def __del__(self):
         if self._destructor is not None:
             self._destructor(self)
+        futures = getattr(self, "_dask_futures", None)
+        if futures is not None:
+            for future in (futures.base, futures.thin, futures.fat):
+                if future is None:
+                    continue
+                try:
+                    future.release()
+                except Exception:
+                    pass
         try:
             from seamless_dask.permissions import shutdown_permission_manager
 
