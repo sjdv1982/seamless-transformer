@@ -679,7 +679,10 @@ class _WorkerManager:
                     from seamless_dask.transformer_client import (
                         get_seamless_dask_client,
                     )
-                    from seamless_dask.types import TransformationSubmission
+                    from seamless_dask.types import (
+                        TransformationInputSpec,
+                        TransformationSubmission,
+                    )
                 except Exception:
                     dask_client = None
                 else:
@@ -699,6 +702,7 @@ class _WorkerManager:
 
                 def _submit():
                     permission_granted = False
+                    futures = None
                     try:
                         from seamless_dask.permissions import (
                             try_request_permission,
@@ -713,6 +717,33 @@ class _WorkerManager:
                             return permission_denied
 
                     try:
+                        if isinstance(transformation_dict, dict):
+                            inputs: Dict[str, TransformationInputSpec] = {}
+                            input_futures: Dict[str, Any] = {}
+                            for pinname, value in transformation_dict.items():
+                                if pinname.startswith("__"):
+                                    continue
+                                if not isinstance(value, tuple) or len(value) < 3:
+                                    continue
+                                celltype, subcelltype, checksum_hex = value
+                                if checksum_hex is None:
+                                    raise RuntimeError(
+                                        f"Input '{pinname}' has no checksum"
+                                    )
+                                if isinstance(checksum_hex, Checksum):
+                                    checksum_hex = checksum_hex.hex()
+                                inputs[pinname] = TransformationInputSpec(
+                                    name=pinname,
+                                    celltype=celltype,
+                                    subcelltype=subcelltype,
+                                    checksum=checksum_hex,
+                                    kind="checksum",
+                                )
+                                input_futures[pinname] = (
+                                    dask_client.get_fat_checksum_future(checksum_hex)
+                                )
+                            submission.inputs = inputs
+                            submission.input_futures = input_futures
                         futures = dask_client.submit_transformation(
                             submission, need_fat=False
                         )
@@ -725,6 +756,35 @@ class _WorkerManager:
                             return "Result checksum unavailable"
                         return Checksum(result_checksum_hex)
                     finally:
+                        if futures is not None:
+                            try:
+                                release = getattr(
+                                    dask_client, "release_transformation_futures", None
+                                )
+                                if callable(release):
+                                    release(futures, cancel=True)
+                                else:
+                                    for fut in (
+                                        futures.base,
+                                        futures.thin,
+                                        futures.fat,
+                                    ):
+                                        if fut is None:
+                                            continue
+                                        try:
+                                            fut.release()
+                                        except Exception:
+                                            pass
+                                        try:
+                                            raw_client = getattr(
+                                                dask_client, "client", None
+                                            )
+                                            if raw_client is not None:
+                                                raw_client.cancel(fut, force=True)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
                         if permission_granted and release_permission is not None:
                             release_permission()
 
