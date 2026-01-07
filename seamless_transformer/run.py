@@ -1,7 +1,9 @@
 """Execution helpers for direct transformers."""
 
 from typing import Any, Dict, List, Tuple
+from contextlib import contextmanager
 import os
+import threading
 
 from seamless import Buffer, Checksum
 from .cached_compile import exec_code
@@ -14,6 +16,22 @@ from .transformation_utils import (
 )
 
 PACK_DEEP_RESULTS = False
+
+_DRIVER_CONTEXT = threading.local()
+
+
+def is_driver_context() -> bool:
+    return bool(getattr(_DRIVER_CONTEXT, "active", False))
+
+
+@contextmanager
+def _driver_context(active: bool):
+    prev = getattr(_DRIVER_CONTEXT, "active", False)
+    _DRIVER_CONTEXT.active = bool(active)
+    try:
+        yield
+    finally:
+        _DRIVER_CONTEXT.active = prev
 
 
 def run_transformation_dict_in_process(
@@ -55,6 +73,8 @@ def run_transformation_dict_in_process(
 
     transformation: Dict[str, Any] = {}
     transformation.update(transformation_dict)
+    meta = transformation.get("__meta__")
+    driver_active = bool(meta.get("driver")) if isinstance(meta, dict) else False
 
     if transformation.get("__language__") == "bash":
         raise NotImplementedError("Bash transformers are not supported yet")
@@ -116,20 +136,21 @@ def run_transformation_dict_in_process(
     if checksum_hex:
         identifier = f"{identifier}-{checksum_hex}"
 
-    with injector.active_workspace(module_workspace, namespace):
-        exec_code(
-            code,
-            identifier,
-            namespace,
-            inputs,
-            output_name,
-            with_ipython_kernel=False,
-        )
-        try:
-            result = namespace[output_name]
-        except KeyError:
-            msg = "Output variable name '%s' undefined" % output_name
-            raise RuntimeError(msg) from None
+    with _driver_context(driver_active):
+        with injector.active_workspace(module_workspace, namespace):
+            exec_code(
+                code,
+                identifier,
+                namespace,
+                inputs,
+                output_name,
+                with_ipython_kernel=False,
+            )
+            try:
+                result = namespace[output_name]
+            except KeyError:
+                msg = "Output variable name '%s' undefined" % output_name
+                raise RuntimeError(msg) from None
 
     if result is None:
         raise RuntimeError("Result is empty")
@@ -197,4 +218,5 @@ def get_transformation_inputs_output(
 __all__ = [
     "run_transformation_dict_in_process",
     "get_transformation_inputs_output",
+    "is_driver_context",
 ]

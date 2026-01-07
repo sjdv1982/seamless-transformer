@@ -337,6 +337,17 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         for k in list(self._meta.keys()):
             if self._meta[k] is None:
                 self._meta.pop(k)
+        pretransformation = getattr(self, "_pretransformation", None)
+        if pretransformation is not None:
+            try:
+                if self._meta:
+                    pretransformation.pretransformation_dict["__meta__"] = deepcopy(
+                        self._meta
+                    )
+                else:
+                    pretransformation.pretransformation_dict.pop("__meta__", None)
+            except Exception:
+                pass
         return self._meta
 
     def _verify_sync(self, task_loop0, err_msg: str, jupyter_err_msg: str):
