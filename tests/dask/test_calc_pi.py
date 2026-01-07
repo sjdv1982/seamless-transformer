@@ -24,7 +24,7 @@ def calc_pi(seed, ndots):
         dis = x**2 + y**2
         in_circle += (dis <= 1).sum()
     frac = in_circle / ndots
-    pi = 4 * frac
+    pi = 4.0 * frac
     return pi
 
 
