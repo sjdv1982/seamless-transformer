@@ -658,6 +658,7 @@ class _WorkerManager:
         self._delegate_lock: Optional[asyncio.Lock] = None
         self._delegate_cleanup_task: asyncio.Task | None = None
         self._delegate_owner_cancelled: Dict[str, float] = {}
+        self._delegate_owner_by_handle: Dict[str, str] = {}
 
         init_future = asyncio.run_coroutine_threadsafe(
             self._async_init(worker_count), self.loop
@@ -835,6 +836,8 @@ class _WorkerManager:
                 acquired = True
 
             self._load[handle.name] = self._load.get(handle.name, 0) + 1
+            if owner_dask_key:
+                self._delegate_owner_by_handle[handle.name] = owner_dask_key
             retry = False
             result: Checksum | str | None = None
             try:
@@ -858,6 +861,8 @@ class _WorkerManager:
                     raise
             finally:
                 self._load[handle.name] = max(0, self._load.get(handle.name, 0) - 1)
+                if owner_dask_key and self._delegate_owner_by_handle.get(handle.name) == owner_dask_key:
+                    self._delegate_owner_by_handle.pop(handle.name, None)
                 if acquired and limit is not None:
                     limit.release()
             if not retry:
@@ -984,6 +989,7 @@ class _WorkerManager:
         now = time.monotonic()
         alive: set[str] = set()
         cancelled: set[str] = set()
+        debug_items: list[tuple[str, str | None, bool | None]] = []
         for result in results:
             if not isinstance(result, dict):
                 continue
@@ -992,6 +998,8 @@ class _WorkerManager:
                 who_wants = None
                 if isinstance(info, tuple) and len(info) == 2:
                     state, who_wants = info
+                if _DELEGATE_DEBUG_CLEANUP:
+                    debug_items.append((key, state, who_wants))
                 if _owner_task_cancelled(state, who_wants):
                     cancelled.add(key)
                 else:
@@ -1000,6 +1008,21 @@ class _WorkerManager:
             self._delegate_owner_cancelled.pop(key, None)
         for key in cancelled:
             self._delegate_owner_cancelled[key] = now
+        if _DELEGATE_DEBUG_CLEANUP and debug_items:
+            logger = logging.getLogger(__name__)
+            try:
+                summary = ", ".join(
+                    f"{key}:{state}:{who}"
+                    for key, state, who in debug_items[:10]
+                )
+                logger.warning(
+                    "[delegate-cleanup] owner-states alive=%s cancelled=%s sample=%s",
+                    len(alive),
+                    len(cancelled),
+                    summary,
+                )
+            except Exception:
+                pass
         if _DELEGATE_OWNER_CANCEL_TTL > 0:
             for key, timestamp in list(self._delegate_owner_cancelled.items()):
                 try:
@@ -1038,6 +1061,25 @@ class _WorkerManager:
             await asyncio.sleep(_DELEGATE_CLEANUP_INTERVAL)
             if self._delegate_lock is None:
                 continue
+            if _DELEGATE_DEBUG_CLEANUP:
+                try:
+                    missing_owner = 0
+                    missing_owner_key = 0
+                    for entry in self._delegate_registry.values():
+                        if not entry.get("owner"):
+                            missing_owner += 1
+                        if not entry.get("owner_dask_key"):
+                            missing_owner_key += 1
+                    logger.warning(
+                        "[delegate-cleanup] tick interval=%s registry=%s completed=%s missing_owner=%s missing_owner_key=%s",
+                        _DELEGATE_CLEANUP_INTERVAL,
+                        len(self._delegate_registry),
+                        len(self._delegate_completed),
+                        missing_owner,
+                        missing_owner_key,
+                    )
+                except Exception:
+                    pass
             await self._update_delegate_owner_states()
             now = time.monotonic()
             stale: list[
@@ -1067,20 +1109,24 @@ class _WorkerManager:
                         handle is None or endpoint is None or endpoint.is_closed()
                     )
                     expired = False
+                    thin_state = "unknown"
                     if _DELEGATE_STALE_TTL > 0 and last_seen is not None:
                         try:
                             expired = (now - float(last_seen)) >= _DELEGATE_STALE_TTL
                         except Exception:
                             expired = False
-                    if expired and not owner_closed:
-                        futures = entry.get("futures")
-                        thin = getattr(futures, "thin", None) if futures is not None else None
-                        if thin is not None:
-                            try:
-                                if not thin.done() and not thin.cancelled():
-                                    expired = False
-                            except Exception:
-                                expired = False
+                    futures = entry.get("futures")
+                    thin = getattr(futures, "thin", None) if futures is not None else None
+                    if thin is not None:
+                        try:
+                            if thin.cancelled():
+                                thin_state = "cancelled"
+                            elif thin.done():
+                                thin_state = "done"
+                            else:
+                                thin_state = "pending"
+                        except Exception:
+                            thin_state = "error"
                     owner_cancelled = (
                         owner_key is not None
                         and owner_key in self._delegate_owner_cancelled
@@ -1107,7 +1153,7 @@ class _WorkerManager:
                 expired,
                 owner_cancelled,
             ) in stale:
-                if owner_cancelled:
+                if owner_cancelled or owner_closed:
                     payload = {"status": "cancelled"}
                 else:
                     payload = self._delegate_payload_from_entry(entry)
@@ -1116,14 +1162,22 @@ class _WorkerManager:
                         async with self._delegate_lock:
                             self._delegate_completed[token] = (payload, now)
                 if _DELEGATE_DEBUG_CLEANUP:
+                    last_seen_age = None
+                    try:
+                        if entry.get("last_seen") is not None:
+                            last_seen_age = now - float(entry["last_seen"])
+                    except Exception:
+                        last_seen_age = None
                     logger.warning(
-                        "[delegate-cleanup] cancel token=%s owner=%s owner_key=%s closed=%s expired=%s cancelled=%s",
+                        "[delegate-cleanup] cancel token=%s owner=%s owner_key=%s closed=%s expired=%s cancelled=%s last_seen_age=%.2fs thin=%s",
                         token,
                         owner,
                         owner_key,
                         owner_closed,
                         expired,
                         owner_cancelled,
+                        -1.0 if last_seen_age is None else last_seen_age,
+                        thin_state,
                     )
                 self._release_delegate_entry(entry, cancel=True)
 
@@ -1190,6 +1244,10 @@ class _WorkerManager:
             if not driver_context:
                 driver_context = bool(payload.get("driver_context", False))
             owner_dask_key = _normalize_owner_dask_key(payload.get("owner_dask_key"))
+            if not owner_dask_key:
+                owner_dask_key = self._delegate_owner_by_handle.get(
+                    getattr(_handle, "name", None) or ""
+                )
             cached_result = await self._get_cached_transformation_result(tf_checksum)
             if cached_result is not None:
                 return {"status": "done", "result": cached_result.hex()}
