@@ -1274,70 +1274,73 @@ class _WorkerManager:
                     dask_client = None
                 else:
                     dask_client = get_seamless_dask_client()
-                    submission = TransformationSubmission(
-                        transformation_dict=transformation_dict,
-                        inputs={},
-                        input_futures={},
-                        tf_checksum=tf_checksum.hex(),
-                        tf_dunder=tf_dunder,
-                        scratch=scratch,
-                        require_value=False,
-                    )
-                    dep_checksums = _dependency_checksums_from_tf_dunder(tf_dunder)
-                    inputs: Dict[str, TransformationInputSpec] = {}
-                    input_futures: Dict[str, Any] = {}
-                    for pinname, value in transformation_dict.items():
-                        if pinname.startswith("__"):
-                            continue
-                        if not isinstance(value, tuple) or len(value) < 3:
-                            continue
-                        celltype, subcelltype, checksum_hex = value
-                        dep_tf_checksum = dep_checksums.get(pinname)
-                        dep_futures = None
-                        if dep_tf_checksum:
-                            get_futures = getattr(
-                                dask_client, "get_transformation_futures", None
-                            )
-                            if callable(get_futures):
-                                dep_futures = get_futures(dep_tf_checksum)
-                        if dep_futures is not None:
-                            if dep_futures.fat is None:
-                                dep_futures.fat = dask_client.ensure_fat_future(
-                                    dep_futures
+                    if dask_client is None:
+                        submission = None
+                    else:
+                        submission = TransformationSubmission(
+                            transformation_dict=transformation_dict,
+                            inputs={},
+                            input_futures={},
+                            tf_checksum=tf_checksum.hex(),
+                            tf_dunder=tf_dunder,
+                            scratch=scratch,
+                            require_value=False,
+                        )
+                        dep_checksums = _dependency_checksums_from_tf_dunder(tf_dunder)
+                        inputs: Dict[str, TransformationInputSpec] = {}
+                        input_futures: Dict[str, Any] = {}
+                        for pinname, value in transformation_dict.items():
+                            if pinname.startswith("__"):
+                                continue
+                            if not isinstance(value, tuple) or len(value) < 3:
+                                continue
+                            celltype, subcelltype, checksum_hex = value
+                            dep_tf_checksum = dep_checksums.get(pinname)
+                            dep_futures = None
+                            if dep_tf_checksum:
+                                get_futures = getattr(
+                                    dask_client, "get_transformation_futures", None
                                 )
+                                if callable(get_futures):
+                                    dep_futures = get_futures(dep_tf_checksum)
+                            if dep_futures is not None:
+                                if dep_futures.fat is None:
+                                    dep_futures.fat = dask_client.ensure_fat_future(
+                                        dep_futures
+                                    )
+                                inputs[pinname] = TransformationInputSpec(
+                                    name=pinname,
+                                    celltype=celltype,
+                                    subcelltype=subcelltype,
+                                    checksum=None,
+                                    kind="transformation",
+                                )
+                                input_futures[pinname] = dep_futures.fat
+                                continue
+                            if checksum_hex is None:
+                                raise RuntimeError(
+                                    f"Input '{pinname}' has no checksum or dependency future"
+                                )
+                            if dep_tf_checksum and dep_futures is None:
+                                logging.getLogger(__name__).info(
+                                    "[seamless-dask] delegate fallback to checksum pin=%s tf_checksum=%s",
+                                    pinname,
+                                    dep_tf_checksum,
+                                )
+                            if isinstance(checksum_hex, Checksum):
+                                checksum_hex = checksum_hex.hex()
                             inputs[pinname] = TransformationInputSpec(
                                 name=pinname,
                                 celltype=celltype,
                                 subcelltype=subcelltype,
-                                checksum=None,
-                                kind="transformation",
+                                checksum=checksum_hex,
+                                kind="checksum",
                             )
-                            input_futures[pinname] = dep_futures.fat
-                            continue
-                        if checksum_hex is None:
-                            raise RuntimeError(
-                                f"Input '{pinname}' has no checksum or dependency future"
+                            input_futures[pinname] = dask_client.get_fat_checksum_future(
+                                checksum_hex
                             )
-                        if dep_tf_checksum and dep_futures is None:
-                            logging.getLogger(__name__).info(
-                                "[seamless-dask] delegate fallback to checksum pin=%s tf_checksum=%s",
-                                pinname,
-                                dep_tf_checksum,
-                            )
-                        if isinstance(checksum_hex, Checksum):
-                            checksum_hex = checksum_hex.hex()
-                        inputs[pinname] = TransformationInputSpec(
-                            name=pinname,
-                            celltype=celltype,
-                            subcelltype=subcelltype,
-                            checksum=checksum_hex,
-                            kind="checksum",
-                        )
-                        input_futures[pinname] = dask_client.get_fat_checksum_future(
-                            checksum_hex
-                        )
-                    submission.inputs = inputs
-                    submission.input_futures = input_futures
+                        submission.inputs = inputs
+                        submission.input_futures = input_futures
             if dask_client is None or submission is None:
                 result = await self._dispatch(
                     transformation_dict,
