@@ -47,10 +47,22 @@ def build_transformation_namespace_sync(
         if checksum_value is None:
             continue
 
-        checksum = Checksum(checksum_value)
+        try:
+            checksum = Checksum(checksum_value)
+        except Exception as exc:
+            raise RuntimeError(
+                "Invalid checksum for pin "
+                f"{pinname}: {checksum_value!r} ({type(checksum_value).__name__})"
+            ) from exc
         if pinname == "code":
             if fallback_syntactic:
-                checksum = Checksum(fallback_syntactic)
+                try:
+                    checksum = Checksum(fallback_syntactic)
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Invalid fallback code checksum: "
+                        f"{fallback_syntactic!r} ({type(fallback_syntactic).__name__})"
+                    ) from exc
             else:
                 syntactic_options = code_manager.get_syntactic_checksums(checksum)
                 if syntactic_options:

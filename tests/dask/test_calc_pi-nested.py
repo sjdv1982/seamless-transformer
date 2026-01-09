@@ -55,7 +55,7 @@ calc_pi_all.driver = True
 
 
 def test_calc_pi():
-    seed = 0
+    seed = 13
     ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "1000"))
     checksum_only = False
     ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "100000000"))

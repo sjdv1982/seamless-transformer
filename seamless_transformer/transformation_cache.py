@@ -161,7 +161,12 @@ class TransformationCache:
             )
             if isinstance(result_checksum, str):
                 raise RuntimeError(result_checksum)
-            result_checksum = Checksum(result_checksum)
+            try:
+                result_checksum = Checksum(result_checksum)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Invalid checksum from parent: {result_checksum!r}"
+                ) from exc
         else:
             _debug("running transformation in-process")
             loop = asyncio.get_running_loop()

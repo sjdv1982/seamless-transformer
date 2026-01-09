@@ -31,7 +31,7 @@ def calc_pi(seed, ndots):
 def test_calc_pi():
     import numpy as np
 
-    seed = 0
+    seed = 10
     np.random.seed(seed)
     # ntrials = 1000 ### doesn't work
     ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "300"))

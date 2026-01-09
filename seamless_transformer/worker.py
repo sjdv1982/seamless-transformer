@@ -17,11 +17,14 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import concurrent.futures as _cf
 import traceback
 import uuid
 import sys
 import logging
 import multiprocessing as mp
+import string
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.thread import _worker as _cf_worker
 import weakref
@@ -35,6 +38,7 @@ from seamless import Buffer, CacheMissError, Checksum, set_is_worker, ensure_ope
 from seamless.caching.buffer_cache import get_buffer_cache
 
 from .process import ChildChannel, ProcessManager, ConnectionClosed
+from .process.manager import ProcessError
 from .run import run_transformation_dict_in_process
 
 _DASK_AVAILABLE_ENV = "SEAMLESS_DASK_AVAILABLE"
@@ -110,6 +114,193 @@ def _require_child_channel() -> tuple[ChildChannel, asyncio.AbstractEventLoop]:
     if _child_channel is None or _child_loop is None:
         raise RuntimeError("Worker channel is not initialized")
     return _child_channel, _child_loop
+
+
+def _is_checksum_hex(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(ch in string.hexdigits for ch in value)
+    )
+
+
+def _driver_flag_from_tf_dunder(tf_dunder: Any) -> bool:
+    if not isinstance(tf_dunder, dict):
+        return False
+    meta = tf_dunder.get("__meta__")
+    return isinstance(meta, dict) and bool(meta.get("driver"))
+
+
+def _dependency_checksums_from_tf_dunder(tf_dunder: Any) -> Dict[str, str]:
+    if not isinstance(tf_dunder, dict):
+        return {}
+    deps = tf_dunder.get("__deps__")
+    if not isinstance(deps, dict):
+        return {}
+    parsed: Dict[str, str] = {}
+    for key, value in deps.items():
+        if isinstance(value, Checksum):
+            value = value.hex()
+        if isinstance(key, str) and isinstance(value, str) and value:
+            parsed[key] = value
+    return parsed
+
+
+_DELEGATE_POLL_INTERVAL = float(
+    os.environ.get("SEAMLESS_DELEGATE_POLL_INTERVAL", "0.2")
+)
+_DELEGATE_POLL_BATCH = int(os.environ.get("SEAMLESS_DELEGATE_POLL_BATCH", "200"))
+_DELEGATE_STALE_TTL = float(os.environ.get("SEAMLESS_DELEGATE_STALE_TTL", "60"))
+_DELEGATE_CLEANUP_INTERVAL = float(
+    os.environ.get("SEAMLESS_DELEGATE_CLEANUP_INTERVAL", "10")
+)
+_DELEGATE_COMPLETED_TTL = float(
+    os.environ.get("SEAMLESS_DELEGATE_COMPLETED_TTL", "300")
+)
+_DELEGATE_OWNER_CANCEL_TTL = float(
+    os.environ.get("SEAMLESS_DELEGATE_OWNER_CANCEL_TTL", "60")
+)
+_DELEGATE_DEBUG_CLEANUP = bool(os.environ.get("SEAMLESS_DEBUG_DELEGATE_CLEANUP"))
+_DELEGATE_PROXY_LOCK = threading.Lock()
+_DELEGATE_PROXY_FUTURES: Dict[str, _cf.Future] = {}
+_DELEGATE_POLL_TASK: asyncio.Task | None = None
+_CURRENT_OWNER_DASK_KEY = threading.local()
+
+
+def _normalize_owner_dask_key(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if value.startswith(("base-", "base_")):
+        return value
+    return None
+
+
+def _get_current_owner_dask_key() -> str | None:
+    return getattr(_CURRENT_OWNER_DASK_KEY, "dask_key", None)
+
+
+def _set_current_owner_dask_key(value: str | None) -> str | None:
+    previous = getattr(_CURRENT_OWNER_DASK_KEY, "dask_key", None)
+    if value is None:
+        if hasattr(_CURRENT_OWNER_DASK_KEY, "dask_key"):
+            delattr(_CURRENT_OWNER_DASK_KEY, "dask_key")
+    else:
+        _CURRENT_OWNER_DASK_KEY.dask_key = value
+    return previous
+
+
+def _scheduler_task_states(dask_scheduler, keys: list[str]) -> Dict[str, tuple[str | None, bool | None]]:
+    states: Dict[str, tuple[str | None, bool | None]] = {}
+    for key in keys:
+        ts = dask_scheduler.tasks.get(key)
+        if ts is None:
+            states[key] = (None, None)
+            continue
+        try:
+            state = getattr(ts, "state", None)
+        except Exception:
+            state = None
+        try:
+            who_wants = bool(getattr(ts, "who_wants", None))
+        except Exception:
+            who_wants = None
+        states[key] = (state, who_wants)
+    return states
+
+
+def _fetch_scheduler_task_states(raw_client: Any, keys: list[str]) -> Dict[str, tuple[str | None, bool | None]]:
+    return raw_client.run_on_scheduler(_scheduler_task_states, keys=keys)
+
+
+def _owner_task_cancelled(state: str | None, who_wants: bool | None) -> bool:
+    if state is None:
+        return True
+    if state in ("released", "forgotten", "erred", "cancelled"):
+        return True
+    if who_wants is False:
+        return True
+    return False
+
+
+def _register_delegate_token(token: str) -> _cf.Future:
+    fut: _cf.Future = _cf.Future()
+    with _DELEGATE_PROXY_LOCK:
+        _DELEGATE_PROXY_FUTURES[token] = fut
+    _ensure_delegate_poller()
+    return fut
+
+
+def _ensure_delegate_poller() -> None:
+    if _child_loop is None or _child_loop.is_closed():
+        return
+
+    def _start() -> None:
+        global _DELEGATE_POLL_TASK
+        if _DELEGATE_POLL_TASK is None or _DELEGATE_POLL_TASK.done():
+            _DELEGATE_POLL_TASK = asyncio.create_task(_delegate_poll_loop())
+
+    if asyncio.get_running_loop() is _child_loop:
+        _start()
+    else:
+        _child_loop.call_soon_threadsafe(_start)
+
+
+async def _delegate_poll_loop() -> None:
+    while True:
+        await asyncio.sleep(_DELEGATE_POLL_INTERVAL)
+        with _DELEGATE_PROXY_LOCK:
+            tokens = list(_DELEGATE_PROXY_FUTURES.keys())
+            cancelled = [
+                token
+                for token, fut in _DELEGATE_PROXY_FUTURES.items()
+                if fut.cancelled()
+            ]
+            for token in cancelled:
+                _DELEGATE_PROXY_FUTURES.pop(token, None)
+        if cancelled:
+            try:
+                await _request_parent_async(
+                    "delegate_transformation_cancel", {"tokens": cancelled}
+                )
+            except Exception:
+                pass
+        if not tokens:
+            continue
+        for idx in range(0, len(tokens), _DELEGATE_POLL_BATCH):
+            batch = tokens[idx : idx + _DELEGATE_POLL_BATCH]
+            try:
+                response = await _request_parent_async(
+                    "delegate_transformation_poll", {"tokens": batch}
+                )
+            except Exception:
+                continue
+            if not isinstance(response, dict):
+                continue
+            for token, payload in response.items():
+                with _DELEGATE_PROXY_LOCK:
+                    fut = _DELEGATE_PROXY_FUTURES.pop(token, None)
+                if fut is None:
+                    continue
+                status = payload.get("status") if isinstance(payload, dict) else None
+                if status == "done":
+                    result_hex = payload.get("result")
+                    try:
+                        fut.set_result(Checksum(result_hex))
+                    except Exception:
+                        fut.set_result(result_hex)
+                elif status == "error":
+                    err = payload.get("error") if isinstance(payload, dict) else "error"
+                    if not isinstance(err, str):
+                        err = repr(err)
+                    fut.set_result(err)
+                elif status == "cancelled":
+                    fut.set_result("cancelled")
+                elif status == "refused":
+                    fut.set_result(_DELEGATION_REFUSED)
+                elif status == "unknown":
+                    fut.set_result("unknown")
+                else:
+                    fut.set_result("error")
 
 
 class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
@@ -235,6 +426,12 @@ def _request_parent_sync(op: str, payload: Any) -> Any:
 
 async def _request_parent_async(op: str, payload: Any) -> Any:
     channel, loop = _require_child_channel()
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+    if running_loop is loop:
+        return await channel.request(op, payload)
     future = asyncio.run_coroutine_threadsafe(channel.request(op, payload), loop)
     return await asyncio.wrap_future(future)
 
@@ -349,41 +546,46 @@ def _patch_worker_primitives() -> None:
 
 
 def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
-    tf_checksum = Checksum(payload["tf_checksum"])
-    scratch = bool(payload.get("scratch", False))
-    tf_dunder = payload.get("tf_dunder", {}) or {}
-    transformation_dict = payload.get("transformation_dict")
+    owner_dask_key = _normalize_owner_dask_key(payload.get("owner_dask_key"))
+    previous_owner = _set_current_owner_dask_key(owner_dask_key)
     try:
-        if transformation_dict is None or "__code_text__" not in transformation_dict:
-            # Merge missing code text from the serialized transformation buffer if available.
-            try:
-                tf_dict_resolved = tf_checksum.resolve(celltype="plain")
-            except Exception:
-                tf_dict_resolved = None
-            if isinstance(tf_dict_resolved, dict):
-                if transformation_dict is None:
-                    transformation_dict = tf_dict_resolved
-                elif (
-                    "__code_text__" not in transformation_dict
-                    and "__code_text__" in tf_dict_resolved
-                ):
-                    transformation_dict = dict(transformation_dict)
-                    transformation_dict["__code_text__"] = tf_dict_resolved[
-                        "__code_text__"
-                    ]
-    except Exception:
-        pass
-    try:
-        if transformation_dict is None:
-            transformation_dict = tf_checksum.resolve(celltype="plain")
-        result = run_transformation_dict_in_process(
-            transformation_dict, tf_checksum, tf_dunder, scratch
-        )
-        result_checksum = Checksum(result)
-        result_checksum.tempref()
-        return result_checksum
-    except Exception:
-        return traceback.format_exc()
+        tf_checksum = Checksum(payload["tf_checksum"])
+        scratch = bool(payload.get("scratch", False))
+        tf_dunder = payload.get("tf_dunder", {}) or {}
+        transformation_dict = payload.get("transformation_dict")
+        try:
+            if transformation_dict is None or "__code_text__" not in transformation_dict:
+                # Merge missing code text from the serialized transformation buffer if available.
+                try:
+                    tf_dict_resolved = tf_checksum.resolve(celltype="plain")
+                except Exception:
+                    tf_dict_resolved = None
+                if isinstance(tf_dict_resolved, dict):
+                    if transformation_dict is None:
+                        transformation_dict = tf_dict_resolved
+                    elif (
+                        "__code_text__" not in transformation_dict
+                        and "__code_text__" in tf_dict_resolved
+                    ):
+                        transformation_dict = dict(transformation_dict)
+                        transformation_dict["__code_text__"] = tf_dict_resolved[
+                            "__code_text__"
+                        ]
+        except Exception:
+            pass
+        try:
+            if transformation_dict is None:
+                transformation_dict = tf_checksum.resolve(celltype="plain")
+            result = run_transformation_dict_in_process(
+                transformation_dict, tf_checksum, tf_dunder, scratch
+            )
+            result_checksum = Checksum(result)
+            result_checksum.tempref()
+            return result_checksum
+        except Exception:
+            return traceback.format_exc()
+    finally:
+        _set_current_owner_dask_key(previous_owner)
 
 
 async def _child_initializer(channel: ChildChannel) -> None:
@@ -451,6 +653,11 @@ class _WorkerManager:
         self._pointer_lock: Optional[asyncio.Lock] = None
         self._prefetched_buffers: Dict[str, bytes] = {}
         self._limits: Dict[str, asyncio.Semaphore] = {}
+        self._delegate_registry: Dict[str, Dict[str, Any]] = {}
+        self._delegate_completed: Dict[str, tuple[Dict[str, Any], float]] = {}
+        self._delegate_lock: Optional[asyncio.Lock] = None
+        self._delegate_cleanup_task: asyncio.Task | None = None
+        self._delegate_owner_cancelled: Dict[str, float] = {}
 
         init_future = asyncio.run_coroutine_threadsafe(
             self._async_init(worker_count), self.loop
@@ -463,10 +670,22 @@ class _WorkerManager:
 
     async def _async_init(self, worker_count: int) -> None:
         self._pointer_lock = asyncio.Lock()
+        self._delegate_lock = asyncio.Lock()
         self._manager.add_parent_handler("download", self._handle_download)
         self._manager.add_parent_handler("downloaded", self._handle_downloaded)
         self._manager.add_parent_handler("ref_op", self._handle_ref_op)
         self._manager.add_parent_handler("upload", self._handle_upload)
+        self._manager.add_parent_handler(
+            "delegate_transformation_submit",
+            self._handle_delegate_transformation_submit,
+        )
+        self._manager.add_parent_handler(
+            "delegate_transformation_poll", self._handle_delegate_transformation_poll
+        )
+        self._manager.add_parent_handler(
+            "delegate_transformation_cancel",
+            self._handle_delegate_transformation_cancel,
+        )
         self._manager.add_parent_handler(
             "delegate_transformation", self._handle_delegate_transformation
         )
@@ -479,6 +698,9 @@ class _WorkerManager:
             self._load[handle.name] = 0
             self._limits[handle.name] = asyncio.Semaphore(TRANSFORMATION_THROTTLE)
         await asyncio.gather(*(h.wait_until_ready() for h in self._handles))
+        self._delegate_cleanup_task = asyncio.create_task(
+            self._delegate_cleanup_loop()
+        )
 
     def close(self, *, wait: bool = False) -> None:
         if _DEBUG_SHUTDOWN:
@@ -566,58 +788,82 @@ class _WorkerManager:
         scratch: bool,
         *,
         enforce_limit: bool = True,
+        owner_dask_key: str | None = None,
     ) -> Checksum | str:
         await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
-        handles_sorted = sorted(
-            self._handles,
-            key=lambda h: (self._load.get(h.name, 0), h.name),
-        )
-        handle = None
-        limit: asyncio.Semaphore | None = None
-        acquired = False
-        # Prefer an available semaphore; if all are saturated, wait until one frees up.
-        while handle is None:
-            for candidate in handles_sorted:
-                cand_limit = self._limits.get(candidate.name)
-                if not enforce_limit or cand_limit is None or not cand_limit.locked():
-                    handle = candidate
-                    limit = cand_limit
-                    break
-            if handle is None:
-                await asyncio.sleep(0.01)
-        if bool(os.environ.get("SEAMLESS_DEBUG_TRANSFORMATION")):
-            if not hasattr(self, "_debug_handles_printed"):
+        retry_attempts = 0
+        max_retries = max(1, len(self._handles) * 3)
+        while True:
+            handles_sorted = sorted(
+                self._handles,
+                key=lambda h: (self._load.get(h.name, 0), h.name),
+            )
+            handle = None
+            limit: asyncio.Semaphore | None = None
+            acquired = False
+            # Prefer an available semaphore; if all are saturated, wait until one frees up.
+            while handle is None:
+                for candidate in handles_sorted:
+                    cand_limit = self._limits.get(candidate.name)
+                    if (
+                        not enforce_limit
+                        or cand_limit is None
+                        or not cand_limit.locked()
+                    ):
+                        handle = candidate
+                        limit = cand_limit
+                        break
+                if handle is None:
+                    await asyncio.sleep(0.01)
+            if bool(os.environ.get("SEAMLESS_DEBUG_TRANSFORMATION")):
+                if not hasattr(self, "_debug_handles_printed"):
+                    print(
+                        f"[dispatch] handles={[h.name for h in self._handles]}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    self._debug_handles_printed = True
                 print(
-                    f"[dispatch] handles={[h.name for h in self._handles]}",
+                    f"[dispatch] selecting {getattr(handle, 'name', '?')} "
+                    f"load={self._load.get(getattr(handle, 'name', None), 0)}",
                     file=sys.stderr,
                     flush=True,
                 )
-                self._debug_handles_printed = True
-            print(
-                f"[dispatch] selecting {getattr(handle, 'name', '?')} "
-                f"load={self._load.get(getattr(handle, 'name', None), 0)}",
-                file=sys.stderr,
-                flush=True,
-            )
-        await handle.wait_until_ready()
-        if enforce_limit and limit is not None:
-            await limit.acquire()
-            acquired = True
+            await handle.wait_until_ready()
+            if enforce_limit and limit is not None:
+                await limit.acquire()
+                acquired = True
 
-        self._load[handle.name] = self._load.get(handle.name, 0) + 1
-        try:
-            payload = {
-                "transformation_dict": transformation_dict,
-                "tf_checksum": Checksum(tf_checksum),
-                "tf_dunder": tf_dunder,
-                "scratch": scratch,
-            }
-            result = await handle.request("execute_transformation", payload)
-        finally:
-            self._load[handle.name] = max(0, self._load.get(handle.name, 0) - 1)
-            if acquired and limit is not None:
-                limit.release()
-        return result
+            self._load[handle.name] = self._load.get(handle.name, 0) + 1
+            retry = False
+            result: Checksum | str | None = None
+            try:
+                payload = {
+                    "transformation_dict": transformation_dict,
+                    "tf_checksum": Checksum(tf_checksum),
+                    "tf_dunder": tf_dunder,
+                    "scratch": scratch,
+                }
+                if owner_dask_key is not None:
+                    payload["owner_dask_key"] = owner_dask_key
+                result = await handle.request("execute_transformation", payload)
+            except ProcessError:
+                retry = True
+                retry_attempts += 1
+                try:
+                    handle.ready_event.clear()
+                except Exception:
+                    pass
+                if retry_attempts >= max_retries:
+                    raise
+            finally:
+                self._load[handle.name] = max(0, self._load.get(handle.name, 0) - 1)
+                if acquired and limit is not None:
+                    limit.release()
+            if not retry:
+                assert result is not None
+                return result
+            await asyncio.sleep(0.05)
 
     async def run_transformation_async(
         self,
@@ -625,6 +871,7 @@ class _WorkerManager:
         tf_checksum: Checksum,
         tf_dunder: Dict[str, Any],
         scratch: bool,
+        owner_dask_key: str | None = None,
     ) -> Checksum | str:
         fut = asyncio.run_coroutine_threadsafe(
             self._dispatch(
@@ -633,6 +880,7 @@ class _WorkerManager:
                 tf_dunder,
                 scratch,
                 enforce_limit=True,
+                owner_dask_key=owner_dask_key,
             ),
             self.loop,
         )
@@ -644,6 +892,7 @@ class _WorkerManager:
         tf_checksum: Checksum,
         tf_dunder: Dict[str, Any],
         scratch: bool,
+        owner_dask_key: str | None = None,
     ) -> Checksum | str:
         fut = asyncio.run_coroutine_threadsafe(
             self._dispatch(
@@ -652,10 +901,542 @@ class _WorkerManager:
                 tf_dunder,
                 scratch,
                 enforce_limit=True,
+                owner_dask_key=owner_dask_key,
             ),
             self.loop,
         )
         return fut.result()
+
+    async def _store_delegate_entry(self, token: str, entry: Dict[str, Any]) -> None:
+        if self._delegate_lock is None:
+            return
+        async with self._delegate_lock:
+            self._delegate_registry[token] = entry
+
+    def _delegate_payload_from_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        futures = entry.get("futures")
+        thin = getattr(futures, "thin", None) if futures is not None else None
+        if thin is None:
+            return {"status": "error", "error": "missing thin future"}
+        try:
+            if thin.cancelled():
+                return {"status": "cancelled"}
+            if not thin.done():
+                return {"status": "cancelled"}
+            tf_checksum_hex, result_checksum_hex, exc = thin.result()
+        except Exception as exc:
+            return {"status": "error", "error": repr(exc)}
+        if exc:
+            err = exc if isinstance(exc, str) else repr(exc)
+            return {"status": "error", "error": err}
+        if result_checksum_hex is None:
+            return {"status": "error", "error": "Result checksum unavailable"}
+        return {"status": "done", "result": result_checksum_hex}
+
+    async def _get_delegate_completed(self, token: str) -> Dict[str, Any] | None:
+        if self._delegate_lock is None:
+            return None
+        async with self._delegate_lock:
+            item = self._delegate_completed.pop(token, None)
+        if item is None:
+            return None
+        payload, timestamp = item
+        if _DELEGATE_COMPLETED_TTL > 0:
+            try:
+                if (time.monotonic() - float(timestamp)) >= _DELEGATE_COMPLETED_TTL:
+                    return None
+            except Exception:
+                return None
+        return dict(payload)
+
+    async def _update_delegate_owner_states(self) -> None:
+        if self._delegate_lock is None:
+            return
+        async with self._delegate_lock:
+            entries = list(self._delegate_registry.values())
+        owner_groups: Dict[Any, set[str]] = {}
+        for entry in entries:
+            owner_key = entry.get("owner_dask_key")
+            if owner_key is None:
+                continue
+            dask_client = entry.get("dask_client")
+            raw_client = getattr(dask_client, "client", None)
+            if raw_client is None:
+                continue
+            owner_groups.setdefault(raw_client, set()).add(owner_key)
+        if not owner_groups:
+            return
+        loop = asyncio.get_running_loop()
+        tasks = []
+        for raw_client, keys in owner_groups.items():
+            key_list = list(keys)
+            if not key_list:
+                continue
+            tasks.append(
+                loop.run_in_executor(
+                    _DASK_DELEGATE_EXECUTOR,
+                    _fetch_scheduler_task_states,
+                    raw_client,
+                    key_list,
+                )
+            )
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        now = time.monotonic()
+        alive: set[str] = set()
+        cancelled: set[str] = set()
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            for key, info in result.items():
+                state = None
+                who_wants = None
+                if isinstance(info, tuple) and len(info) == 2:
+                    state, who_wants = info
+                if _owner_task_cancelled(state, who_wants):
+                    cancelled.add(key)
+                else:
+                    alive.add(key)
+        for key in alive:
+            self._delegate_owner_cancelled.pop(key, None)
+        for key in cancelled:
+            self._delegate_owner_cancelled[key] = now
+        if _DELEGATE_OWNER_CANCEL_TTL > 0:
+            for key, timestamp in list(self._delegate_owner_cancelled.items()):
+                try:
+                    expired = (now - float(timestamp)) >= _DELEGATE_OWNER_CANCEL_TTL
+                except Exception:
+                    expired = True
+                if expired:
+                    self._delegate_owner_cancelled.pop(key, None)
+
+    async def _is_owner_active(self, dask_client: Any, owner_key: str) -> bool:
+        raw_client = getattr(dask_client, "client", None)
+        if raw_client is None:
+            return False
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                _DASK_DELEGATE_EXECUTOR,
+                _fetch_scheduler_task_states,
+                raw_client,
+                [owner_key],
+            )
+        except Exception:
+            return False
+        info = result.get(owner_key)
+        if info is None:
+            return False
+        state = None
+        who_wants = None
+        if isinstance(info, tuple) and len(info) == 2:
+            state, who_wants = info
+        return not _owner_task_cancelled(state, who_wants)
+
+    async def _delegate_cleanup_loop(self) -> None:
+        logger = logging.getLogger(__name__)
+        while True:
+            await asyncio.sleep(_DELEGATE_CLEANUP_INTERVAL)
+            if self._delegate_lock is None:
+                continue
+            await self._update_delegate_owner_states()
+            now = time.monotonic()
+            stale: list[
+                tuple[str, Dict[str, Any], str | None, str | None, bool, bool, bool]
+            ] = []
+            async with self._delegate_lock:
+                if _DELEGATE_COMPLETED_TTL > 0:
+                    for token, item in list(self._delegate_completed.items()):
+                        payload, timestamp = item
+                        try:
+                            expired_completed = (
+                                now - float(timestamp)
+                            ) >= _DELEGATE_COMPLETED_TTL
+                        except Exception:
+                            expired_completed = True
+                        if expired_completed:
+                            self._delegate_completed.pop(token, None)
+                for token, entry in list(self._delegate_registry.items()):
+                    owner = entry.get("owner")
+                    owner_key = entry.get("owner_dask_key")
+                    last_seen = entry.get("last_seen")
+                    handle = (
+                        self._manager._handles.get(owner) if owner else None
+                    )  # type: ignore[attr-defined]
+                    endpoint = getattr(handle, "endpoint", None) if handle else None
+                    owner_closed = (
+                        handle is None or endpoint is None or endpoint.is_closed()
+                    )
+                    expired = False
+                    if _DELEGATE_STALE_TTL > 0 and last_seen is not None:
+                        try:
+                            expired = (now - float(last_seen)) >= _DELEGATE_STALE_TTL
+                        except Exception:
+                            expired = False
+                    if expired and not owner_closed:
+                        futures = entry.get("futures")
+                        thin = getattr(futures, "thin", None) if futures is not None else None
+                        if thin is not None:
+                            try:
+                                if not thin.done() and not thin.cancelled():
+                                    expired = False
+                            except Exception:
+                                expired = False
+                    owner_cancelled = (
+                        owner_key is not None
+                        and owner_key in self._delegate_owner_cancelled
+                    )
+                    if owner_cancelled or owner_closed or expired:
+                        stale.append(
+                            (
+                                token,
+                                entry,
+                                owner,
+                                owner_key,
+                                owner_closed,
+                                expired,
+                                owner_cancelled,
+                            )
+                        )
+                        self._delegate_registry.pop(token, None)
+            for (
+                token,
+                entry,
+                owner,
+                owner_key,
+                owner_closed,
+                expired,
+                owner_cancelled,
+            ) in stale:
+                if owner_cancelled:
+                    payload = {"status": "cancelled"}
+                else:
+                    payload = self._delegate_payload_from_entry(entry)
+                if payload:
+                    if self._delegate_lock is not None:
+                        async with self._delegate_lock:
+                            self._delegate_completed[token] = (payload, now)
+                if _DELEGATE_DEBUG_CLEANUP:
+                    logger.warning(
+                        "[delegate-cleanup] cancel token=%s owner=%s owner_key=%s closed=%s expired=%s cancelled=%s",
+                        token,
+                        owner,
+                        owner_key,
+                        owner_closed,
+                        expired,
+                        owner_cancelled,
+                    )
+                self._release_delegate_entry(entry, cancel=True)
+
+    async def _get_delegate_entry(self, token: str) -> Dict[str, Any] | None:
+        if self._delegate_lock is None:
+            return None
+        async with self._delegate_lock:
+            return self._delegate_registry.get(token)
+
+    async def _pop_delegate_entry(self, token: str) -> Dict[str, Any] | None:
+        if self._delegate_lock is None:
+            return None
+        async with self._delegate_lock:
+            return self._delegate_registry.pop(token, None)
+
+    def _release_delegate_entry(self, entry: Dict[str, Any], *, cancel: bool) -> None:
+        futures = entry.get("futures")
+        dask_client = entry.get("dask_client")
+        permission_granted = entry.get("permission_granted")
+        release_permission = entry.get("release_permission")
+        if futures is not None:
+            try:
+                release = getattr(dask_client, "release_transformation_futures", None)
+                if callable(release):
+                    release(futures, cancel=cancel)
+                else:
+                    for fut in (futures.base, futures.thin, futures.fat):
+                        if fut is None:
+                            continue
+                        raw_client = getattr(dask_client, "client", None)
+                        try:
+                            if (
+                                raw_client is not None
+                                and cancel
+                                and not fut.cancelled()
+                                and not fut.done()
+                            ):
+                                raw_client.cancel(fut, force=True)
+                        except Exception:
+                            pass
+                        try:
+                            fut.release()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        if permission_granted and release_permission is not None:
+            try:
+                release_permission()
+            except Exception:
+                pass
+
+    async def _handle_delegate_transformation_submit(
+        self, _handle, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        permission_granted = False
+        release_permission = None
+        try:
+            transformation_dict = payload.get("transformation_dict")
+            tf_checksum = Checksum(payload["tf_checksum"])
+            tf_dunder = payload.get("tf_dunder", {}) or {}
+            scratch = bool(payload.get("scratch", False))
+            driver_context = _driver_flag_from_tf_dunder(tf_dunder)
+            if not driver_context:
+                driver_context = bool(payload.get("driver_context", False))
+            owner_dask_key = _normalize_owner_dask_key(payload.get("owner_dask_key"))
+            cached_result = await self._get_cached_transformation_result(tf_checksum)
+            if cached_result is not None:
+                return {"status": "done", "result": cached_result.hex()}
+            await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
+            if transformation_dict is None:
+                try:
+                    resolved = tf_checksum.resolve(celltype="plain")
+                except Exception:
+                    resolved = None
+                if isinstance(resolved, dict):
+                    transformation_dict = resolved
+            dask_client = None
+            submission = None
+            if isinstance(transformation_dict, dict):
+                try:
+                    from seamless_dask.transformer_client import (
+                        get_seamless_dask_client,
+                    )
+                    from seamless_dask.types import (
+                        TransformationInputSpec,
+                        TransformationSubmission,
+                    )
+                except Exception:
+                    dask_client = None
+                else:
+                    dask_client = get_seamless_dask_client()
+                    submission = TransformationSubmission(
+                        transformation_dict=transformation_dict,
+                        inputs={},
+                        input_futures={},
+                        tf_checksum=tf_checksum.hex(),
+                        tf_dunder=tf_dunder,
+                        scratch=scratch,
+                        require_value=False,
+                    )
+                    dep_checksums = _dependency_checksums_from_tf_dunder(tf_dunder)
+                    inputs: Dict[str, TransformationInputSpec] = {}
+                    input_futures: Dict[str, Any] = {}
+                    for pinname, value in transformation_dict.items():
+                        if pinname.startswith("__"):
+                            continue
+                        if not isinstance(value, tuple) or len(value) < 3:
+                            continue
+                        celltype, subcelltype, checksum_hex = value
+                        dep_tf_checksum = dep_checksums.get(pinname)
+                        dep_futures = None
+                        if dep_tf_checksum:
+                            get_futures = getattr(
+                                dask_client, "get_transformation_futures", None
+                            )
+                            if callable(get_futures):
+                                dep_futures = get_futures(dep_tf_checksum)
+                        if dep_futures is not None:
+                            if dep_futures.fat is None:
+                                dep_futures.fat = dask_client.ensure_fat_future(
+                                    dep_futures
+                                )
+                            inputs[pinname] = TransformationInputSpec(
+                                name=pinname,
+                                celltype=celltype,
+                                subcelltype=subcelltype,
+                                checksum=None,
+                                kind="transformation",
+                            )
+                            input_futures[pinname] = dep_futures.fat
+                            continue
+                        if checksum_hex is None:
+                            raise RuntimeError(
+                                f"Input '{pinname}' has no checksum or dependency future"
+                            )
+                        if dep_tf_checksum and dep_futures is None:
+                            logging.getLogger(__name__).info(
+                                "[seamless-dask] delegate fallback to checksum pin=%s tf_checksum=%s",
+                                pinname,
+                                dep_tf_checksum,
+                            )
+                        if isinstance(checksum_hex, Checksum):
+                            checksum_hex = checksum_hex.hex()
+                        inputs[pinname] = TransformationInputSpec(
+                            name=pinname,
+                            celltype=celltype,
+                            subcelltype=subcelltype,
+                            checksum=checksum_hex,
+                            kind="checksum",
+                        )
+                        input_futures[pinname] = dask_client.get_fat_checksum_future(
+                            checksum_hex
+                        )
+                    submission.inputs = inputs
+                    submission.input_futures = input_futures
+            if dask_client is None or submission is None:
+                result = await self._dispatch(
+                    transformation_dict,
+                    tf_checksum,
+                    tf_dunder,
+                    scratch,
+                    enforce_limit=True,
+                    owner_dask_key=owner_dask_key,
+                )
+                if isinstance(result, Checksum):
+                    try:
+                        result.tempref()
+                    except Exception:
+                        pass
+                    return {"status": "done", "result": result.hex()}
+                return {"status": "error", "error": result}
+
+            if (
+                owner_dask_key is not None
+                and owner_dask_key in self._delegate_owner_cancelled
+            ):
+                if dask_client is None or not await self._is_owner_active(
+                    dask_client, owner_dask_key
+                ):
+                    return {"status": "cancelled"}
+                self._delegate_owner_cancelled.pop(owner_dask_key, None)
+
+            permission_denied = object()
+
+            def _submit():
+                nonlocal permission_granted, release_permission
+                try:
+                    from seamless_dask.permissions import (
+                        try_request_permission,
+                        release_permission as _release_permission,
+                    )
+                except Exception:
+                    try_request_permission = release_permission = None
+                else:
+                    release_permission = _release_permission
+                if try_request_permission is not None and not driver_context:
+                    permission_granted = try_request_permission()
+                    if not permission_granted:
+                        return permission_denied
+                return dask_client.submit_transformation(submission, need_fat=False)
+
+            loop = asyncio.get_running_loop()
+            futures = await loop.run_in_executor(_DASK_DELEGATE_EXECUTOR, _submit)
+            if futures is permission_denied:
+                if permission_granted and release_permission is not None:
+                    try:
+                        release_permission()
+                    except Exception:
+                        pass
+                return {"status": "refused"}
+            token = uuid.uuid4().hex
+            await self._store_delegate_entry(
+                token,
+                {
+                    "futures": futures,
+                    "dask_client": dask_client,
+                    "permission_granted": permission_granted,
+                    "release_permission": release_permission,
+                    "owner": getattr(_handle, "name", None),
+                    "owner_dask_key": owner_dask_key,
+                    "last_seen": time.monotonic(),
+                },
+            )
+            return {"status": "submitted", "token": token}
+        except Exception:
+            if permission_granted and release_permission is not None:
+                try:
+                    release_permission()
+                except Exception:
+                    pass
+            return {"status": "error", "error": traceback.format_exc()}
+
+    async def _handle_delegate_transformation_poll(
+        self, _handle, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        tokens = []
+        if isinstance(payload, dict):
+            tokens = payload.get("tokens", []) or []
+        results: Dict[str, Any] = {}
+        now = time.monotonic()
+        for token in tokens:
+            entry = await self._get_delegate_entry(token)
+            if entry is None:
+                completed = await self._get_delegate_completed(str(token))
+                if completed is not None:
+                    results[str(token)] = completed
+                else:
+                    results[str(token)] = {"status": "unknown"}
+                continue
+            entry["last_seen"] = now
+            futures = entry.get("futures")
+            thin = getattr(futures, "thin", None) if futures is not None else None
+            if thin is None:
+                entry = await self._pop_delegate_entry(token)
+                if entry is not None:
+                    self._release_delegate_entry(entry, cancel=True)
+                results[str(token)] = {
+                    "status": "error",
+                    "error": "missing thin future",
+                }
+                continue
+            if thin.cancelled():
+                entry = await self._pop_delegate_entry(token)
+                if entry is not None:
+                    self._release_delegate_entry(entry, cancel=True)
+                results[str(token)] = {"status": "cancelled"}
+                continue
+            if not thin.done():
+                continue
+            try:
+                _tf_checksum_hex, result_checksum_hex, exc = thin.result()
+            except Exception as exc:
+                entry = await self._pop_delegate_entry(token)
+                if entry is not None:
+                    self._release_delegate_entry(entry, cancel=True)
+                results[str(token)] = {"status": "error", "error": repr(exc)}
+                continue
+            if exc:
+                err = exc
+                if not isinstance(err, str):
+                    err = repr(err)
+                status_payload = {"status": "error", "error": err}
+            elif result_checksum_hex is None:
+                status_payload = {
+                    "status": "error",
+                    "error": "Result checksum unavailable",
+                }
+            else:
+                status_payload = {"status": "done", "result": result_checksum_hex}
+            entry = await self._pop_delegate_entry(token)
+            if entry is not None:
+                self._release_delegate_entry(entry, cancel=True)
+            results[str(token)] = status_payload
+        return results
+
+    async def _handle_delegate_transformation_cancel(
+        self, _handle, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        tokens = []
+        if isinstance(payload, dict):
+            tokens = payload.get("tokens", []) or []
+        cancelled: list[str] = []
+        for token in tokens:
+            entry = await self._pop_delegate_entry(token)
+            if entry is None:
+                if self._delegate_lock is not None:
+                    async with self._delegate_lock:
+                        self._delegate_completed.pop(str(token), None)
+                continue
+            self._release_delegate_entry(entry, cancel=True)
+            cancelled.append(str(token))
+        return {"cancelled": cancelled}
 
     async def _handle_delegate_transformation(
         self, _handle, payload: Dict[str, Any]
@@ -665,6 +1446,16 @@ class _WorkerManager:
             tf_checksum = Checksum(payload["tf_checksum"])
             tf_dunder = payload.get("tf_dunder", {}) or {}
             scratch = bool(payload.get("scratch", False))
+            driver_context = _driver_flag_from_tf_dunder(tf_dunder)
+            if not driver_context:
+                driver_context = bool(payload.get("driver_context", False))
+            cached_result = await self._get_cached_transformation_result(tf_checksum)
+            if cached_result is not None:
+                try:
+                    cached_result.tempref()
+                except Exception:
+                    pass
+                return cached_result
             await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
             if transformation_dict is None:
                 try:
@@ -710,14 +1501,40 @@ class _WorkerManager:
                         )
                     except Exception:
                         try_request_permission = release_permission = None
+                    log = logging.getLogger(__name__)
 
-                    if try_request_permission is not None:
+                    def _describe_raw_client(raw_client: Any) -> str:
+                        if raw_client is None:
+                            return "client=None"
+                        scheduler_addr = None
+                        try:
+                            scheduler = getattr(raw_client, "scheduler", None)
+                            scheduler_addr = getattr(scheduler, "address", None)
+                        except Exception:
+                            scheduler_addr = None
+                        client_id = getattr(raw_client, "id", None)
+                        status = getattr(raw_client, "status", None)
+                        return (
+                            "client_obj_id="
+                            + str(id(raw_client))
+                            + " client_id="
+                            + str(client_id)
+                            + " status="
+                            + str(status)
+                            + " scheduler="
+                            + str(scheduler_addr)
+                        )
+
+                    if try_request_permission is not None and not driver_context:
                         permission_granted = try_request_permission()
                         if not permission_granted:
                             return permission_denied
 
                     try:
                         if isinstance(transformation_dict, dict):
+                            dep_checksums = _dependency_checksums_from_tf_dunder(
+                                tf_dunder
+                            )
                             inputs: Dict[str, TransformationInputSpec] = {}
                             input_futures: Dict[str, Any] = {}
                             for pinname, value in transformation_dict.items():
@@ -726,9 +1543,37 @@ class _WorkerManager:
                                 if not isinstance(value, tuple) or len(value) < 3:
                                     continue
                                 celltype, subcelltype, checksum_hex = value
+                                dep_tf_checksum = dep_checksums.get(pinname)
+                                dep_futures = None
+                                if dep_tf_checksum:
+                                    get_futures = getattr(
+                                        dask_client, "get_transformation_futures", None
+                                    )
+                                    if callable(get_futures):
+                                        dep_futures = get_futures(dep_tf_checksum)
+                                if dep_futures is not None:
+                                    if dep_futures.fat is None:
+                                        dep_futures.fat = dask_client.ensure_fat_future(
+                                            dep_futures
+                                        )
+                                    inputs[pinname] = TransformationInputSpec(
+                                        name=pinname,
+                                        celltype=celltype,
+                                        subcelltype=subcelltype,
+                                        checksum=None,
+                                        kind="transformation",
+                                    )
+                                    input_futures[pinname] = dep_futures.fat
+                                    continue
                                 if checksum_hex is None:
                                     raise RuntimeError(
-                                        f"Input '{pinname}' has no checksum"
+                                        f"Input '{pinname}' has no checksum or dependency future"
+                                    )
+                                if dep_tf_checksum and dep_futures is None:
+                                    log.info(
+                                        "[seamless-dask] delegate fallback to checksum pin=%s tf_checksum=%s",
+                                        pinname,
+                                        dep_tf_checksum,
                                     )
                                 if isinstance(checksum_hex, Checksum):
                                     checksum_hex = checksum_hex.hex()
@@ -747,9 +1592,20 @@ class _WorkerManager:
                         futures = dask_client.submit_transformation(
                             submission, need_fat=False
                         )
-                        _tf_checksum_hex, result_checksum_hex, exc = (
-                            futures.thin.result()
-                        )
+                        try:
+                            _tf_checksum_hex, result_checksum_hex, exc = (
+                                futures.thin.result()
+                            )
+                        except BaseException as exc:
+                            raw_client = getattr(dask_client, "client", None)
+                            log.warning(
+                                "[seamless-dask] delegate thin.result failed pid=%s thread=%s %s exc=%r",
+                                os.getpid(),
+                                threading.current_thread().name,
+                                _describe_raw_client(raw_client),
+                                exc,
+                            )
+                            raise
                         if exc:
                             return exc
                         if result_checksum_hex is None:
@@ -771,16 +1627,20 @@ class _WorkerManager:
                                     ):
                                         if fut is None:
                                             continue
+                                        raw_client = getattr(
+                                            dask_client, "client", None
+                                        )
                                         try:
-                                            fut.release()
+                                            if (
+                                                raw_client is not None
+                                                and not fut.cancelled()
+                                                and not fut.done()
+                                            ):
+                                                raw_client.cancel(fut, force=True)
                                         except Exception:
                                             pass
                                         try:
-                                            raw_client = getattr(
-                                                dask_client, "client", None
-                                            )
-                                            if raw_client is not None:
-                                                raw_client.cancel(fut, force=True)
+                                            fut.release()
                                         except Exception:
                                             pass
                             except Exception:
@@ -981,9 +1841,9 @@ class _WorkerManager:
         for key, value in transformation_dict.items():
             if isinstance(value, tuple) and len(value) >= 3:
                 cs_hex = value[2]
-                if cs_hex:
+                if _is_checksum_hex(cs_hex):
                     checksums.add(Checksum(cs_hex).hex())
-            elif isinstance(value, str) and len(value) == 64:
+            elif _is_checksum_hex(value):
                 checksums.add(Checksum(value).hex())
         for cs_hex in checksums:
             if cs_hex in self._prefetched_buffers:
@@ -994,6 +1854,18 @@ class _WorkerManager:
                 continue
             if isinstance(buf, Buffer):
                 self._prefetched_buffers[cs_hex] = bytes(buf.content)
+
+    async def _get_cached_transformation_result(
+        self, tf_checksum: Checksum
+    ) -> Checksum | None:
+        try:
+            from seamless_remote import database_remote
+        except Exception:
+            return None
+        try:
+            return await database_remote.get_transformation_result(tf_checksum)
+        except Exception:
+            return None
 
 
 def spawn(num_workers: Optional[int] = None, dask_available: bool = False) -> None:
@@ -1095,10 +1967,15 @@ async def dispatch_to_workers(
     tf_checksum: Checksum,
     tf_dunder: Dict[str, Any],
     scratch: bool,
+    owner_dask_key: str | None = None,
 ) -> Checksum | str:
     manager = _require_manager()
     return await manager.run_transformation_async(
-        transformation_dict, tf_checksum, tf_dunder, scratch
+        transformation_dict,
+        tf_checksum,
+        tf_dunder,
+        scratch,
+        owner_dask_key=owner_dask_key,
     )
 
 
@@ -1115,13 +1992,62 @@ async def forward_to_parent(
         "tf_dunder": tf_dunder,
         "scratch": scratch,
     }
-    result = await _request_parent_async("delegate_transformation", payload)
+    owner_dask_key = _get_current_owner_dask_key()
+    if owner_dask_key is not None:
+        payload["owner_dask_key"] = owner_dask_key
+    response = await _request_parent_async("delegate_transformation_submit", payload)
+    if isinstance(response, dict):
+        status = response.get("status")
+        if status == "submitted":
+            token = response.get("token")
+            if not token:
+                raise RuntimeError("Missing delegation token")
+            proxy_future = _register_delegate_token(str(token))
+            result = await asyncio.wrap_future(proxy_future)
+            if isinstance(result, str):
+                if result == _DELEGATION_REFUSED:
+                    loop = asyncio.get_running_loop()
+                    return await loop.run_in_executor(
+                        None, _execute_transformation, payload
+                    )
+                if result == "cancelled":
+                    raise RuntimeError("Delegated transformation cancelled")
+                if result == "unknown":
+                    raise RuntimeError("Delegated transformation unknown")
+                raise RuntimeError(result)
+            if not isinstance(result, Checksum):
+                raise RuntimeError(
+                    f"Delegated transformation returned non-checksum result: {result!r}"
+                )
+            return result
+        if status == "refused":
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, _execute_transformation, payload)
+        if status == "done":
+            result_hex = response.get("result")
+            if result_hex is None:
+                raise RuntimeError("Delegated transformation returned no result")
+            try:
+                return Checksum(result_hex)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Invalid delegated checksum: {result_hex!r}"
+                ) from exc
+        if status == "error":
+            raise RuntimeError(
+                response.get("error") or "Delegated transformation error"
+            )
+    result = response
     if isinstance(result, str):
         if result == _DELEGATION_REFUSED:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, _execute_transformation, payload)
         # any other string is an error/traceback
         raise RuntimeError(result)
+    if not isinstance(result, (Checksum, bytes, bytearray)):
+        raise RuntimeError(
+            f"Delegated transformation returned non-checksum result: {result!r}"
+        )
     return result
 
 

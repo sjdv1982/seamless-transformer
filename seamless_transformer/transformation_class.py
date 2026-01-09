@@ -9,9 +9,11 @@ are intentionally omitted or stubbed.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import traceback
 import concurrent.futures as _cf
+from copy import deepcopy
 from typing import Any, Dict, Generic, Optional, TYPE_CHECKING, TypeVar
 
 from seamless import Checksum, Buffer, ensure_open, is_worker
@@ -37,6 +39,12 @@ except Exception:  # pragma: no cover - allow operation without seamless-dask
 
         def _ensure_dask_futures(self, *args, **kwargs):
             raise RuntimeError("Dask integration is unavailable")
+
+
+def _format_exception(exc: BaseException) -> str:
+    if isinstance(exc, ValueError) and "fromhex" in str(exc):
+        return traceback.format_exc().strip("\n") + "\n"
+    return traceback.format_exc(limit=0).strip("\n") + "\n"
 
 
 T = TypeVar("T")
@@ -97,7 +105,22 @@ def loop_is_nested(loop: asyncio.AbstractEventLoop) -> bool:
 
 
 _LOOP_THREADS: dict[asyncio.AbstractEventLoop, threading.Thread] = {}
-_COMPUTE_EXECUTOR = _cf.ThreadPoolExecutor()
+def _compute_executor_max_workers() -> int:
+    raw = os.environ.get("SEAMLESS_COMPUTE_THREADS")
+    if raw:
+        try:
+            value = int(raw)
+        except Exception:
+            value = 0
+        if value > 0:
+            return value
+    cpu = os.cpu_count() or 1
+    return min(32, cpu + 4)
+
+
+_COMPUTE_EXECUTOR = _cf.ThreadPoolExecutor(
+    max_workers=_compute_executor_max_workers()
+)
 
 
 def _ensure_loop_running(loop: asyncio.AbstractEventLoop) -> None:
@@ -180,6 +203,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     def _prefer_local_execution(self) -> bool:
         try:
+            if is_worker():
+                return True
             return self._meta is not None and self._meta.get("local") is True
         except Exception:
             return False
@@ -204,12 +229,18 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             tf_checksum_raw = self._constructor_sync(self)
             if tf_checksum_raw is None:
                 raise ValueError("Cannot obtain transformation checksum")
-            tf_checksum = Checksum(tf_checksum_raw)
+            try:
+                tf_checksum = Checksum(tf_checksum_raw)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Invalid transformation checksum: "
+                    f"{tf_checksum_raw!r} ({type(tf_checksum_raw).__name__}): {exc}"
+                ) from exc
             self._transformation_checksum = tf_checksum
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
-        except Exception:
-            self._exception = traceback.format_exc(limit=0).strip("\n") + "\n"
+        except Exception as exc:
+            self._exception = _format_exception(exc)
         finally:
             self._constructed = True
         return self._transformation_checksum
@@ -226,12 +257,18 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             tf_checksum_raw = await self._constructor_async(self)
             if tf_checksum_raw is None:
                 raise ValueError("Cannot obtain transformation checksum")
-            tf_checksum = Checksum(tf_checksum_raw)
+            try:
+                tf_checksum = Checksum(tf_checksum_raw)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Invalid transformation checksum: "
+                    f"{tf_checksum_raw!r} ({type(tf_checksum_raw).__name__}): {exc}"
+                ) from exc
             self._transformation_checksum = tf_checksum
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
-        except Exception:
-            self._exception = traceback.format_exc(limit=0).strip("\n") + "\n"
+        except Exception as exc:
+            self._exception = _format_exception(exc)
         finally:
             self._constructed = True
         return self._transformation_checksum
@@ -246,13 +283,19 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             result_checksum_raw = self._evaluator_sync(self, require_value=True)
             if result_checksum_raw is None:
                 raise ValueError("Result is empty")
-            result_checksum = Checksum(result_checksum_raw)
+            try:
+                result_checksum = Checksum(result_checksum_raw)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Invalid result checksum: "
+                    f"{result_checksum_raw!r} ({type(result_checksum_raw).__name__}): {exc}"
+                ) from exc
             self._result_checksum = result_checksum
             self._exception = None
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
-        except Exception:
-            self._exception = traceback.format_exc(limit=0).strip("\n") + "\n"
+        except Exception as exc:
+            self._exception = _format_exception(exc)
         finally:
             self._evaluated = True
         return self._result_checksum
@@ -269,13 +312,19 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             )
             if result_checksum_raw is None:
                 raise ValueError("Result is empty")
-            result_checksum = Checksum(result_checksum_raw)
+            try:
+                result_checksum = Checksum(result_checksum_raw)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Invalid result checksum: "
+                    f"{result_checksum_raw!r} ({type(result_checksum_raw).__name__}): {exc}"
+                ) from exc
             self._result_checksum = result_checksum
             self._exception = None
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
-        except Exception:
-            self._exception = traceback.format_exc(limit=0).strip("\n") + "\n"
+        except Exception as exc:
+            self._exception = _format_exception(exc)
         finally:
             self._evaluated = True
         return self._result_checksum
@@ -300,8 +349,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                     raise RuntimeError(msg.format(depname, dep.exception))
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
-        except Exception:
-            self._exception = traceback.format_exc(limit=0).strip("\n") + "\n"
+        except Exception as exc:
+            self._exception = _format_exception(exc)
 
     async def _run_dependencies_async(self, require_value: bool) -> None:
         tasks = {}
@@ -322,8 +371,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                     raise RuntimeError(msg.format(depname, dep.exception))
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
-        except Exception:
-            self._exception = traceback.format_exc(limit=0).strip("\n") + "\n"
+        except Exception as exc:
+            self._exception = _format_exception(exc)
 
     @property
     def meta(self):
@@ -493,13 +542,19 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         await self._evaluation(require_value=require_value)
         return self._result_checksum
 
-    def _compute_in_thread(self, require_value: bool) -> None:
+    def _compute_in_thread(self, require_value: bool, driver_context: bool = False) -> None:
         """Run the computation in a dedicated event loop in a worker thread."""
 
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(self._computation(require_value=require_value))
+            try:
+                from .run import _driver_context
+            except Exception:
+                loop.run_until_complete(self._computation(require_value=require_value))
+            else:
+                with _driver_context(driver_context):
+                    loop.run_until_complete(self._computation(require_value=require_value))
         finally:
             try:
                 loop.run_until_complete(loop.shutdown_asyncgens())
@@ -574,10 +629,50 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             return self
         if self._computation_task is not None or self._computation_future is not None:
             return self
+        if is_worker():
+            local_only = False
+            try:
+                local_only = (
+                    self._meta is not None and self._meta.get("local") is True
+                )
+            except Exception:
+                local_only = False
+            if not local_only:
+                driver_context = False
+                driver_ctx_manager = None
+                try:
+                    from .run import is_driver_context, _driver_context
+                except Exception:
+                    is_driver_context = None
+                else:
+                    driver_context = is_driver_context()
+                    driver_ctx_manager = _driver_context
+                loop = loop or get_event_loop()
+                _ensure_loop_running(loop)
+                if driver_ctx_manager is None:
+                    self._computation_task = loop.create_task(
+                        self._computation(require_value=True)
+                    )
+                else:
+
+                    async def _run_with_driver():
+                        with driver_ctx_manager(driver_context):
+                            return await self._computation(require_value=True)
+
+                    self._computation_task = loop.create_task(_run_with_driver())
+                self._computation_task.add_done_callback(self._future_cleanup)
+                return self
         if is_worker() or worker.has_spawned():
             # Offload to a thread with its own event loop for concurrency.
+            driver_context = False
+            try:
+                from .run import is_driver_context
+
+                driver_context = is_driver_context()
+            except Exception:
+                driver_context = False
             self._computation_future = _COMPUTE_EXECUTOR.submit(
-                self._compute_in_thread, True
+                self._compute_in_thread, True, driver_context
             )
             return self
         loop = loop or get_event_loop()
@@ -734,12 +829,53 @@ def transformation_from_pretransformation(
 
     tf_dunder = tf_dunder or {}
 
+    def _collect_tf_dunder() -> dict[str, Any]:
+        dunder = {
+            key: deepcopy(value)
+            for key, value in pre_transformation.pretransformation_dict.items()
+            if key.startswith("__")
+        }
+        meta_payload: dict[str, Any] = {}
+        existing_meta = dunder.get("__meta__")
+        if isinstance(existing_meta, dict):
+            meta_payload.update(existing_meta)
+        if isinstance(meta, dict):
+            meta_payload.update(meta)
+        try:
+            from .run import is_driver_context
+        except Exception:
+            driver_context = False
+        else:
+            driver_context = bool(is_driver_context())
+        if driver_context:
+            meta_payload["driver"] = True
+        if meta_payload:
+            dunder["__meta__"] = deepcopy(meta_payload)
+        return dunder
+
+    def _inject_dependency_dunder(
+        transformation_obj: "Transformation", base_dunder: dict[str, Any]
+    ) -> dict[str, Any]:
+        deps: dict[str, str] = {}
+        for pinname, dep in transformation_obj._upstream_dependencies.items():
+            try:
+                dep_cs = dep.transformation_checksum
+            except Exception:
+                continue
+            deps[pinname] = dep_cs.hex()
+        if not deps:
+            return base_dunder
+        payload = deepcopy(base_dunder)
+        payload["__deps__"] = deps
+        return payload
+
     def constructor_sync(transformation_obj):  # pylint: disable=unused-argument
         nonlocal tf_dunder
         transformation_obj._run_dependencies()
         if transformation_obj.exception is not None:
             raise RuntimeError(transformation_obj.exception)
         pre_transformation.prepare_transformation()
+        tf_dunder = _collect_tf_dunder()
         tf_buffer = tf_get_buffer(pre_transformation.pretransformation_dict)
         tf_checksum = tf_buffer.get_checksum()
         tf_buffer.tempref()
@@ -759,20 +895,22 @@ def transformation_from_pretransformation(
     ) -> Checksum:
         # Currently, require_value will always be true for sync evaluation
         scratch = False if require_value else transformation_obj.scratch
+        tf_dunder_payload = _inject_dependency_dunder(transformation_obj, tf_dunder)
         return run_sync(
             pre_transformation.pretransformation_dict,
             tf_checksum=transformation_obj.transformation_checksum,
-            tf_dunder=tf_dunder,
+            tf_dunder=tf_dunder_payload,
             scratch=scratch,
             require_fingertip=require_value,
         )
 
     async def evaluator_async(transformation_obj, require_value: bool) -> Checksum:
         scratch = False if require_value else transformation_obj.scratch
+        tf_dunder_payload = _inject_dependency_dunder(transformation_obj, tf_dunder)
         return await run(
             pre_transformation.pretransformation_dict,
             tf_checksum=transformation_obj.transformation_checksum,
-            tf_dunder=tf_dunder,
+            tf_dunder=tf_dunder_payload,
             scratch=scratch,
             require_fingertip=require_value,
         )
