@@ -22,13 +22,24 @@ def build_transformation_namespace_sync(
     code = None
     deep_structures_to_unpack: Dict[str, Tuple[Any, str]] = {}
     namespace["PINS"] = {}
-    namespace["OUTPUTPIN"] = transformation["__output__"][1], None
+    namespace["OUTPUTPIN"] = transformation["__output__"][1]
     modules_to_build: Dict[str, Any] = {}
     as_ = transformation.get("__as__", {})
-    namespace["FILESYSTEM"] = {}
+    format_section = transformation.get("__format__", {})
+    FILESYSTEM: Dict[str, Any] = {}
+    if isinstance(format_section, dict):
+        for pinname, fmt in format_section.items():
+            filesystem = fmt.get("filesystem") if isinstance(fmt, dict) else None
+            if filesystem is None:
+                continue
+            fs_entry = dict(filesystem)
+            fs_entry.setdefault("filesystem", False)
+            FILESYSTEM[pinname] = fs_entry
+    namespace["FILESYSTEM"] = FILESYSTEM
     code_manager = get_code_manager()
     fallback_syntactic = transformation.get("__code_checksum__")
     fallback_code_text = transformation.get("__code_text__")
+    language = transformation.get("__language__", "python")
 
     for pinname in sorted(transformation.keys()):
         if pinname in (
@@ -40,7 +51,12 @@ def build_transformation_namespace_sync(
             "__format__",
         ):
             continue
-        if pinname in ("__language__", "__output__", "__code_checksum__", "__code_text__"):
+        if pinname in (
+            "__language__",
+            "__output__",
+            "__code_checksum__",
+            "__code_text__",
+        ):
             continue
 
         celltype, subcelltype, checksum_value = transformation[pinname]
@@ -54,7 +70,7 @@ def build_transformation_namespace_sync(
                 "Invalid checksum for pin "
                 f"{pinname}: {checksum_value!r} ({type(checksum_value).__name__})"
             ) from exc
-        if pinname == "code":
+        if pinname == "code" and language == "python":
             if fallback_syntactic:
                 try:
                     checksum = Checksum(fallback_syntactic)
@@ -79,10 +95,15 @@ def build_transformation_namespace_sync(
             raise CacheMissError(checksum.hex())
 
         if pinname == "code":
+            if language != "python":
+                target_celltype = celltype or "text"
+                code = buffer.get_value(target_celltype)
+                continue
             value = buffer.get_value("python")
             if isinstance(value, str) and len(value) == 64:
                 if os.environ.get("SEAMLESS_DEBUG_HEXCODE"):
                     import pprint
+
                     print(
                         "[transformer code hex]",
                         "fallback_syntactic",

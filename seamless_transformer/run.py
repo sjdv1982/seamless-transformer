@@ -9,11 +9,8 @@ from seamless import Buffer, Checksum
 from .cached_compile import exec_code
 from .injector import transformer_injector as injector
 from .transformation_namespace import build_transformation_namespace_sync
-from .transformation_utils import (
-    unpack_deep_structure,
-    is_deep_celltype,
-    pack_deep_structure,
-)
+from .transformation_utils import is_deep_celltype, pack_deep_structure
+from .execute_bash import execute_bash
 
 PACK_DEEP_RESULTS = False
 
@@ -76,9 +73,6 @@ def run_transformation_dict_in_process(
     meta = transformation.get("__meta__")
     driver_active = bool(meta.get("driver")) if isinstance(meta, dict) else False
 
-    if transformation.get("__language__") == "bash":
-        raise NotImplementedError("Bash transformers are not supported yet")
-
     env_checksum0 = transformation.get("__env__")
     if env_checksum0 is not None:
         raise NotImplementedError("Environments are not supported yet")
@@ -86,9 +80,11 @@ def run_transformation_dict_in_process(
     inputs, output_name, output_celltype, output_subcelltype = (
         get_transformation_inputs_output(transformation)
     )
+
     tf_namespace = build_transformation_namespace_sync(transformation)
     code, namespace, modules_to_build, _ = tf_namespace
-    if isinstance(code, str) and len(code) == 64:
+    language = transformation.get("__language__", "python")
+    if language == "python" and isinstance(code, str) and len(code) == 64:
         # Defensive fallback: recover code text if a checksum hex string leaked through.
         tf_dict_fallback = None
         try:
@@ -135,6 +131,18 @@ def run_transformation_dict_in_process(
         checksum_hex = str(code_checksum) if code_checksum is not None else None
     if checksum_hex:
         identifier = f"{identifier}-{checksum_hex}"
+
+    if language == "bash":
+        namespace["execute_bash"] = execute_bash
+        namespace["bashcode"] = code
+        pins = namespace.get("PINS", {})
+        namespace["pins_"] = sorted(k for k in pins.keys() if k != "conda_environment_")
+        namespace["conda_environment_"] = pins.get("conda_environment_", "")
+        code = (
+            f"{output_name} = execute_bash("
+            "bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN)"
+        )
+        inputs = []
 
     with _driver_context(driver_active):
         with injector.active_workspace(module_workspace, namespace):
