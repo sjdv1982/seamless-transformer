@@ -1,10 +1,4 @@
-"""Transformation class ported from the legacy Seamless direct API.
-
-This version relies on core Seamless primitives (Buffer, Checksum, CacheMissError)
-for checksum/buffer handling. Workflow-specific helpers that are not present in
-this repository (cancel/undo/execution_metadata, fingertip resolution, etc.)
-are intentionally omitted or stubbed.
-"""
+"""Transformation class"""
 
 from __future__ import annotations
 
@@ -105,6 +99,8 @@ def loop_is_nested(loop: asyncio.AbstractEventLoop) -> bool:
 
 
 _LOOP_THREADS: dict[asyncio.AbstractEventLoop, threading.Thread] = {}
+
+
 def _compute_executor_max_workers() -> int:
     raw = os.environ.get("SEAMLESS_COMPUTE_THREADS")
     if raw:
@@ -118,9 +114,7 @@ def _compute_executor_max_workers() -> int:
     return min(32, cpu + 4)
 
 
-_COMPUTE_EXECUTOR = _cf.ThreadPoolExecutor(
-    max_workers=_compute_executor_max_workers()
-)
+_COMPUTE_EXECUTOR = _cf.ThreadPoolExecutor(max_workers=_compute_executor_max_workers())
 
 
 def _ensure_loop_running(loop: asyncio.AbstractEventLoop) -> None:
@@ -542,7 +536,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         await self._evaluation(require_value=require_value)
         return self._result_checksum
 
-    def _compute_in_thread(self, require_value: bool, driver_context: bool = False) -> None:
+    def _compute_in_thread(
+        self, require_value: bool, driver_context: bool = False
+    ) -> None:
         """Run the computation in a dedicated event loop in a worker thread."""
 
         loop = asyncio.new_event_loop()
@@ -554,7 +550,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 loop.run_until_complete(self._computation(require_value=require_value))
             else:
                 with _driver_context(driver_context):
-                    loop.run_until_complete(self._computation(require_value=require_value))
+                    loop.run_until_complete(
+                        self._computation(require_value=require_value)
+                    )
         finally:
             try:
                 loop.run_until_complete(loop.shutdown_asyncgens())
@@ -632,9 +630,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         if is_worker():
             local_only = False
             try:
-                local_only = (
-                    self._meta is not None and self._meta.get("local") is True
-                )
+                local_only = self._meta is not None and self._meta.get("local") is True
             except Exception:
                 local_only = False
             if not local_only:

@@ -12,8 +12,6 @@ from seamless import Checksum, Buffer, ensure_open
 from .pretransformation import direct_transformer_to_pretransformation
 from .transformation_class import Transformation, transformation_from_pretransformation
 from .transformation_utils import unpack_deep_structure, is_deep_celltype, tf_get_buffer
-from .transformation_cache import run_sync
-from . import worker
 
 
 P = ParamSpec("P")

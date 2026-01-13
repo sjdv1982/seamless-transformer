@@ -30,6 +30,8 @@ class PreTransformation:
         *,
         code_manager: Optional[CodeManager] = None,
     ):
+        if "__language__" not in pretransformation_dict:
+            raise ValueError("pretransformation dict must include __language__")
         self._pretransformation_dict = pretransformation_dict
         self._code_manager = code_manager or get_code_manager()
         self._prepared = False
@@ -135,7 +137,9 @@ class PreTransformation:
                 raise RuntimeError(msg)
             return value.result_checksum
         if argname == "code":
-            return self._prepare_code(value)
+            if self._pretransformation_dict.get("__language__") == "python":
+                return self._prepare_code(value)
+            return self._to_checksum(value, celltype)
         checksum = self._to_checksum(value, celltype)
         return checksum
 
