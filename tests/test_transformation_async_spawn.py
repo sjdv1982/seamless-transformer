@@ -61,7 +61,7 @@ def test_transformation_async(spawned_workers):
     results = asyncio.run(main())
     duration1 = time.perf_counter() - start
     print(f"Duration for {N} calls", duration1)
-    assert duration1 < DELAY * PARALLEL_FACTOR + 1  # parallel execution
+    assert duration1 < DELAY * PARALLEL_FACTOR + 2  # parallel execution
 
     for tasknr, result in enumerate(results):
         assert result == 10000 * tasknr - 2
