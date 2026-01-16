@@ -189,7 +189,9 @@ def _set_current_owner_dask_key(value: str | None) -> str | None:
     return previous
 
 
-def _scheduler_task_states(dask_scheduler, keys: list[str]) -> Dict[str, tuple[str | None, bool | None]]:
+def _scheduler_task_states(
+    dask_scheduler, keys: list[str]
+) -> Dict[str, tuple[str | None, bool | None]]:
     states: Dict[str, tuple[str | None, bool | None]] = {}
     for key in keys:
         ts = dask_scheduler.tasks.get(key)
@@ -208,7 +210,9 @@ def _scheduler_task_states(dask_scheduler, keys: list[str]) -> Dict[str, tuple[s
     return states
 
 
-def _fetch_scheduler_task_states(raw_client: Any, keys: list[str]) -> Dict[str, tuple[str | None, bool | None]]:
+def _fetch_scheduler_task_states(
+    raw_client: Any, keys: list[str]
+) -> Dict[str, tuple[str | None, bool | None]]:
     return raw_client.run_on_scheduler(_scheduler_task_states, keys=keys)
 
 
@@ -373,7 +377,7 @@ def _configure_remote_clients_from_env() -> None:
         import json
         from seamless.config import set_remote_clients
 
-        set_remote_clients(json.loads(payload))
+        set_remote_clients(json.loads(payload), in_remote=True)
     except Exception:
         pass
 
@@ -554,7 +558,10 @@ def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
         tf_dunder = payload.get("tf_dunder", {}) or {}
         transformation_dict = payload.get("transformation_dict")
         try:
-            if transformation_dict is None or "__code_text__" not in transformation_dict:
+            if (
+                transformation_dict is None
+                or "__code_text__" not in transformation_dict
+            ):
                 # Merge missing code text from the serialized transformation buffer if available.
                 try:
                     tf_dict_resolved = tf_checksum.resolve(celltype="plain")
@@ -699,9 +706,7 @@ class _WorkerManager:
             self._load[handle.name] = 0
             self._limits[handle.name] = asyncio.Semaphore(TRANSFORMATION_THROTTLE)
         await asyncio.gather(*(h.wait_until_ready() for h in self._handles))
-        self._delegate_cleanup_task = asyncio.create_task(
-            self._delegate_cleanup_loop()
-        )
+        self._delegate_cleanup_task = asyncio.create_task(self._delegate_cleanup_loop())
 
     def close(self, *, wait: bool = False) -> None:
         if _DEBUG_SHUTDOWN:
@@ -861,7 +866,11 @@ class _WorkerManager:
                     raise
             finally:
                 self._load[handle.name] = max(0, self._load.get(handle.name, 0) - 1)
-                if owner_dask_key and self._delegate_owner_by_handle.get(handle.name) == owner_dask_key:
+                if (
+                    owner_dask_key
+                    and self._delegate_owner_by_handle.get(handle.name)
+                    == owner_dask_key
+                ):
                     self._delegate_owner_by_handle.pop(handle.name, None)
                 if acquired and limit is not None:
                     limit.release()
@@ -1012,8 +1021,7 @@ class _WorkerManager:
             logger = logging.getLogger(__name__)
             try:
                 summary = ", ".join(
-                    f"{key}:{state}:{who}"
-                    for key, state, who in debug_items[:10]
+                    f"{key}:{state}:{who}" for key, state, who in debug_items[:10]
                 )
                 logger.warning(
                     "[delegate-cleanup] owner-states alive=%s cancelled=%s sample=%s",
@@ -1116,7 +1124,9 @@ class _WorkerManager:
                         except Exception:
                             expired = False
                     futures = entry.get("futures")
-                    thin = getattr(futures, "thin", None) if futures is not None else None
+                    thin = (
+                        getattr(futures, "thin", None) if futures is not None else None
+                    )
                     if thin is not None:
                         try:
                             if thin.cancelled():
@@ -1336,8 +1346,8 @@ class _WorkerManager:
                                 checksum=checksum_hex,
                                 kind="checksum",
                             )
-                            input_futures[pinname] = dask_client.get_fat_checksum_future(
-                                checksum_hex
+                            input_futures[pinname] = (
+                                dask_client.get_fat_checksum_future(checksum_hex)
                             )
                         submission.inputs = inputs
                         submission.input_futures = input_futures
