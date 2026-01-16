@@ -1342,6 +1342,14 @@ class _WorkerManager:
                         submission.inputs = inputs
                         submission.input_futures = input_futures
             if dask_client is None or submission is None:
+                has_capacity = False
+                for handle in self._handles:
+                    limit = self._limits.get(handle.name)
+                    if limit is None or not limit.locked():
+                        has_capacity = True
+                        break
+                if not has_capacity:
+                    return {"status": "refused"}
                 result = await self._dispatch(
                     transformation_dict,
                     tf_checksum,
