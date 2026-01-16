@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import inspect
-import pickle
 from copy import deepcopy
 from functools import update_wrapper
 from typing import Callable, Generic, ParamSpec, TypeVar, cast, overload
+import weakref
 
 from seamless import Checksum, Buffer, ensure_open
 from .pretransformation import direct_transformer_to_pretransformation
 from .transformation_class import Transformation, transformation_from_pretransformation
-from .transformation_utils import unpack_deep_structure, is_deep_celltype, tf_get_buffer
 
 
 P = ParamSpec("P")
@@ -69,7 +68,7 @@ class Transformer(Generic[P, R]):
         """Transformer.
         Transformers can be called as normal functions, but
         the source code of the function and the arguments are converted
-        into a Seamless Transformation that is returned.
+        into a Seamless Transformation that is returned.types
 
             Parameters:
 
@@ -95,10 +94,10 @@ class Transformer(Generic[P, R]):
                     its transformations bypass Dask throttling.
 
             - celltypes. Returns a wrapper where you can set the celltypes
-                    of the individual transformer pins.
+                    of the individual transformer args.
                 The syntax is: Transformer.celltypes.a = "text"
                 (or Transformer.celltypes["a"] = "text")
-                for pin "a".
+                for arg "a".
 
             - modules: Returns a wrapper where you can define Python modules
                 to be imported into the transformation
@@ -115,6 +114,7 @@ class Transformer(Generic[P, R]):
         self._signature = signature
         self._codebuf = codebuf
         self._celltypes = {k: "mixed" for k in signature.parameters}
+        self._args = {}
         self._celltypes["result"] = "mixed"
         self._modules = {}
         """
@@ -130,7 +130,12 @@ class Transformer(Generic[P, R]):
     @property
     def celltypes(self):
         """The celltypes"""
-        return CelltypesWrapper(self._celltypes)
+        return CelltypesWrapper(self._celltypes, self._args)
+
+    @property
+    def args(self):
+        """The arguments"""
+        return ArgsWrapper(self._args, self._celltypes)
 
     @property
     def modules(self):
@@ -152,7 +157,9 @@ class Transformer(Generic[P, R]):
         """
 
         ensure_open("transformer call")
-        arguments = self._signature.bind(*args, **kwargs).arguments
+        all_args = self._args.copy()
+        all_args.update(self._signature.bind_partial(*args, **kwargs).arguments)
+        arguments = self._signature.bind(**all_args).arguments
         deps = {
             argname: arg
             for argname, arg in arguments.items()
@@ -160,7 +167,6 @@ class Transformer(Generic[P, R]):
         }
         env = None  # environment handling not ported
 
-        result_celltype = self.celltypes["result"]
         meta = deepcopy(self._meta)
         modules = {}
         """
@@ -263,8 +269,9 @@ class DirectTransformer(Transformer[P, R]):
 class CelltypesWrapper:
     """Wrapper around an imperative transformer's celltypes."""
 
-    def __init__(self, celltypes):
+    def __init__(self, celltypes, args):
         self._celltypes = celltypes
+        self._args = args
 
     def __getattr__(self, attr):
         return self._celltypes[attr]
@@ -284,12 +291,15 @@ class CelltypesWrapper:
             raise AttributeError(key)
         if key == "result":
             if value in ("deepfolder", "module"):
-                raise TypeError(f"result pin celltype cannot be '{value}'")
-            pin_celltypes = celltypes + ["deepcell", "folder"]
+                raise TypeError(f"result celltype cannot be '{value}'")
+            all_celltypes = celltypes + ["deepcell", "folder"]
         else:
-            pin_celltypes = celltypes + ["deepcell", "deepfolder", "folder", "module"]
-        if value not in pin_celltypes:
-            raise TypeError(value, pin_celltypes)
+            all_celltypes = celltypes + ["deepcell", "deepfolder", "folder", "module"]
+        if value not in all_celltypes:
+            raise TypeError(value, all_celltypes)
+        old_arg = self._args.get(key)
+        if old_arg is not None:
+            pass  # TODO: verify compatibility with new celltype, but only inside a workflow
         self._celltypes[key] = value
 
     def __dir__(self):
@@ -302,10 +312,45 @@ class CelltypesWrapper:
         return str(self)
 
 
-class ModulesWrapper:
-    """Wrapper around an imperative transformer's imported modules.
+class ArgsWrapper:
+    """Wrapper around an imperative transformer's celltypes."""
 
-    Modifying this wrapper imports seamless.workflow"""
+    def __init__(self, args, celltypes):
+        self._args = args
+        self._celltypes = celltypes
+
+    def __getattr__(self, attr):
+        return self._args.get(attr)
+
+    def __getitem__(self, key):
+        return self._args.get(key)
+
+    def __setattr__(self, attr, value):
+        if attr.startswith("_"):
+            return super().__setattr__(attr, value)
+        return self.__setitem__(attr, value)
+
+    def __setitem__(self, key, value):
+        from seamless.checksum.celltypes import celltypes
+
+        if key not in self._celltypes or key == "result":
+            raise AttributeError(key)
+        celltype = self._celltypes[key]
+        # TODO: verify compatibility with celltype, but only inside a workflow
+        self._args[key] = value
+
+    def __dir__(self):
+        return sorted(self._args.keys())
+
+    def __str__(self):
+        return str(self._args)
+
+    def __repr__(self):
+        return str(self)
+
+
+class ModulesWrapper:
+    """Wrapper around an imperative transformer's imported modules."""
 
     def __init__(self, modules):
         self._modules = modules
