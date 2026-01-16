@@ -62,6 +62,6 @@ def test_nested_transformations_multi():
                     assert pid == main_pid
 
         assert expected_labels == seen_labels
-        assert duration < 20.0 + 2
+        assert duration < 2.0 * job_count + 2
     finally:
         seamless.close()

@@ -55,10 +55,10 @@ calc_pi_all.driver = True
 
 
 def test_calc_pi():
-    seed = 8
+    seed = 0
     ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "1000"))
+    ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "300000000"))
     checksum_only = False
-    ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "100000000"))
     result = calc_pi_all(seed, ntrials, checksum_only=checksum_only, ndots=ndots)
     print(result)
 
