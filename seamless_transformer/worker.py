@@ -160,11 +160,13 @@ _DELEGATE_COMPLETED_TTL = float(
 _DELEGATE_OWNER_CANCEL_TTL = float(
     os.environ.get("SEAMLESS_DELEGATE_OWNER_CANCEL_TTL", "60")
 )
+_DEFAULT_DASK_BASE_PRIORITY = 10
 _DELEGATE_DEBUG_CLEANUP = bool(os.environ.get("SEAMLESS_DEBUG_DELEGATE_CLEANUP"))
 _DELEGATE_PROXY_LOCK = threading.Lock()
 _DELEGATE_PROXY_FUTURES: Dict[str, _cf.Future] = {}
 _DELEGATE_POLL_TASK: asyncio.Task | None = None
 _CURRENT_OWNER_DASK_KEY = threading.local()
+_CURRENT_OWNER_DASK_PRIORITY = threading.local()
 
 
 def _normalize_owner_dask_key(value: Any) -> str | None:
@@ -173,6 +175,15 @@ def _normalize_owner_dask_key(value: Any) -> str | None:
     if value.startswith(("base-", "base_")):
         return value
     return None
+
+
+def _normalize_owner_dask_priority(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def _get_current_owner_dask_key() -> str | None:
@@ -186,6 +197,20 @@ def _set_current_owner_dask_key(value: str | None) -> str | None:
             delattr(_CURRENT_OWNER_DASK_KEY, "dask_key")
     else:
         _CURRENT_OWNER_DASK_KEY.dask_key = value
+    return previous
+
+
+def _get_current_owner_dask_priority() -> int | None:
+    return getattr(_CURRENT_OWNER_DASK_PRIORITY, "priority", None)
+
+
+def _set_current_owner_dask_priority(value: int | None) -> int | None:
+    previous = getattr(_CURRENT_OWNER_DASK_PRIORITY, "priority", None)
+    if value is None:
+        if hasattr(_CURRENT_OWNER_DASK_PRIORITY, "priority"):
+            delattr(_CURRENT_OWNER_DASK_PRIORITY, "priority")
+    else:
+        _CURRENT_OWNER_DASK_PRIORITY.priority = value
     return previous
 
 
@@ -552,6 +577,10 @@ def _patch_worker_primitives() -> None:
 def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
     owner_dask_key = _normalize_owner_dask_key(payload.get("owner_dask_key"))
     previous_owner = _set_current_owner_dask_key(owner_dask_key)
+    owner_dask_priority = _normalize_owner_dask_priority(
+        payload.get("owner_dask_priority")
+    )
+    previous_priority = _set_current_owner_dask_priority(owner_dask_priority)
     try:
         tf_checksum = Checksum(payload["tf_checksum"])
         scratch = bool(payload.get("scratch", False))
@@ -593,6 +622,7 @@ def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
             return traceback.format_exc()
     finally:
         _set_current_owner_dask_key(previous_owner)
+        _set_current_owner_dask_priority(previous_priority)
 
 
 async def _child_initializer(channel: ChildChannel) -> None:
@@ -795,6 +825,7 @@ class _WorkerManager:
         *,
         enforce_limit: bool = True,
         owner_dask_key: str | None = None,
+        owner_dask_priority: int | None = None,
     ) -> Checksum | str:
         await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
         retry_attempts = 0
@@ -854,6 +885,8 @@ class _WorkerManager:
                 }
                 if owner_dask_key is not None:
                     payload["owner_dask_key"] = owner_dask_key
+                if owner_dask_priority is not None:
+                    payload["owner_dask_priority"] = owner_dask_priority
                 result = await handle.request("execute_transformation", payload)
             except ProcessError:
                 retry = True
@@ -886,6 +919,7 @@ class _WorkerManager:
         tf_dunder: Dict[str, Any],
         scratch: bool,
         owner_dask_key: str | None = None,
+        owner_dask_priority: int | None = None,
     ) -> Checksum | str:
         fut = asyncio.run_coroutine_threadsafe(
             self._dispatch(
@@ -895,6 +929,7 @@ class _WorkerManager:
                 scratch,
                 enforce_limit=True,
                 owner_dask_key=owner_dask_key,
+                owner_dask_priority=owner_dask_priority,
             ),
             self.loop,
         )
@@ -907,6 +942,7 @@ class _WorkerManager:
         tf_dunder: Dict[str, Any],
         scratch: bool,
         owner_dask_key: str | None = None,
+        owner_dask_priority: int | None = None,
     ) -> Checksum | str:
         fut = asyncio.run_coroutine_threadsafe(
             self._dispatch(
@@ -916,6 +952,7 @@ class _WorkerManager:
                 scratch,
                 enforce_limit=True,
                 owner_dask_key=owner_dask_key,
+                owner_dask_priority=owner_dask_priority,
             ),
             self.loop,
         )
@@ -1254,6 +1291,9 @@ class _WorkerManager:
             if not driver_context:
                 driver_context = bool(payload.get("driver_context", False))
             owner_dask_key = _normalize_owner_dask_key(payload.get("owner_dask_key"))
+            owner_dask_priority = _normalize_owner_dask_priority(
+                payload.get("owner_dask_priority")
+            )
             if not owner_dask_key:
                 owner_dask_key = self._delegate_owner_by_handle.get(
                     getattr(_handle, "name", None) or ""
@@ -1403,7 +1443,14 @@ class _WorkerManager:
                     permission_granted = try_request_permission()
                     if not permission_granted:
                         return permission_denied
-                return dask_client.submit_transformation(submission, need_fat=False)
+                priority_boost = (
+                    owner_dask_priority
+                    if owner_dask_priority is not None
+                    else _DEFAULT_DASK_BASE_PRIORITY
+                )
+                return dask_client.submit_transformation(
+                    submission, need_fat=False, priority_boost=priority_boost
+                )
 
             loop = asyncio.get_running_loop()
             futures = await loop.run_in_executor(_DASK_DELEGATE_EXECUTOR, _submit)
@@ -1528,6 +1575,9 @@ class _WorkerManager:
             driver_context = _driver_flag_from_tf_dunder(tf_dunder)
             if not driver_context:
                 driver_context = bool(payload.get("driver_context", False))
+            owner_dask_priority = _normalize_owner_dask_priority(
+                payload.get("owner_dask_priority")
+            )
             cached_result = await self._get_cached_transformation_result(tf_checksum)
             if cached_result is not None:
                 try:
@@ -1668,8 +1718,15 @@ class _WorkerManager:
                                 )
                             submission.inputs = inputs
                             submission.input_futures = input_futures
+                        priority_boost = (
+                            owner_dask_priority
+                            if owner_dask_priority is not None
+                            else _DEFAULT_DASK_BASE_PRIORITY
+                        )
                         futures = dask_client.submit_transformation(
-                            submission, need_fat=False
+                            submission,
+                            need_fat=False,
+                            priority_boost=priority_boost,
                         )
                         try:
                             _tf_checksum_hex, result_checksum_hex, exc = (
@@ -2047,6 +2104,7 @@ async def dispatch_to_workers(
     tf_dunder: Dict[str, Any],
     scratch: bool,
     owner_dask_key: str | None = None,
+    owner_dask_priority: int | None = None,
 ) -> Checksum | str:
     manager = _require_manager()
     return await manager.run_transformation_async(
@@ -2055,6 +2113,7 @@ async def dispatch_to_workers(
         tf_dunder,
         scratch,
         owner_dask_key=owner_dask_key,
+        owner_dask_priority=owner_dask_priority,
     )
 
 
@@ -2074,6 +2133,9 @@ async def forward_to_parent(
     owner_dask_key = _get_current_owner_dask_key()
     if owner_dask_key is not None:
         payload["owner_dask_key"] = owner_dask_key
+    owner_dask_priority = _get_current_owner_dask_priority()
+    if owner_dask_priority is not None:
+        payload["owner_dask_priority"] = owner_dask_priority
     response = await _request_parent_async("delegate_transformation_submit", payload)
     if isinstance(response, dict):
         status = response.get("status")
