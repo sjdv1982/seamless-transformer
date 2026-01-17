@@ -171,7 +171,9 @@ class PreTransformation:
                 pass
         try:
             # Keep a plain-text fallback in case the code buffer cannot be resolved later.
-            self._pretransformation_dict.setdefault("__code_text__", code_buffer.decode())
+            self._pretransformation_dict.setdefault(
+                "__code_text__", code_buffer.decode()
+            )
         except Exception:
             pass
         semantic_checksum, syntactic_checksum = self._code_manager.track_code_buffer(
@@ -192,7 +194,11 @@ class PreTransformation:
         elif isinstance(value, str) and len(value) == 64:
             checksum = Checksum(value)
         else:
-            buffer = value if isinstance(value, Buffer) else Buffer(value, celltype or "mixed")
+            buffer = (
+                value
+                if isinstance(value, Buffer)
+                else Buffer(value, celltype or "mixed")
+            )
             checksum = buffer.get_checksum()
             if is_worker():
                 try:
@@ -213,6 +219,7 @@ def direct_transformer_to_pretransformation(
     arguments,
     env,
     *,
+    language,
     code_manager: Optional[CodeManager] = None,
 ) -> PreTransformation:
     """Create a PreTransformation instance for a direct transformer call."""
@@ -226,7 +233,7 @@ def direct_transformer_to_pretransformation(
 
     pretransformation_dict: Dict[str, Any] = {
         "__output__": outputpin,
-        "__language__": "python",
+        "__language__": language,
     }
 
     if env is not None:
@@ -273,7 +280,8 @@ def direct_transformer_to_pretransformation(
             pin = {"celltype": celltype}
         tf_pins[pinname] = pin
 
-    tf_pins["code"] = {"celltype": "python", "subcelltype": "transformer"}
+    code_celltype = "python" if language == "python" else "text"
+    tf_pins["code"] = {"celltype": code_celltype, "subcelltype": "transformer"}
     arguments2["code"] = codebuf
 
     format_section: Dict[str, Dict[str, Any]] = {}

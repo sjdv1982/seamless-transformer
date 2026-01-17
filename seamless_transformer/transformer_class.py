@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from types import FunctionType
 import inspect
 from copy import deepcopy
 from functools import update_wrapper
-from typing import Callable, Generic, ParamSpec, TypeVar, cast, overload
-import weakref
+from typing import Callable, Generic, Optional, ParamSpec, TypeVar, cast, overload
 
-from seamless import Checksum, Buffer, ensure_open
+from seamless import Buffer, ensure_open
 from .pretransformation import direct_transformer_to_pretransformation
 from .transformation_class import Transformation, transformation_from_pretransformation
 
@@ -18,36 +18,66 @@ R = TypeVar("R")
 
 
 @overload
-def direct(func: "Transformer[P, R]") -> "DirectTransformer[P, R]": ...
+def direct(
+    func: "Transformer[P, R]", language: None = None
+) -> "DirectTransformer[P, R]": ...
 
 
 @overload
-def direct(func: Callable[P, R]) -> "DirectTransformer[P, R]": ...
+def direct(
+    func: Callable[P, R] | str, language: Optional[str] = None
+) -> "DirectTransformer[P, R]": ...
 
 
-def direct(func: Callable[P, R] | "Transformer[P, R]") -> "DirectTransformer[P, R]":
+def direct(
+    func: Callable[P, R] | "Transformer[P, R]" | str, language: Optional[str] = None
+) -> "DirectTransformer[P, R]":
     """Execute immediately, returning the result value."""
 
     if isinstance(func, Transformer):
+        assert language is None
         result = DirectTransformer.__new__(DirectTransformer)
         for k, v in func.__dict__.items():
             setattr(result, k, deepcopy(v))
+        result.language = language
     else:
-        result = DirectTransformer(func, scratch=False, direct_print=False, local=False)
-    update_wrapper(result, func)
+        if language is None:
+            language = "python"
+        if callable(func):
+            if not isinstance(func, FunctionType):
+                raise TypeError("func must be a function")
+            assert language == "python", language
+        result = DirectTransformer(
+            func, scratch=False, direct_print=False, local=False, language=language
+        )
+        if callable(func):
+            update_wrapper(result, func)
     return result
 
 
-def delayed(func: Callable[P, R]) -> "Transformer[P, R]":
+def delayed(
+    func: Callable[P, R] | str, language: Optional[str] = None
+) -> "Transformer[P, R]":
     """Return a Transformation object that can be executed later."""
 
     if isinstance(func, Transformer):
+        assert language is None
         result = Transformer.__new__(Transformer)
         for k, v in func.__dict__.items():
             setattr(result, k, v)
+        result.language = language
     else:
-        result = Transformer(func, scratch=False, direct_print=False, local=False)
-    update_wrapper(result, func)
+        if language is None:
+            language = "python"
+        if callable(func):
+            if not isinstance(func, FunctionType):
+                raise TypeError("func must be a function")
+            assert language == "python", language
+        result = Transformer(
+            func, scratch=False, direct_print=False, local=False, language=language
+        )
+        if callable(func):
+            update_wrapper(result, func)
     return result
 
 
@@ -59,8 +89,9 @@ class Transformer(Generic[P, R]):
 
     def __init__(
         self,
-        func: Callable[P, R],
+        code: Callable[P, R] | str,
         *,
+        language: str,
         scratch: bool,
         direct_print: bool,
         local: bool,
@@ -105,18 +136,11 @@ class Transformer(Generic[P, R]):
             - environment  ...
 
         """
-        from .getsource import getsource
-
-        code = getsource(func)
-        codebuf = Buffer(code, "python")
-
-        signature = inspect.signature(func)
-        self._signature = signature
-        self._codebuf = codebuf
-        self._celltypes = {k: "mixed" for k in signature.parameters}
+        self._language = language
         self._args = {}
-        self._celltypes["result"] = "mixed"
         self._modules = {}
+        self._celltypes = {}
+        self._set_code(code)
         """
         STUB
         self._environment = Environment(self)
@@ -125,17 +149,59 @@ class Transformer(Generic[P, R]):
         self._meta = {"transformer_path": ["tf", "tf"], "local": local}
         self.scratch = scratch
         self.direct_print = direct_print
-        update_wrapper(self, func)
+        if callable(code):
+            update_wrapper(self, code)
+
+    def _set_code(self, code: Callable[P, R] | str):
+        from .getsource import getsource
+
+        signature = None
+        if callable(code):
+            assert isinstance(code, FunctionType)
+            signature = inspect.signature(code)
+            code = getsource(code)
+            codebuf = Buffer(code, "python")
+            self._codebuf = codebuf
+            self._celltypes = {k: "mixed" for k in signature.parameters}
+            self._celltypes["result"] = "mixed"
+        else:
+            assert isinstance(code, str)
+            self._codebuf = Buffer(code, "text")
+        self._signature = signature
+
+    @property
+    def code(self):
+        return self._codebuf
+
+    @code.setter
+    def code(self, code: Callable[P, R] | str):
+        return self._set_code(code)
+
+    @property
+    def language(self):
+        return self._language
+
+    @language.setter
+    def language(self, lang):
+        if lang is None:
+            lang = "python"
+        self._language = lang
+        if lang != "python":
+            self._signature = None
 
     @property
     def celltypes(self):
         """The celltypes"""
-        return CelltypesWrapper(self._celltypes, self._args)
+        return CelltypesWrapper(
+            self._celltypes, self._args, fixed=self._signature is not None
+        )
 
     @property
     def args(self):
         """The arguments"""
-        return ArgsWrapper(self._args, self._celltypes)
+        return ArgsWrapper(
+            self._args, self._celltypes, fixed=self._signature is not None
+        )
 
     @property
     def modules(self):
@@ -158,8 +224,21 @@ class Transformer(Generic[P, R]):
 
         ensure_open("transformer call")
         all_args = self._args.copy()
-        all_args.update(self._signature.bind_partial(*args, **kwargs).arguments)
-        arguments = self._signature.bind(**all_args).arguments
+        if self._signature is not None:
+            all_args.update(self._signature.bind_partial(*args, **kwargs).arguments)
+            arguments = self._signature.bind(**all_args).arguments
+        else:
+            if len(args) > 0:
+                raise TypeError(
+                    "No function signature: positional arguments not supported"
+                )
+            all_args.update(kwargs)
+            for argname in self._celltypes:
+                if argname == "result":
+                    continue
+                if argname not in all_args:
+                    raise TypeError(f"Missing argument: '{argname}'")
+            arguments = all_args
         deps = {
             argname: arg
             for argname, arg in arguments.items()
@@ -181,7 +260,13 @@ class Transformer(Generic[P, R]):
         """
 
         pre_transformation = direct_transformer_to_pretransformation(
-            self._codebuf, meta, self._celltypes, modules, arguments, env
+            self._codebuf,
+            meta,
+            self._celltypes,
+            modules,
+            arguments,
+            env,
+            language=self.language,
         )
         tf_dunder = {}
         return cast(
@@ -269,9 +354,10 @@ class DirectTransformer(Transformer[P, R]):
 class CelltypesWrapper:
     """Wrapper around an imperative transformer's celltypes."""
 
-    def __init__(self, celltypes, args):
+    def __init__(self, celltypes, args, fixed):
         self._celltypes = celltypes
         self._args = args
+        self._fixed = fixed
 
     def __getattr__(self, attr):
         return self._celltypes[attr]
@@ -288,7 +374,15 @@ class CelltypesWrapper:
         from seamless.checksum.celltypes import celltypes
 
         if key not in self._celltypes:
-            raise AttributeError(key)
+            if self._fixed:
+                raise AttributeError(key)
+            self._celltypes[key] = value
+            if "result" not in self._celltypes:
+                self._celltypes["result"] = "mixed"
+
+        if isinstance(value, type):
+            value = value.__name__
+        value = str(value)
         if key == "result":
             if value in ("deepfolder", "module"):
                 raise TypeError(f"result celltype cannot be '{value}'")
@@ -301,6 +395,18 @@ class CelltypesWrapper:
         if old_arg is not None:
             pass  # TODO: verify compatibility with new celltype, but only inside a workflow
         self._celltypes[key] = value
+
+    def __delattr__(self, attr: str) -> None:
+        if attr.startswith("_"):
+            return super().__delattr__(attr)
+        return self.__delitem__(attr)
+
+    def __delitem__(self, key) -> None:
+        if self._fixed or key not in self._celltypes:
+            raise AttributeError(key)
+        del self._celltypes[key]
+        if key in self._args:
+            del self._args[key]
 
     def __dir__(self):
         return sorted(self._celltypes.keys())
@@ -315,9 +421,10 @@ class CelltypesWrapper:
 class ArgsWrapper:
     """Wrapper around an imperative transformer's celltypes."""
 
-    def __init__(self, args, celltypes):
+    def __init__(self, args, celltypes, fixed):
         self._args = args
         self._celltypes = celltypes
+        self._fixed = fixed
 
     def __getattr__(self, attr):
         return self._args.get(attr)
@@ -333,11 +440,30 @@ class ArgsWrapper:
     def __setitem__(self, key, value):
         from seamless.checksum.celltypes import celltypes
 
-        if key not in self._celltypes or key == "result":
+        if key == "result":
             raise AttributeError(key)
+        if key not in self._celltypes:
+            if self._fixed:
+                raise AttributeError(key)
+            self._celltypes[key] = "mixed"
+            if "result" not in self._celltypes:
+                self._celltypes["result"] = "mixed"
+
         celltype = self._celltypes[key]
         # TODO: verify compatibility with celltype, but only inside a workflow
         self._args[key] = value
+
+    def __delattr__(self, attr: str) -> None:
+        if attr.startswith("_"):
+            return super().__delattr__(attr)
+        return self.__delitem__(attr)
+
+    def __delitem__(self, key) -> None:
+        if self._fixed or key not in self._celltypes:
+            raise AttributeError(key)
+        del self._celltypes[key]
+        if key in self._args:
+            del self._args[key]
 
     def __dir__(self):
         return sorted(self._args.keys())

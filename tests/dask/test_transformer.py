@@ -11,14 +11,14 @@ def test_in_process_transformer_execution():
     """Simple smoke test mirroring the original Seamless direct test."""
 
     @direct
-    def func(a, b):
+    def func(a: int, b: int) -> int:
         return 10 * a + 2 * b
 
     assert func(30, 12) == 324
     assert func(40, 2) == 404
 
     @direct
-    def func2(a, b):
+    def func2(a: int, b: int) -> int:
         import time
 
         time.sleep(2)
