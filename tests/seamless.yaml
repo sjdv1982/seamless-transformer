@@ -2,12 +2,15 @@
 - execution: remote
 
 - stage jobserver-test:
-      - execution: remote
-      - remote: jobserver
+        - execution: remote
+        - remote: jobserver
 
 - stage simple-remote:
-      - execution: remote
-      - remote: daskserver
+        - execution: remote
+        - remote: daskserver
 
 - stage spawn-config:
-      - execution: spawn
+        - execution: spawn
+
+- stage spawn-persistent:
+        - execution: spawn
