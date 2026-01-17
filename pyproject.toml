@@ -8,3 +8,6 @@ seamless_config = ["tools.yaml"]
 [project]
 name = "seamless-transformer"
 version = "0.0.0"
+
+[project.scripts]
+seamless = "seamless_transformer.cmd.main:main"
