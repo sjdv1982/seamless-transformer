@@ -2,17 +2,14 @@
 
 import os
 import builtins
+
 from seamless import Checksum
-from seamless.cmd.message import message as msg
-from seamless.config import database
-from seamless.checksum.buffer_cache import buffer_cache
 from seamless.checksum.serialize import serialize_sync as serialize
-from seamless.checksum.calculate_checksum import calculate_checksum
-from seamless.checksum.buffer_remote import (
-    write_buffer as remote_write_buffer,
-    can_read_buffer,
-)
-from seamless.cmd.register import register_dict
+
+from seamless_transformer.transformation_utils import tf_get_buffer
+
+from .message import message as msg
+from .register import register_buffer, register_dict
 
 
 def prepare_bash_code(
@@ -94,8 +91,6 @@ def prepare_bash_transformation(
 
     Returns: transformation checksum, transformation dict
     """
-    from seamless.workflow.core.direct.run import register_transformation_dict
-
     bashcode = prepare_bash_code(
         code,
         make_executables=make_executables,
@@ -125,6 +120,8 @@ def prepare_bash_transformation(
         transformation_dict["__env__"] = env_checksum
     format_ = {}
     for k, v in checksum_dict.items():
+        if not isinstance(v, str):
+            v = Checksum(v).hex()
         if k in directories:
             fmt = {
                 "filesystem": {"optional": True, "mode": "directory"},
@@ -149,70 +146,19 @@ def prepare_bash_transformation(
     for k, v in new_args.items():
         celltype, subcelltype, value = v
         buffer = serialize(value, celltype)
-        checksum = calculate_checksum(buffer)
-        if dry_run:
-            buffer_cache.cache_buffer(checksum, buffer)
-        else:
-            remote_write_buffer(checksum, buffer)
-        vv = celltype, subcelltype, checksum.hex()
+        checksum_hex = register_buffer(buffer, dry_run=dry_run)
+        vv = celltype, subcelltype, checksum_hex
         transformation_dict[k] = vv
 
-    _, transformation_checksum = register_transformation_dict(
-        transformation_dict, dry_run=dry_run
-    )
+    tf_buffer = tf_get_buffer(transformation_dict)
+    tf_checksum = tf_buffer.get_checksum()
+    tf_buffer.tempref()
 
-    return Checksum(transformation_checksum), transformation_dict
+    return tf_checksum, transformation_dict
 
 
-def _run_transformation0(transformation_dict: dict, *, undo: bool, fingertip=False):
-    from seamless.workflow.metalevel.unbashify import unbashify
-    from seamless.workflow.core.direct.run import register_transformation_dict
-    from seamless.workflow.core.cache.transformation_cache import transformation_cache
-
-    if not fingertip:
-        fingertip = False
-    for k in transformation_dict:
-        assert not k.startswith("SPECIAL__")
-    # for caching...
-    transformation_dict_py = unbashify(transformation_dict, {}, {})
-    _, transformation_checksum_py = register_transformation_dict(transformation_dict_py)
-    result_py = database.get_transformation_result(transformation_checksum_py)
-    result_py = Checksum(result_py)
-    if result_py:
-        if not undo and (not fingertip or can_read_buffer(result_py)):
-            return Checksum(result_py)
-    # /for caching
-    _, transformation_checksum = register_transformation_dict(transformation_dict)
-    if undo:
-        has_err = False
-        if not result_py:
-            try:
-                result = transformation_cache.undo(transformation_checksum)
-            except RuntimeError as exc:
-                result = "Cannot undo: " + " ".join(exc.args)
-                has_err = True
-        else:
-            result_checksum = result_py
-            database.contest(transformation_checksum, result_checksum)
-            status, response = database.contest(
-                transformation_checksum_py, result_checksum
-            )
-            if status == 200:
-                result = result_checksum
-            else:
-                result = response
-
-        if has_err:
-            msg(0, result)
-            return None
-        else:
-            msg(
-                2,
-                f"Undo transformation {transformation_checksum.hex()} => {result.hex()}",
-            )
-            return Checksum(result)
-    else:
-        return transformation_checksum_py
+def _extract_dunder(transformation_dict: dict) -> dict:
+    return {k: v for k, v in transformation_dict.items() if k.startswith("__")}
 
 
 def run_transformation(
@@ -220,24 +166,26 @@ def run_transformation(
 ):
     """Run a cmd-seamless transformation dict.
     First convert it into a bash transformation."""
-
-    from seamless.workflow.core.direct.run import run_transformation_dict
-
-    result0 = _run_transformation0(transformation_dict, undo=undo, fingertip=fingertip)
     if undo:
-        return result0
-    else:
-        transformation_checksum_py = result0
-        result_checksum = run_transformation_dict(
-            transformation_dict, fingertip=fingertip, scratch=scratch
-        )
-        result_checksum = Checksum(result_checksum)
-        if result_checksum:
-            # while https://github.com/sjdv1982/seamless/issues/247 is open:
-            database.set_transformation_result(
-                transformation_checksum_py, result_checksum
-            )
-        return Checksum(result_checksum)
+        raise NotImplementedError("Undo is not supported in seamless-transformer yet")
+    if scratch and fingertip:
+        raise ValueError("Cannot require fingertip for scratch transformations")
+
+    from seamless_transformer.transformation_cache import run_sync
+
+    tf_buffer = tf_get_buffer(transformation_dict)
+    tf_checksum = tf_buffer.get_checksum()
+    tf_buffer.tempref()
+    tf_dunder = _extract_dunder(transformation_dict)
+
+    result_checksum = run_sync(
+        transformation_dict,
+        tf_checksum=tf_checksum,
+        tf_dunder=tf_dunder,
+        scratch=scratch,
+        require_fingertip=bool(fingertip),
+    )
+    return Checksum(result_checksum)
 
 
 async def run_transformation_async(
@@ -245,21 +193,23 @@ async def run_transformation_async(
 ):
     """Run a cmd-seamless transformation dict.
     First convert it into a bash transformation."""
-
-    from seamless.workflow.core.direct.run import run_transformation_dict_async
-
-    result0 = _run_transformation0(transformation_dict, undo=undo, fingertip=fingertip)
     if undo:
-        return result0
-    else:
-        transformation_checksum_py = result0
-        result_checksum = await run_transformation_dict_async(
-            transformation_dict, fingertip=fingertip, scratch=scratch
-        )
-        result_checksum = Checksum(result_checksum)
-        if result_checksum:
-            # while https://github.com/sjdv1982/seamless/issues/247 is open:
-            database.set_transformation_result(
-                transformation_checksum_py, result_checksum
-            )
-        return Checksum(result_checksum)
+        raise NotImplementedError("Undo is not supported in seamless-transformer yet")
+    if scratch and fingertip:
+        raise ValueError("Cannot require fingertip for scratch transformations")
+
+    from seamless_transformer.transformation_cache import run
+
+    tf_buffer = tf_get_buffer(transformation_dict)
+    tf_checksum = tf_buffer.get_checksum()
+    tf_buffer.tempref()
+    tf_dunder = _extract_dunder(transformation_dict)
+
+    result_checksum = await run(
+        transformation_dict,
+        tf_checksum=tf_checksum,
+        tf_dunder=tf_dunder,
+        scratch=scratch,
+        require_fingertip=bool(fingertip),
+    )
+    return Checksum(result_checksum)

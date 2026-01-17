@@ -79,7 +79,9 @@ def get_file_mapping(
             if argtype.get("mapping"):
                 path = argtype["mapping"]
                 fixed_mapping = argtype.get("fixed_mapping")
-            checksum = Checksum(argtype.get("checksum"))
+            checksum_value = argtype.get("checksum")
+            if checksum_value:
+                checksum = Checksum(checksum_value).hex()
             argtype = argtype["type"]
 
         if argtype == "value":

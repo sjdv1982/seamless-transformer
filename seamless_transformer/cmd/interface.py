@@ -9,7 +9,7 @@ from typing import Any
 import ruamel.yaml
 from .parsing import fill_checksum_arguments
 
-from seamless.cmd.message import message as msg
+from .message import message as msg
 
 yaml = ruamel.yaml.YAML(typ="safe")
 

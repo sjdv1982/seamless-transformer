@@ -4,56 +4,59 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from seamless.cmd.exceptions import SeamlessSystemExit
-from seamless.cmd.confirm import confirm_yna
-from seamless import Checksum
-from seamless.checksum.database_client import database
-from seamless.checksum.buffer_cache import buffer_cache
-from seamless.checksum.buffer_remote import can_read_buffer
-from seamless.cmd.message import message as msg, message_and_exit as err
-from seamless.cmd.bytes2human import bytes2human
-from seamless import CacheMissError
+from seamless import Checksum, CacheMissError
+from seamless.caching.buffer_cache import get_buffer_cache
 from seamless.checksum.calculate_checksum import calculate_file_checksum
+
+from .exceptions import SeamlessSystemExit
+from .confirm import confirm_yna
+from .message import message as msg, message_and_exit as err
+from .bytes2human import bytes2human
 
 stdout_lock = threading.Lock()
 
 
 def exists_file(filename, download_checksum):
-    download_checksum = Checksum(download_checksum)
-    if download_checksum.value is None:
-        return False
     try:
-        file_buffer = buffer_cache.get_buffer(download_checksum.bytes(), remote=False)
-        if file_buffer is not None:
-            return True
-    except CacheMissError:
-        pass
+        download_checksum = Checksum(download_checksum)
+    except Exception:
+        return False
+    cache = get_buffer_cache()
+    if cache.get(download_checksum) is not None:
+        return True
 
     try:
         current_checksum = calculate_file_checksum(filename)
-        current_checksum = Checksum(current_checksum)
     except Exception:
         return False
 
-    return current_checksum == download_checksum
+    return current_checksum == download_checksum.hex()
 
 
 def get_buffer_length(checksum):
-    buffer_info = database.get_buffer_info(checksum)
-    if buffer_info is None:
+    try:
+        checksum = Checksum(checksum)
+    except Exception:
         return None
-    return buffer_info.get("length", None)
+    cache = get_buffer_cache()
+    buf = cache.get(checksum)
+    if buf is None:
+        return None
+    return len(buf.content)
 
 
 def download_file(filename, file_checksum):
-    file_checksum = Checksum(file_checksum)
-    if file_checksum.value is None:
+    try:
+        file_checksum = Checksum(file_checksum)
+    except Exception:
         return
     try:
-        file_buffer = buffer_cache.get_buffer(file_checksum.bytes())
+        cache = get_buffer_cache()
+        file_buffer = cache.get(file_checksum)
+        if file_buffer is None:
+            file_buffer = file_checksum.resolve()
         if file_buffer is None:
             raise CacheMissError(file_checksum)
-        buffer_cache.cache_buffer(file_checksum.bytes(), file_buffer)
     except CacheMissError:
         with stdout_lock:
             msg(
@@ -63,12 +66,12 @@ def download_file(filename, file_checksum):
         return
     try:
         if filename == "/dev/stdout":
-            sys.stdout.buffer.write(file_buffer)
+            sys.stdout.buffer.write(file_buffer.content)
         elif filename == "/dev/stderr":
-            sys.stderr.buffer.write(file_buffer)
+            sys.stderr.buffer.write(file_buffer.content)
         else:
             with open(filename, "wb") as f:
-                f.write(file_buffer)
+                f.write(file_buffer.content)
     except Exception:
         with stdout_lock:
             msg(0, f"Cannot download file '{filename}'")
@@ -77,18 +80,19 @@ def download_file(filename, file_checksum):
 
 def download_index(index_checksum: Checksum, dirname):
     index_checksum = Checksum(index_checksum)
-    index_buffer = buffer_cache.get_buffer(index_checksum)
+    cache = get_buffer_cache()
+    index_buffer = cache.get(index_checksum)
     if index_buffer is None:
         err(
             f"Cannot download directory '{dirname}' index '{index_checksum}', CacheMissError"
         )
     try:
-        index_data = json.loads(index_buffer.decode())
+        index_data = json.loads(index_buffer.content.decode())
     except (json.JSONDecodeError, UnicodeDecodeError):
         err(
             f"Cannot load directory '{dirname}' index from '{index_checksum}': invalid index"
         )
-    return index_data, index_buffer
+    return index_data, index_buffer.content
 
 
 def download(
@@ -177,8 +181,9 @@ def download(
         )
 
     def write_checksum(filename, file_checksum):
-        file_checksum = Checksum(file_checksum)
-        if file_checksum.value is None:
+        try:
+            file_checksum = Checksum(file_checksum)
+        except Exception:
             return
         try:
             with open(filename + ".CHECKSUM", "w") as f:
@@ -223,8 +228,9 @@ def download(
                 msg(1, f"Skip download of {download_msg}")
                 continue
             cs = checksum_dict[download_target]
-            has_buffer = can_read_buffer(cs)
-            if not has_buffer:
+            try:
+                Checksum(cs).resolve()
+            except Exception:
                 msg(
                     0,
                     f"Cannot download contents of file '{download_target}', checksum '{cs}'",

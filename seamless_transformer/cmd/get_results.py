@@ -3,12 +3,13 @@ import pathlib
 import threading
 import time
 
-from seamless import Checksum, CacheMissError
-from seamless.checksum.buffer_cache import buffer_cache
-from seamless.checksum.deserialize import deserialize_sync as deserialize
-from seamless.cmd.download import download
-from seamless.checksum.json import json_dumps
+from seamless import Buffer, Checksum, CacheMissError
+from seamless.caching.buffer_cache import get_buffer_cache
+from seamless.checksum.parse_buffer import parse_buffer_sync as parse_buffer
+from seamless.checksum.json_ import json_dumps_bytes
 from seamless.checksum.calculate_checksum import calculate_checksum
+
+from .download import download
 
 stdout_lock = threading.Lock()
 
@@ -77,7 +78,7 @@ def maintain_futures(
 def write_result_index(workdir, dirname, index, *, msg_func):
     dirname = os.path.join(workdir, dirname)
     try:
-        index_buffer = json_dumps(index, as_bytes=True) + b"\n"
+        index_buffer = json_dumps_bytes(index) + b"\n"
         with open(dirname + ".INDEX", "wb") as f:
             f.write(index_buffer)
     except Exception:
@@ -88,8 +89,9 @@ def write_result_index(workdir, dirname, index, *, msg_func):
 
 
 def write_result_checksum(workdir, filename, file_checksum, *, msg_func):
-    file_checksum = Checksum(file_checksum)
-    if file_checksum.value is None:
+    try:
+        file_checksum = Checksum(file_checksum)
+    except Exception:
         return
     filename = os.path.join(workdir, filename)
     try:
@@ -101,11 +103,15 @@ def write_result_checksum(workdir, filename, file_checksum, *, msg_func):
 
 
 def download_result(filename, file_checksum, *, msg_func):
-    file_checksum = Checksum(file_checksum)
-    if file_checksum.value is None:
+    try:
+        file_checksum = Checksum(file_checksum)
+    except Exception:
         return
     try:
-        file_buffer = buffer_cache.get_buffer(file_checksum.bytes())
+        cache = get_buffer_cache()
+        file_buffer = cache.get(file_checksum)
+        if file_buffer is None:
+            file_buffer = file_checksum.resolve()
         if file_buffer is None:
             raise CacheMissError(file_checksum)
     except CacheMissError:
@@ -115,7 +121,7 @@ def download_result(filename, file_checksum, *, msg_func):
             )
     try:
         with open(filename, "wb") as f:
-            f.write(file_buffer)
+            f.write(file_buffer.content)
     except Exception:
         with stdout_lock:
             msg_func(0, f"Cannot write to result file '{filename}'")
@@ -125,13 +131,12 @@ def download_result(filename, file_checksum, *, msg_func):
 def get_result_buffer(
     result_checksum, *, do_fingertip, do_scratch, has_result_targets, err_func
 ):
-    from seamless.workflow.core.direct.run import fingertip
-
     try:
-        if do_fingertip or do_scratch:
-            result_buffer = fingertip(result_checksum.bytes())
-        else:
-            result_buffer = buffer_cache.get_buffer(result_checksum.bytes())
+        result_checksum = Checksum(result_checksum)
+        cache = get_buffer_cache()
+        result_buffer = cache.get(result_checksum)
+        if result_buffer is None:
+            result_buffer = result_checksum.resolve()
         if result_buffer is None:
             raise CacheMissError(result_checksum)
         cannot_download = False
@@ -145,19 +150,18 @@ def get_result_buffer(
             "Cannot download result. Cannot write checksum for one or more result targets"
         )
         return None
-    return result_buffer
+    return result_buffer.content
 
 
 async def get_result_buffer_async(
     result_checksum, *, do_fingertip, do_scratch, has_result_targets, err_func
 ):
-    from seamless.workflow.core.direct.run import fingertip_async
-
     try:
-        if do_fingertip or do_scratch:
-            result_buffer = await fingertip_async(result_checksum.bytes())
-        else:
-            result_buffer = await buffer_cache.get_buffer_async(result_checksum.bytes())
+        result_checksum = Checksum(result_checksum)
+        cache = get_buffer_cache()
+        result_buffer = cache.get(result_checksum)
+        if result_buffer is None:
+            result_buffer = await result_checksum.resolution()
         if result_buffer is None:
             raise CacheMissError(result_checksum)
         cannot_download = False
@@ -174,7 +178,7 @@ async def get_result_buffer_async(
         else:
             err_func("Cannot download result")
         return None
-    return result_buffer
+    return result_buffer.content
 
 
 def get_results(
@@ -192,9 +196,9 @@ def get_results(
     msg_func,
 ):
     if result_targets:
-
-        result_checksum_dict = deserialize(
-            result_buffer, result_checksum.bytes(), "plain", copy=False
+        result_checksum = Checksum(result_checksum)
+        result_checksum_dict = parse_buffer(
+            Buffer(result_buffer), result_checksum, "plain", copy=False
         )
 
         files_to_download = []

@@ -5,9 +5,12 @@ import signal
 import subprocess
 import tempfile
 import threading
+import sys
 from io import BytesIO
 
 import numpy as np
+
+from seamless import Buffer
 
 from seamless.util.mixed.get_form import get_form
 from seamless.util.mount_directory import write_to_directory
@@ -79,6 +82,8 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
             if pin == "bashcode":
                 continue
             v = PINS[pin]
+            if isinstance(v, Buffer):
+                v = v.content
             if pin in FILESYSTEM:
                 if FILESYSTEM[pin]["filesystem"]:
                     env[pin] = v
@@ -138,10 +143,12 @@ conda activate {conda_environment_}
         )
         for line in process.stdout:
             try:
-                line = line.decode()
+                text = line.decode()
             except UnicodeDecodeError:
-                pass
-            print(line, end="")
+                text = line.decode(errors="ignore")
+            if text.strip() == "":
+                continue
+            print(text, end="")
         process.wait()
 
         if process.returncode:

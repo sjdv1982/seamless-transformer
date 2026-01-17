@@ -25,15 +25,15 @@ def strip_textdata(data):
     return "\n".join(lines)
 
 
-def read_checksum_file(filename) -> Checksum:
+def read_checksum_file(filename) -> str | None:
     """Read .CHECKSUM file"""
     with open(filename) as f:
         checksum = f.read()
     checksum = strip_textdata(checksum)
     try:
-        return Checksum(checksum)
+        return Checksum(checksum).hex()
     except Exception:
-        return Checksum(None)
+        return None
 
 
 def files_to_checksums(
