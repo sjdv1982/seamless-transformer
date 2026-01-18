@@ -1,1 +1,1 @@
-seamless -vvv 'paste data/b.txt data/a.txt | awk '\''NF == 2 && $1 > 10{print $2}'\'' '
+seamless-run -vvv 'paste data/b.txt data/a.txt | awk '\''NF == 2 && $1 > 10{print $2}'\'' '

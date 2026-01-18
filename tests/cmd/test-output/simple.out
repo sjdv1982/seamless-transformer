@@ -1,100 +1,100 @@
-seamless: ************************************************************
-seamless: * Verbosity set to 3
-seamless: ************************************************************
-seamless: ************************************************************
-seamless: * seamless 1.00
-seamless: ************************************************************
-seamless: Command: [
+seamless-run: ************************************************************
+seamless-run: * Verbosity set to 3
+seamless-run: ************************************************************
+seamless-run: ************************************************************
+seamless-run: * seamless-run 1.00
+seamless-run: ************************************************************
+seamless-run: Command: [
     "paste data/b.txt data/a.txt | awk 'NF == 2 && $1 > 10{print $2}' "
 ]
-seamless: first argument 'paste' is in PATH, map to '/usr/bin/paste'
-seamless: first argument '/usr/bin/paste' has no .SEAMLESS.yaml file
-seamless: first argument has no suffix, considering second argument for .SEAMLESS.yaml file
-seamless: second argument 'data/b.txt' has a suffix, look for .SEAMLESS.yaml file
-seamless: second argument 'data/b.txt' has no .SEAMLESS.yaml file
-seamless: no .SEAMLESS.yaml file found
-seamless: no .SEAMLESS.py file found
-seamless: ************************************************************
-seamless: * First command: paste data/b.txt data/a.txt
-seamless: ************************************************************
-seamless: Try to obtain argtypes from rules
-seamless: Argument #1 'paste', extension: ''
-seamless: Argument #2 'data/b.txt', extension: '.txt'
-seamless: Argument #3 'data/a.txt', extension: '.txt'
-seamless: Argument #4 'awk', extension: ''
-seamless: Argument #5 'NF == 2 && $1 > 10{print $2}', extension: ''
-seamless: ************************************************************
-seamless: * initial argtypes dict:
-seamless: * {
-seamless: *   "@order": [
-seamless: *     "paste",
-seamless: *     "data/b.txt",
-seamless: *     "data/a.txt",
-seamless: *     "awk",
-seamless: *     "NF == 2 && $1 > 10{print $2}"
-seamless: *   ],
-seamless: *   "paste": "value",
-seamless: *   "data/b.txt": {
-seamless: *     "type": "file"
-seamless: *   },
-seamless: *   "data/a.txt": {
-seamless: *     "type": "file"
-seamless: *   },
-seamless: *   "awk": "value",
-seamless: *   "NF == 2 && $1 > 10{print $2}": "value"
-seamless: * }
-seamless: ************************************************************
-seamless: ************************************************************
-seamless: * argtypes dict:
-seamless: * {
-seamless: *   "@order": [
-seamless: *     "paste",
-seamless: *     "data/b.txt",
-seamless: *     "data/a.txt",
-seamless: *     "awk",
-seamless: *     "NF == 2 && $1 > 10{print $2}"
-seamless: *   ],
-seamless: *   "paste": "value",
-seamless: *   "data/b.txt": {
-seamless: *     "type": "file",
-seamless: *     "mapping": "/home/sjoerd/seamless1/seamless-transformer/tests/cmd/data/b.txt"
-seamless: *   },
-seamless: *   "data/a.txt": {
-seamless: *     "type": "file",
-seamless: *     "mapping": "/home/sjoerd/seamless1/seamless-transformer/tests/cmd/data/a.txt"
-seamless: *   },
-seamless: *   "awk": "value",
-seamless: *   "NF == 2 && $1 > 10{print $2}": "value"
-seamless: * }
-seamless: ************************************************************
-seamless: ************************************************************
-seamless: * Command #2: awk 'NF == 2 && $1 > 10{print $2}'
-seamless: ************************************************************
-seamless: first argument 'awk' is in PATH, map to '/usr/bin/awk'
-seamless: first argument '/usr/bin/awk' has no .SEAMLESS.yaml file
-seamless: first argument has no suffix, considering second argument for .SEAMLESS.yaml file
-seamless: no .SEAMLESS.yaml file found
-seamless: no .SEAMLESS.py file found
-seamless: Not in remote storage: '/home/sjoerd/seamless1/seamless-transformer/tests/cmd/data/b.txt', checksum 856c10cafc4ca6f70d9779cf6b019071df40ffc6604390da57940aa336bf9603, length 21
-seamless: Not in remote storage: '/home/sjoerd/seamless1/seamless-transformer/tests/cmd/data/a.txt', checksum ee53c53e5f65f2a25583be11f99f1c2f159378c40299cd14a7c9c3a691247c58, length 54
-seamless: ************************************************************
-seamless: * Upload 2 files, total 75.00 B
-seamless: ************************************************************
-seamless: file/directory checksum dict:
+seamless-run: first argument 'paste' is in PATH, map to '/usr/bin/paste'
+seamless-run: first argument '/usr/bin/paste' has no .SEAMLESS.yaml file
+seamless-run: first argument has no suffix, considering second argument for .SEAMLESS.yaml file
+seamless-run: second argument 'data/b.txt' has a suffix, look for .SEAMLESS.yaml file
+seamless-run: second argument 'data/b.txt' has no .SEAMLESS.yaml file
+seamless-run: no .SEAMLESS.yaml file found
+seamless-run: no .SEAMLESS.py file found
+seamless-run: ************************************************************
+seamless-run: * First command: paste data/b.txt data/a.txt
+seamless-run: ************************************************************
+seamless-run: Try to obtain argtypes from rules
+seamless-run: Argument #1 'paste', extension: ''
+seamless-run: Argument #2 'data/b.txt', extension: '.txt'
+seamless-run: Argument #3 'data/a.txt', extension: '.txt'
+seamless-run: Argument #4 'awk', extension: ''
+seamless-run: Argument #5 'NF == 2 && $1 > 10{print $2}', extension: ''
+seamless-run: ************************************************************
+seamless-run: * initial argtypes dict:
+seamless-run: * {
+seamless-run: *   "@order": [
+seamless-run: *     "paste",
+seamless-run: *     "data/b.txt",
+seamless-run: *     "data/a.txt",
+seamless-run: *     "awk",
+seamless-run: *     "NF == 2 && $1 > 10{print $2}"
+seamless-run: *   ],
+seamless-run: *   "paste": "value",
+seamless-run: *   "data/b.txt": {
+seamless-run: *     "type": "file"
+seamless-run: *   },
+seamless-run: *   "data/a.txt": {
+seamless-run: *     "type": "file"
+seamless-run: *   },
+seamless-run: *   "awk": "value",
+seamless-run: *   "NF == 2 && $1 > 10{print $2}": "value"
+seamless-run: * }
+seamless-run: ************************************************************
+seamless-run: ************************************************************
+seamless-run: * argtypes dict:
+seamless-run: * {
+seamless-run: *   "@order": [
+seamless-run: *     "paste",
+seamless-run: *     "data/b.txt",
+seamless-run: *     "data/a.txt",
+seamless-run: *     "awk",
+seamless-run: *     "NF == 2 && $1 > 10{print $2}"
+seamless-run: *   ],
+seamless-run: *   "paste": "value",
+seamless-run: *   "data/b.txt": {
+seamless-run: *     "type": "file",
+seamless-run: *     "mapping": "/home/sjoerd/seamless1/seamless-transformer/tests/cmd/data/b.txt"
+seamless-run: *   },
+seamless-run: *   "data/a.txt": {
+seamless-run: *     "type": "file",
+seamless-run: *     "mapping": "/home/sjoerd/seamless1/seamless-transformer/tests/cmd/data/a.txt"
+seamless-run: *   },
+seamless-run: *   "awk": "value",
+seamless-run: *   "NF == 2 && $1 > 10{print $2}": "value"
+seamless-run: * }
+seamless-run: ************************************************************
+seamless-run: ************************************************************
+seamless-run: * Command #2: awk 'NF == 2 && $1 > 10{print $2}'
+seamless-run: ************************************************************
+seamless-run: first argument 'awk' is in PATH, map to '/usr/bin/awk'
+seamless-run: first argument '/usr/bin/awk' has no .SEAMLESS.yaml file
+seamless-run: first argument has no suffix, considering second argument for .SEAMLESS.yaml file
+seamless-run: no .SEAMLESS.yaml file found
+seamless-run: no .SEAMLESS.py file found
+seamless-run: Not in remote storage: '/home/sjoerd/seamless1/seamless-transformer/tests/cmd/data/a.txt', checksum ee53c53e5f65f2a25583be11f99f1c2f159378c40299cd14a7c9c3a691247c58, length 54
+seamless-run: Not in remote storage: '/home/sjoerd/seamless1/seamless-transformer/tests/cmd/data/b.txt', checksum 856c10cafc4ca6f70d9779cf6b019071df40ffc6604390da57940aa336bf9603, length 21
+seamless-run: ************************************************************
+seamless-run: * Upload 2 files, total 75.00 B
+seamless-run: ************************************************************
+seamless-run: file/directory checksum dict:
 {
   "data/a.txt": "ee53c53e5f65f2a25583be11f99f1c2f159378c40299cd14a7c9c3a691247c58",
   "data/b.txt": "856c10cafc4ca6f70d9779cf6b019071df40ffc6604390da57940aa336bf9603"
 }
-seamless: ************************************************************
-seamless: * bash command:
-seamless: *  paste data/b.txt data/a.txt | awk 'NF == 2 && $1 > 10{print $2}'  
-seamless: * 
-seamless: ************************************************************
-seamless: No files will be made executable inside the transformer
-seamless: Transformation checksum: c51136b0105fc26fcf941e40741373c0b692b38b0a3c87819dceb29b7e52186a
-seamless: ************************************************************
-seamless: * Transformation finished
-seamless: ************************************************************
-seamless: Result checksum: 513b1e190553467649bb3f52e359d26018dd208ddce8f39e00387bc9e9f7d903
+seamless-run: ************************************************************
+seamless-run: * bash command:
+seamless-run: *  paste data/b.txt data/a.txt | awk 'NF == 2 && $1 > 10{print $2}'  
+seamless-run: * 
+seamless-run: ************************************************************
+seamless-run: No files will be made executable inside the transformer
+seamless-run: Transformation checksum: c51136b0105fc26fcf941e40741373c0b692b38b0a3c87819dceb29b7e52186a
+seamless-run: ************************************************************
+seamless-run: * Transformation finished
+seamless-run: ************************************************************
+seamless-run: Result checksum: 513b1e190553467649bb3f52e359d26018dd208ddce8f39e00387bc9e9f7d903
 pears
 pineapples

@@ -1,4 +1,4 @@
-"""Main command-line seamless executable script"""
+"""Main command-line seamless-run executable script"""
 
 __version__ = "1.00"
 
@@ -224,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         parser.add_argument(
-            "--undo", help="Undo this seamless command", action="store_true"
+            "--undo", help="Undo this seamless-run command", action="store_true"
         )
 
         parser.add_argument(
@@ -237,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument(
             "--local",
             help="""Don't delegate the transformation to the assistant, but execute directly.
-        This is most useful for scripts that contain themselves /bin/seamless commands""",
+        This is most useful for scripts that contain themselves seamless-run commands""",
             action="store_true",
         )
 
@@ -291,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         verbosity = min(args.verbosity, 3)
         set_verbosity(verbosity)
         msg(1, "Verbosity set to {}".format(verbosity))
-        msg(1, "seamless {}".format(__version__))
+        msg(1, "seamless-run {}".format(__version__))
         msg(3, "Command:", json.dumps(command, indent=4))
 
         if len(command) == 0:
@@ -859,7 +859,7 @@ def main(argv: list[str] | None = None) -> int:
 
             assert result_targets
 
-            original_command = "seamless " + " ".join(sys.argv[1:])
+            original_command = "seamless-run " + " ".join(sys.argv[1:])
             params = {
                 "undo": args.undo,
                 "scratch": args.scratch,

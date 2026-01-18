@@ -1,15 +1,15 @@
-"""Control error/logging messages for cmd seamless"""
+"""Control error/logging messages for seamless-run"""
 
 import sys
 import io
 
-_HEADER = "seamless:"
+_HEADER = "seamless-run:"
 _VERBOSITY: int = 0
 
 
 def set_header(header):
     """Header pre-prending all messages.
-    Default: 'seamless'"""
+    Default: 'seamless-run'"""
     global _HEADER
     _HEADER = str(header) + ":"
 
