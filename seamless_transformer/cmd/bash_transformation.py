@@ -178,20 +178,24 @@ def run_transformation(
     if scratch and fingertip:
         raise ValueError("Cannot require fingertip for scratch transformations")
 
-    from seamless_transformer.transformation_cache import run_sync
-
-    tf_buffer = tf_get_buffer(transformation_dict)
-    tf_checksum = tf_buffer.get_checksum()
-    tf_buffer.tempref()
-    tf_dunder = _extract_dunder(transformation_dict)
-
-    result_checksum = run_sync(
-        transformation_dict,
-        tf_checksum=tf_checksum,
-        tf_dunder=tf_dunder,
-        scratch=scratch,
-        require_fingertip=bool(fingertip),
+    from seamless_transformer.transformation_class import (
+        compute_transformation_sync,
+        transformation_from_dict,
     )
+
+    tf_dunder = _extract_dunder(transformation_dict)
+    transformation = transformation_from_dict(
+        transformation_dict,
+        meta={},
+        scratch=scratch,
+        tf_dunder=tf_dunder,
+    )
+    result_checksum = compute_transformation_sync(
+        transformation,
+        require_value=bool(fingertip),
+    )
+    if result_checksum is None:
+        raise RuntimeError("Result checksum unavailable")
     return Checksum(result_checksum)
 
 
@@ -205,18 +209,18 @@ async def run_transformation_async(
     if scratch and fingertip:
         raise ValueError("Cannot require fingertip for scratch transformations")
 
-    from seamless_transformer.transformation_cache import run
+    from seamless_transformer.transformation_class import transformation_from_dict
 
-    tf_buffer = tf_get_buffer(transformation_dict)
-    tf_checksum = tf_buffer.get_checksum()
-    tf_buffer.tempref()
     tf_dunder = _extract_dunder(transformation_dict)
-
-    result_checksum = await run(
+    transformation = transformation_from_dict(
         transformation_dict,
-        tf_checksum=tf_checksum,
-        tf_dunder=tf_dunder,
+        meta={},
         scratch=scratch,
-        require_fingertip=bool(fingertip),
+        tf_dunder=tf_dunder,
     )
+    result_checksum = await transformation.computation(
+        require_value=bool(fingertip)
+    )
+    if result_checksum is None:
+        raise RuntimeError("Result checksum unavailable")
     return Checksum(result_checksum)

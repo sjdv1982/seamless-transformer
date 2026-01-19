@@ -933,4 +933,46 @@ def transformation_from_pretransformation(
     return tf
 
 
-__all__ = ["Transformation", "transformation_from_pretransformation"]
+def transformation_from_dict(
+    transformation_dict: Dict[str, Any],
+    *,
+    meta: dict | None = None,
+    scratch: bool = False,
+    tf_dunder: dict | None = None,
+) -> Transformation[T]:
+    """Build a Transformation from an already-prepared transformation dict."""
+    from .pretransformation import PreparedPreTransformation
+
+    pre_transformation = PreparedPreTransformation(transformation_dict)
+    return transformation_from_pretransformation(
+        pre_transformation,
+        upstream_dependencies={},
+        meta=meta or {},
+        scratch=scratch,
+        tf_dunder=tf_dunder,
+    )
+
+
+def compute_transformation_sync(
+    transformation: "Transformation",
+    *,
+    require_value: bool,
+) -> Checksum | None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(
+            transformation.computation(require_value=require_value), loop
+        )
+        return future.result()
+    return asyncio.run(transformation.computation(require_value=require_value))
+
+
+__all__ = [
+    "Transformation",
+    "transformation_from_pretransformation",
+    "transformation_from_dict",
+    "compute_transformation_sync",
+]

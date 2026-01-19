@@ -211,6 +211,23 @@ class PreTransformation:
         return checksum
 
 
+class PreparedPreTransformation(PreTransformation):
+    """PreTransformation that treats pin values as checksums.
+
+    This avoids re-processing code pins for already-prepared transformation dicts.
+    """
+
+    def _prepare_pin_value(self, argname: str, value, celltype: str):
+        from .transformation_class import Transformation
+
+        if isinstance(value, Transformation):
+            if value.exception is not None:
+                msg = f"Dependency '{argname}' has an exception:\n{value.exception}"
+                raise RuntimeError(msg)
+            return value.result_checksum
+        return self._to_checksum(value, celltype)
+
+
 def direct_transformer_to_pretransformation(
     codebuf,
     meta,

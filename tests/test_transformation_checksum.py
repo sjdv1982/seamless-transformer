@@ -17,3 +17,4 @@ def test_transformation_checksum():
 
     tf = func(12, 13, np.random.random())
     print(tf.construct())
+    print(tf.exception)

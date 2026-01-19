@@ -14,7 +14,10 @@ import seamless.config as seamless_config
 from seamless import CacheMissError, Checksum
 
 from seamless_transformer.cmd.file_load import read_checksum_file
-from seamless_transformer.transformation_cache import run_sync
+from seamless_transformer.transformation_class import (
+    compute_transformation_sync,
+    transformation_from_dict,
+)
 
 try:
     from seamless_config.select import select_project, select_subproject
@@ -173,16 +176,19 @@ def _main(argv: list[str] | None = None) -> int:
         transformation_dict["__meta__"] = meta
 
     tf_dunder = _extract_dunder(transformation_dict)
-
-    exit(0)
     try:
-        result_checksum = run_sync(
+        transformation = transformation_from_dict(
             transformation_dict,
-            tf_checksum=checksum,
-            tf_dunder=tf_dunder,
+            meta={},
             scratch=bool(args.scratch),
-            require_fingertip=False,
+            tf_dunder=tf_dunder,
         )
+        result_checksum = compute_transformation_sync(
+            transformation,
+            require_value=False,
+        )
+        if result_checksum is None:
+            raise RuntimeError("Result checksum unavailable")
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
