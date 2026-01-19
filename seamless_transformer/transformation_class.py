@@ -826,10 +826,13 @@ def transformation_from_pretransformation(
     tf_dunder = tf_dunder or {}
 
     def _collect_tf_dunder() -> dict[str, Any]:
+        core_keys = {"__language__", "__output__", "__as__", "__format__"}
         dunder = {
             key: deepcopy(value)
             for key, value in pre_transformation.pretransformation_dict.items()
             if key.startswith("__")
+            and key not in core_keys
+            and not key.startswith("__code")
         }
         meta_payload: dict[str, Any] = {}
         existing_meta = dunder.get("__meta__")

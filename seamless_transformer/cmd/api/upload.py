@@ -16,6 +16,25 @@ from seamless_transformer.cmd.bytes2human import human2bytes
 from seamless_transformer.cmd.exceptions import SeamlessSystemExit
 from seamless import Checksum
 
+try:
+    from seamless_config.select import select_project, select_subproject
+except Exception:  # pragma: no cover - optional dependency
+    select_project = None
+    select_subproject = None
+
+
+def _parse_scoped_value(value: str, label: str) -> tuple[str, str | None]:
+    if not value:
+        raise ValueError(f"--{label} requires a value")
+    if ":" in value:
+        head, tail = value.split(":", 1)
+        if not head:
+            raise ValueError(f"Invalid --{label} value '{value}'")
+        if tail == "":
+            tail = None
+        return head, tail
+    return value, None
+
 
 def _main(argv: list[str] | None = None) -> int:
 
@@ -36,6 +55,17 @@ def _main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "-q", dest="verbosity", help="Quiet mode", action="store_const", const=-1
+    )
+
+    parser.add_argument(
+        "--project",
+        metavar="PROJECT[:SUBPROJECT]",
+        help="set Seamless project (and subproject). Each project has independent storage",
+    )
+    parser.add_argument(
+        "--stage",
+        metavar="STAGE[:SUBSTAGE]",
+        help="set Seamless project stage (and substage). Each project stage has independent storage",
     )
 
     parser.add_argument(
@@ -99,6 +129,26 @@ def _main(argv: list[str] | None = None) -> int:
     verbosity = min(args.verbosity, 3)
     set_verbosity(verbosity)
     msg(1, "Verbosity set to {}".format(verbosity))
+
+    if args.project:
+        if select_project is None:
+            err("seamless_config is unavailable; cannot set --project")
+        try:
+            project, subproject = _parse_scoped_value(args.project, "project")
+            select_project(project)
+            if subproject:
+                select_subproject(subproject)
+        except Exception as exc:
+            err(str(exc))
+    if args.stage:
+        try:
+            stage, substage = _parse_scoped_value(args.stage, "stage")
+            if substage:
+                seamless_config.set_stage(stage, substage, workdir=os.getcwd())
+            else:
+                seamless_config.set_stage(stage, workdir=os.getcwd())
+        except Exception as exc:
+            err(str(exc))
 
     max_upload_files = os.environ.get("SEAMLESS_MAX_UPLOAD_FILES", "400")
     max_upload_files = int(max_upload_files)

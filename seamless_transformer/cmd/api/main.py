@@ -16,7 +16,7 @@ import pathlib
 import warnings
 
 import seamless
-import seamless.config as seamless_config
+import seamless.config
 
 from seamless import Checksum, Buffer
 from seamless.caching.buffer_cache import get_buffer_cache
@@ -47,9 +47,35 @@ from seamless_transformer.cmd.get_results import (
 from seamless.checksum.json_ import json_dumps_bytes
 from seamless_transformer.transformation_utils import tf_get_buffer
 
+try:
+    from seamless_config.select import select_project, select_subproject
+except Exception:  # pragma: no cover - optional dependency
+    select_project = None
+    select_subproject = None
+
 
 def extract_dunder(transformation_dict):
-    return {k: v for k, v in transformation_dict.items() if k.startswith("__")}
+    core_keys = {"__language__", "__output__", "__as__", "__format__"}
+    return {
+        k: v
+        for k, v in transformation_dict.items()
+        if k.startswith("__")
+        and k not in core_keys
+        and not k.startswith("__code")
+    }
+
+
+def _parse_scoped_value(value: str, label: str) -> tuple[str, str | None]:
+    if not value:
+        err(f"--{label} requires a value")
+    if ":" in value:
+        head, tail = value.split(":", 1)
+        if not head:
+            err(f"Invalid --{label} value '{value}'")
+        if tail == "":
+            tail = None
+        return head, tail
+    return value, None
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -64,6 +90,18 @@ def _main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "-q", dest="verbosity", help="Quiet mode", action="store_const", const=-1
+    )
+
+    parser.add_argument(
+        "--project",
+        metavar="PROJECT[:SUBPROJECT]",
+        help="set Seamless project (and subproject). Each project has independent storage",
+    )
+
+    parser.add_argument(
+        "--stage",
+        metavar="STAGE[:SUBSTAGE]",
+        help="set Seamless project stage (and substage). Each project stage has independent storage",
     )
 
     parser.add_argument(
@@ -292,6 +330,21 @@ def _main(argv: list[str] | None = None) -> int:
     msg(1, "Verbosity set to {}".format(verbosity))
     msg(1, "seamless-run {}".format(__version__))
     msg(3, "Command:", json.dumps(command, indent=4))
+
+    if args.project:
+        if select_project is None:
+            err("seamless_config is unavailable; cannot set --project")
+        project, subproject = _parse_scoped_value(args.project, "project")
+        select_project(project)
+        if subproject:
+            select_subproject(subproject)
+
+    if args.stage:
+        stage, substage = _parse_scoped_value(args.stage, "stage")
+        if substage:
+            seamless.config.set_stage(stage, substage, workdir=os.getcwd())
+        else:
+            seamless.config.set_stage(stage, workdir=os.getcwd())
 
     if len(command) == 0:
         parser.print_usage()  # TODO: add to usage message
@@ -667,7 +720,7 @@ def _main(argv: list[str] | None = None) -> int:
                 return 1
             """
         else:
-            seamless_config.init(workdir=os.getcwd())
+            seamless.config.init(workdir=os.getcwd())
 
     max_upload_files = os.environ.get("SEAMLESS_MAX_UPLOAD_FILES", "400")
     max_upload_files = int(max_upload_files)

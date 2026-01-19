@@ -158,7 +158,14 @@ def prepare_bash_transformation(
 
 
 def _extract_dunder(transformation_dict: dict) -> dict:
-    return {k: v for k, v in transformation_dict.items() if k.startswith("__")}
+    core_keys = {"__language__", "__output__", "__as__", "__format__"}
+    return {
+        k: v
+        for k, v in transformation_dict.items()
+        if k.startswith("__")
+        and k not in core_keys
+        and not k.startswith("__code")
+    }
 
 
 def run_transformation(

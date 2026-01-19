@@ -15,7 +15,11 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
 
     assert isinstance(transformation, dict)
     result: Dict[str, Any] = {}
+    core_keys = ("__language__", "__output__", "__as__", "__format__")
     for key, value in transformation.items():
+        if key in core_keys:
+            result[key] = value
+            continue
         if key in (
             "__compilers__",
             "__languages__",
@@ -24,10 +28,6 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
         ):
             continue
         if key in (
-            "__language__",
-            "__output__",
-            "__as__",
-            "__format__",
             "__code_checksum__",
             "__code_text__",  # keep out of the checksum-defining payload
         ):
