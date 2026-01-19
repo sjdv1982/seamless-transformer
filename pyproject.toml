@@ -8,6 +8,8 @@ seamless_config = ["tools.yaml"]
 [project]
 name = "seamless-transformer"
 version = "0.0.0"
+dependencies = ["bashlex", "PyYAML"]
 
 [project.scripts]
-seamless-run = "seamless_transformer.cmd.main:main"
+seamless-run = "seamless_transformer.cmd.api.main:main"
+seamless-upload = "seamless_transformer.cmd.api.upload:main"

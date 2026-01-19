@@ -6,18 +6,15 @@ import sys
 from pathlib import Path
 import subprocess
 from typing import Any
-import ruamel.yaml
+import yaml
 from .parsing import fill_checksum_arguments
 
 from .message import message as msg
 
-yaml = ruamel.yaml.YAML(typ="safe")
-
-
 def load(yamlfile):
     """Load interface from YAML file"""
     with open(yamlfile) as f:
-        data = yaml.load(f)
+        data = yaml.safe_load(f)
     if data is None:
         msg(1, f"{yamlfile} is empty")
         return {}

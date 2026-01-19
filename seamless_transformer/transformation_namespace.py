@@ -12,6 +12,57 @@ from .code_manager import get_code_manager
 from .transformation_utils import unpack_deep_structure, is_deep_celltype
 
 
+def _buffer_path_candidates(directory: str, checksum_hex: str) -> tuple[str, str]:
+    return (
+        os.path.join(directory, checksum_hex),
+        os.path.join(directory, checksum_hex[:2], checksum_hex),
+    )
+
+
+def _get_read_folder_directories() -> list[str]:
+    try:
+        import seamless_remote.buffer_remote as buffer_remote
+    except Exception:
+        return []
+    try:
+        read_folders = list(buffer_remote._read_folders_clients)
+    except Exception:
+        return []
+
+    directories: list[str] = []
+    for client in read_folders:
+        init_sync = getattr(client, "ensure_initialized_sync", None)
+        if callable(init_sync):
+            try:
+                init_sync(skip_healthcheck=True)
+            except Exception:
+                pass
+        directory = getattr(client, "directory", None)
+        if directory:
+            directories.append(os.path.expanduser(directory))
+    return directories
+
+
+def _find_filesystem_path(
+    checksum: Checksum, mode: str, directories: list[str]
+) -> str | None:
+    if not directories:
+        return None
+    checksum = Checksum(checksum)
+    if not checksum:
+        return None
+    checksum_hex = checksum.hex()
+    for directory in directories:
+        for candidate in _buffer_path_candidates(directory, checksum_hex):
+            if mode == "file":
+                if os.path.isfile(candidate):
+                    return candidate
+            elif mode == "directory":
+                if os.path.isdir(candidate):
+                    return candidate
+    return None
+
+
 def build_transformation_namespace_sync(
     transformation: Dict[str, Any],
 ) -> Tuple[Any, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
@@ -36,6 +87,7 @@ def build_transformation_namespace_sync(
             fs_entry.setdefault("filesystem", False)
             FILESYSTEM[pinname] = fs_entry
     namespace["FILESYSTEM"] = FILESYSTEM
+    read_folder_directories = _get_read_folder_directories()
     code_manager = get_code_manager()
     fallback_syntactic = transformation.get("__code_checksum__")
     fallback_code_text = transformation.get("__code_text__")
@@ -83,6 +135,29 @@ def build_transformation_namespace_sync(
                 syntactic_options = code_manager.get_syntactic_checksums(checksum)
                 if syntactic_options:
                     checksum = syntactic_options[0]
+
+        from_filesystem = False
+        fs_entry = FILESYSTEM.get(pinname)
+        if fs_entry is not None:
+            fs_mode = fs_entry.get("mode")
+            if fs_mode:
+                fs_result = _find_filesystem_path(
+                    checksum, fs_mode, read_folder_directories
+                )
+                if fs_result is not None:
+                    fs_entry["filesystem"] = True
+                    value = fs_result
+                    from_filesystem = True
+                else:
+                    fs_entry["filesystem"] = False
+                    if fs_mode == "file" and not fs_entry.get("optional", False):
+                        msg = f"{pinname}: could not find file for {checksum.hex()}"
+                        raise CacheMissError(msg)
+        if from_filesystem:
+            pinname_as = as_.get(pinname, pinname)
+            namespace["PINS"][pinname_as] = value
+            namespace[pinname_as] = value
+            continue
 
         try:
             buffer = checksum.resolve()
