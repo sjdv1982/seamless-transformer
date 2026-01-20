@@ -124,8 +124,8 @@ function seamless-mode() {
     echo 'seamless-mode-on, seamless-mode-off, seamless-mode-toggle'
     echo 'seamless-mode-toggle has been bound to a hotkey: Press Ctrl-U, then U'
     echo ''
-    echo 'When seamless-mode is on, all commands will be executed using /bin/seamless'
-    echo '/bin/seamless has only access to environment variables (e.g. "export a=1"),'
+    echo 'When seamless-mode is on, all commands will be executed using seamless-run'
+    echo 'seamless-run has only access to environment variables (e.g. "export a=1"),'
     echo '  not to local shell variables (e.g. "a=1") '
     echo 'From now on, new local shell variables will be exported.'
     set -a

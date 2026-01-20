@@ -165,7 +165,10 @@ def _main(argv: list[str] | None = None) -> int:
         checksum = _parse_checksum(args.checksum)
         transformation_dict = _resolve_transformation_dict(checksum)
     except Exception as exc:
-        print(str(exc), file=sys.stderr)
+        import traceback
+
+        excs = traceback.format_exc(limit=0)
+        print(excs, file=sys.stderr)
         return 1
 
     if args.direct_print:
