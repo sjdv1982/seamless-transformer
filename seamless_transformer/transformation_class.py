@@ -966,8 +966,13 @@ def compute_transformation_sync(
         future = asyncio.run_coroutine_threadsafe(
             transformation.computation(require_value=require_value), loop
         )
-        return future.result()
-    return asyncio.run(transformation.computation(require_value=require_value))
+        future.result()
+    else:
+        asyncio.run(transformation.computation(require_value=require_value))
+    if transformation.exception is not None:
+        raise RuntimeError(transformation.exception)
+    else:
+        return transformation.result_checksum
 
 
 __all__ = [
