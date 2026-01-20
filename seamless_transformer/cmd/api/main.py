@@ -59,9 +59,7 @@ def extract_dunder(transformation_dict):
     return {
         k: v
         for k, v in transformation_dict.items()
-        if k.startswith("__")
-        and k not in core_keys
-        and not k.startswith("__code")
+        if k.startswith("__") and k not in core_keys and not k.startswith("__code")
     }
 
 
@@ -703,24 +701,39 @@ def _main(argv: list[str] | None = None) -> int:
     ### /TODO
     """
 
+    # CONFIG
+    """    
+    Now we will do something like:
+        seamless.config.init(workdir=os.getcwd())
+    
+    However, we must interject overrulings of the execution command,
+    based on the args
+    """
+    from seamless_config import change_stage, set_workdir
+    from seamless_config.config_files import load_config_files
+    from seamless_config.select import (
+        select_execution,
+        get_selected_cluster,
+        get_execution,
+    )
+
+    set_workdir(os.getcwd())
+    load_config_files()
     if args.dry_run or args.qsubmit:
-        raise NotImplementedError
-        """
+        import seamless_remote.database_remote
+
+        seamless_remote.database_remote.DISABLED = True
+        select_execution("process")
         if args.upload or args.qsubmit:
-            if seamless.delegate(level=2):
-                return 1
-        else:
-            seamless.delegate(level=1)
-        """
+            if get_selected_cluster() is None:
+                err(f"--upload or --qsubmit require a cluster")
     else:
         if args.local:
-            raise NotImplementedError
-            """
-            if seamless.delegate(level=3):
-                return 1
-            """
-        else:
-            seamless.config.init(workdir=os.getcwd())
+            if get_execution() == "remote":
+                select_execution("process")
+
+    change_stage()
+    # /CONFIG
 
     max_upload_files = os.environ.get("SEAMLESS_MAX_UPLOAD_FILES", "400")
     max_upload_files = int(max_upload_files)
@@ -892,6 +905,9 @@ def _main(argv: list[str] | None = None) -> int:
 
         if args.upload or args.write_job:
             print(transformation_checksum)
+            transformation_buffer = Checksum(transformation_checksum).resolve()
+            assert isinstance(transformation_buffer, Buffer)
+            transformation_buffer.incref()
 
         return 0
 
