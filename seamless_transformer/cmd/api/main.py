@@ -905,9 +905,10 @@ def _main(argv: list[str] | None = None) -> int:
 
         if args.upload or args.write_job:
             print(transformation_checksum)
-            transformation_buffer = Checksum(transformation_checksum).resolve()
-            assert isinstance(transformation_buffer, Buffer)
-            transformation_buffer.incref()
+            if args.upload:
+                transformation_buffer = Checksum(transformation_checksum).resolve()
+                assert isinstance(transformation_buffer, Buffer)
+                transformation_buffer.incref()
 
         return 0
 

@@ -157,11 +157,32 @@ def _buffers_exist_remote(checksum_hexes: list[str]) -> set[str]:
     return present
 
 
+def _buffers_exist_local(
+    destination_folder: str, checksum_hexes: list[str]
+) -> set[str]:
+    if not checksum_hexes:
+        return set()
+    present = set()
+    has_prefix = _has_hashserver_prefix(destination_folder)
+    for checksum_hex in checksum_hexes:
+        if checksum_hex in present:
+            continue
+        if has_prefix:
+            path = os.path.join(destination_folder, checksum_hex[:2], checksum_hex)
+        else:
+            path = os.path.join(destination_folder, checksum_hex)
+        if os.path.exists(path):
+            present.add(checksum_hex)
+    return present
+
+
 def _buffer_exists_remote(checksum: Checksum) -> bool:
     return checksum.hex() in _buffers_exist_remote([checksum.hex()])
 
 
-def check_checksums_present(checksum_hexes: list[str]) -> set[str]:
+def check_checksums_present(
+    checksum_hexes: list[str], destination_folder: str | None = None
+) -> set[str]:
     present = set()
     cache = get_buffer_cache()
     remaining = []
@@ -175,7 +196,10 @@ def check_checksums_present(checksum_hexes: list[str]) -> set[str]:
         else:
             remaining.append(checksum_hex)
     if remaining:
-        present.update(_buffers_exist_remote(remaining))
+        if destination_folder is not None:
+            present.update(_buffers_exist_local(destination_folder, remaining))
+        else:
+            present.update(_buffers_exist_remote(remaining))
     return present
 
 
@@ -262,8 +286,9 @@ def register_file(
 
     checksum_hex = calculate_checksum(buffer)
     if hardlink and destination_folder is not None:
-        destlink = os.path.join(destination_folder, checksum_hex)
-        os.link(filename, destlink)
+        destlink = _resolve_destination_path(destination_folder, checksum_hex)
+        if not os.path.exists(destlink):
+            os.link(filename, destlink)
         return checksum_hex
     return register_buffer(buffer, destination_folder=destination_folder)
 

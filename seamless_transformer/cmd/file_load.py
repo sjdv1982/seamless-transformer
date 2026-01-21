@@ -87,7 +87,9 @@ def files_to_checksums(
         file_infos = list(executor.map(_file_checksum_and_length, all_filelist))
 
     file_checksums = [info[0] for info in file_infos]
-    present_checksums = check_checksums_present(file_checksums)
+    present_checksums = check_checksums_present(
+        file_checksums, destination_folder=destination_folder
+    )
 
     upload_filelist = []
     for filename, (checksum, buffer_length) in zip(all_filelist, file_infos):
@@ -130,7 +132,9 @@ def files_to_checksums(
         for dirname, buffer in deepfolder_buffers.items():
             checksum = calculate_checksum(buffer)
             dir_checksums[dirname] = checksum
-        present_dir_checksums = check_checksums_present(list(dir_checksums.values()))
+        present_dir_checksums = check_checksums_present(
+            list(dir_checksums.values()), destination_folder=destination_folder
+        )
         for dirname, checksum in dir_checksums.items():
             buffer = deepfolder_buffers[dirname]
             directory_indices[dirname] = buffer, checksum
