@@ -13,4 +13,5 @@ dependencies = ["bashlex", "PyYAML"]
 [project.scripts]
 seamless-run = "seamless_transformer.cmd.api.main:main"
 seamless-upload = "seamless_transformer.cmd.api.upload:main"
+seamless-download = "seamless_transformer.cmd.api.download:main"
 seamless-run-transformation = "seamless_transformer.api.run_transformation:main"

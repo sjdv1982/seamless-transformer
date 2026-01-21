@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sys
@@ -33,16 +34,50 @@ def exists_file(filename, download_checksum):
     return current_checksum == download_checksum.hex()
 
 
-def get_buffer_length(checksum):
-    try:
-        checksum = Checksum(checksum)
-    except Exception:
-        return None
+def get_buffer_length(checksums):
     cache = get_buffer_cache()
-    buf = cache.get(checksum)
-    if buf is None:
-        return None
-    return len(buf.content)
+    results = {}
+    missing = []
+    for checksum in checksums:
+        try:
+            checksum_obj = Checksum(checksum)
+        except Exception:
+            results[checksum] = None
+            continue
+        if not checksum_obj:
+            results[checksum] = None
+            continue
+        buf = cache.get(checksum_obj)
+        if buf is not None:
+            results[checksum] = len(buf.content)
+        else:
+            results[checksum] = None
+            missing.append((checksum, checksum_obj))
+
+    if missing:
+        try:
+            import seamless_remote.buffer_remote as buffer_remote
+        except Exception:
+            buffer_remote = None
+        if buffer_remote is not None:
+            coro = buffer_remote.get_buffer_lengths(
+                [checksum_obj for _, checksum_obj in missing]
+            )
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                lengths = None
+            else:
+                try:
+                    lengths = asyncio.run(coro)
+                except Exception:
+                    lengths = None
+            if isinstance(lengths, list) and len(lengths) == len(missing):
+                for (checksum, _checksum_obj), length in zip(missing, lengths):
+                    results[checksum] = length
+    return results
 
 
 def download_file(filename, file_checksum):
@@ -123,14 +158,7 @@ def download(
     if len(checksum_dict):
         msg(2, f"Download {len(checksum_dict)} files")
     checksums = set(checksum_dict.values())
-    with ThreadPoolExecutor(max_workers=100) as executor:
-        buffer_lengths = {
-            k: v
-            for k, v in zip(
-                checksums,
-                executor.map(get_buffer_length, checksums),
-            )
-        }
+    buffer_lengths = get_buffer_length(checksums)
 
     size_load_per_file = 100000
     size_load_per_unknown_file = 10000000000

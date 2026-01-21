@@ -156,6 +156,12 @@ def _main(argv: list[str] | None = None) -> int:
     max_upload_size = human2bytes(max_upload_size)
 
     seamless_config.init(workdir=os.getcwd())
+    from seamless_config.select import get_selected_cluster
+
+    if get_selected_cluster() is None:
+        print(f"Cannot upload without a cluster defined", file=sys.stderr)
+        exit(1)
+
     destination_folder = None
     try:
         import seamless_remote.buffer_remote as buffer_remote
