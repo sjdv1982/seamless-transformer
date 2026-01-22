@@ -162,9 +162,7 @@ def _extract_dunder(transformation_dict: dict) -> dict:
     return {
         k: v
         for k, v in transformation_dict.items()
-        if k.startswith("__")
-        and k not in core_keys
-        and not k.startswith("__code")
+        if k.startswith("__") and k not in core_keys and not k.startswith("__code")
     }
 
 
@@ -195,6 +193,8 @@ def run_transformation(
         require_value=bool(fingertip),
     )
     if result_checksum is None:
+        if transformation.exception is not None:
+            raise RuntimeError(transformation.exception)
         raise RuntimeError("Result checksum unavailable")
     return Checksum(result_checksum)
 
@@ -218,9 +218,9 @@ async def run_transformation_async(
         scratch=scratch,
         tf_dunder=tf_dunder,
     )
-    result_checksum = await transformation.computation(
-        require_value=bool(fingertip)
-    )
+    result_checksum = await transformation.computation(require_value=bool(fingertip))
     if result_checksum is None:
+        if transformation.exception is not None:
+            raise RuntimeError(transformation.exception)
         raise RuntimeError("Result checksum unavailable")
     return Checksum(result_checksum)

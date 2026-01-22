@@ -12,7 +12,7 @@ from .transformation_namespace import build_transformation_namespace_sync
 from .transformation_utils import is_deep_celltype, pack_deep_structure
 from .execute_bash import execute_bash
 
-PACK_DEEP_RESULTS = False
+PACK_DEEP_RESULTS = True
 
 _DRIVER_CONTEXT = threading.local()
 
@@ -131,6 +131,9 @@ def run_transformation_dict_in_process(
         checksum_hex = str(code_checksum) if code_checksum is not None else None
     if checksum_hex:
         identifier = f"{identifier}-{checksum_hex}"
+
+    if is_deep_celltype(output_celltype):
+        namespace["OUTPUTPIN"] = output_celltype
 
     if language == "bash":
         namespace["execute_bash"] = execute_bash

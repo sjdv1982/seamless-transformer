@@ -31,6 +31,7 @@ def _write_file(pinname, data, filemode):
 
 def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN):
     from .transformation_class import TransformationError
+    from . import global_lock
 
     env = os.environ.copy()
     resultfile = "RESULT"
@@ -52,7 +53,6 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
                 return sdata
 
     process = None
-    old_cwd = os.getcwd()
     tempdir = tempfile.mkdtemp(prefix="seamless-bash-transformer")
 
     def _kill_process_group():
@@ -73,6 +73,8 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
         raise SystemExit()
 
     try:
+        global_lock.acquire()
+        old_cwd = os.getcwd()
         os.chdir(tempdir)
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, sighandler)
@@ -186,7 +188,7 @@ Error: Result file/folder RESULT does not exist
             raise TransformationError(msg)
 
         if os.path.isdir(resultfile):
-            result0 = {}
+            result = {}
             for dirpath, _, filenames in os.walk(resultfile):
                 for filename in filenames:
                     full_filename = os.path.join(dirpath, filename)
@@ -194,11 +196,9 @@ Error: Result file/folder RESULT does not exist
                     member = full_filename[len(resultfile) + 1 :]
                     data = open(full_filename, "rb").read()
                     rdata = read_data(data)
-                    result0[member] = rdata
-            result = {}
-            for k in sorted(result0.keys()):
-                result[k] = result0[k]
-                del result0[k]
+                    result[member] = rdata
+            if not len(result):
+                raise TransformationError("Result dir is empty")
         else:
             with open(resultfile, "rb") as f:
                 resultdata = f.read()
@@ -207,6 +207,7 @@ Error: Result file/folder RESULT does not exist
         _kill_process_group()
         os.chdir(old_cwd)
         shutil.rmtree(tempdir, ignore_errors=True)
+        global_lock.release()
 
     return result
 

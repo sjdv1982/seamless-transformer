@@ -96,6 +96,7 @@ def pack_deep_structure(structure, celltype: str):
             return value
         buffer = Buffer(value, "mixed" if celltype == "deepcell" else None)
         checksum = buffer.get_checksum()
+        buffer.tempref()
         return checksum.hex()
 
     return _pack(structure)

@@ -2,3 +2,4 @@
 .vscode/
 *.pyc
 *.egg-info/
+tests/cmd/calc_pi.job*

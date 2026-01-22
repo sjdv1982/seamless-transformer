@@ -17,14 +17,29 @@ from .bytes2human import bytes2human
 stdout_lock = threading.Lock()
 
 
+def _run_coro_in_thread(coro):
+    result = {}
+    error = {}
+
+    def _runner():
+        try:
+            result["value"] = asyncio.run(coro)
+        except Exception as exc:
+            error["exc"] = exc
+
+    thread = threading.Thread(target=_runner, name="download-buffer-lengths")
+    thread.start()
+    thread.join()
+    if error:
+        return None
+    return result.get("value")
+
+
 def exists_file(filename, download_checksum):
     try:
         download_checksum = Checksum(download_checksum)
     except Exception:
         return False
-    cache = get_buffer_cache()
-    if cache.get(download_checksum) is not None:
-        return True
 
     try:
         current_checksum = calculate_file_checksum(filename)
@@ -68,12 +83,17 @@ def get_buffer_length(checksums):
             except RuntimeError:
                 loop = None
             if loop and loop.is_running():
-                lengths = None
+                lengths = _run_coro_in_thread(coro)
             else:
                 try:
                     lengths = asyncio.run(coro)
                 except Exception:
                     lengths = None
+            if lengths is None:
+                try:
+                    coro.close()
+                except Exception:
+                    pass
             if isinstance(lengths, list) and len(lengths) == len(missing):
                 for (checksum, _checksum_obj), length in zip(missing, lengths):
                     results[checksum] = length
