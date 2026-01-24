@@ -1,7 +1,8 @@
 #!/bin/bash
+
 set -u -e
-export ntrials=${1:-1000}
-export ndots=${2:-1000000000}
+export ntrials=${1:-10}
+export ndots=${2:-100000000}
 
 seeds=$(python -c '
 import sys
@@ -12,8 +13,10 @@ seeds = np.random.randint(0, 999999, ntrials)
 print(" ".join([str(seed) for seed in seeds]))
 ' $ntrials
 )
+
 seeds=($seeds)
-rm -f calc_pi.job-*
+rm -f calc_pi-nested.job-*
+
 cleanup_jobs() {
     pids=$(jobs -p)
     if [ -n "$pids" ]; then
@@ -25,24 +28,19 @@ cleanup_jobs() {
 trap cleanup_jobs EXIT
 
 seamless-init
-seamless-queue & qpid=$! # start working immediately
 
 for i in $(seq $ntrials); do
     i2=$((i-1))
     export seed="${seeds[$i2]}"
-    cmd="python3 calc_pi.py --seed $seed --ndots $ndots > calc_pi.job-$i"
-    seamless-run --qsub -c "$cmd" &
+    cmd="python3 calc_pi.py --seed $seed --ndots $ndots > calc_pi-nested.job-$i"
+    seamless-run -c "$cmd" &
     sleep 0.33
     echo $i
 done
-echo 'Jobs submitted'
-for pid in $(jobs -p); do
-  [[ " $qpid " == *" $pid "* ]] && continue
-  wait "$pid"
-done
 
-###seamless-queue &   # start working when all has been submitted
-seamless-queue-finish
+wait
+
+head calc_pi-nested.job-*[0-9]
 
 python3 -c '
 import sys
@@ -50,7 +48,7 @@ import numpy as np
 ntrials = int(sys.argv[1])
 results = []
 for n in range(ntrials):
-    fname = f"calc_pi.job-{n+1}"
+    fname = f"calc_pi-nested.job-{n+1}"
     with open(fname) as f:
         data = f.read()
     try:

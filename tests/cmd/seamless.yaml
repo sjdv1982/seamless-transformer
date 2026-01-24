@@ -1,2 +1,3 @@
 - project: cmd-test
-- execution: spawn
+- execution: remote
+- remote: daskserver

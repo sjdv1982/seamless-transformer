@@ -31,12 +31,33 @@ def _driver_context(active: bool):
         _DRIVER_CONTEXT.active = prev
 
 
-def run_transformation_dict_in_process(
+def _execute(
+    module_workspace, code, identifier, namespace, inputs, output_name, driver_active
+):
+    with _driver_context(driver_active):
+        with injector.active_workspace(module_workspace, namespace):
+            exec_code(
+                code,
+                identifier,
+                namespace,
+                inputs,
+                output_name,
+                with_ipython_kernel=False,
+            )
+            try:
+                result = namespace[output_name]
+            except KeyError:
+                msg = "Output variable name '%s' undefined" % output_name
+                raise RuntimeError(msg) from None
+    return result
+
+
+def run_transformation_dict(
     transformation_dict: Dict[str, Any], tf_checksum: Checksum, tf_dunder, scratch: bool
 ) -> Checksum:
-    """Execute a transformation dict in-process.
+    """Execute a transformation dict.
 
-    Ported from seamless.workflow.core.direct.run.run_transformation_dict_in_process.
+    Ported from seamless.workflow.core.direct.run.run_transformation_dict.
     Many responsibilities (metadata, module compilation)
     are still pending and therefore commented out for now.
 
@@ -147,21 +168,15 @@ def run_transformation_dict_in_process(
         )
         inputs = []
 
-    with _driver_context(driver_active):
-        with injector.active_workspace(module_workspace, namespace):
-            exec_code(
-                code,
-                identifier,
-                namespace,
-                inputs,
-                output_name,
-                with_ipython_kernel=False,
-            )
-            try:
-                result = namespace[output_name]
-            except KeyError:
-                msg = "Output variable name '%s' undefined" % output_name
-                raise RuntimeError(msg) from None
+    result = _execute(
+        module_workspace,
+        code,
+        identifier,
+        namespace,
+        inputs,
+        output_name,
+        driver_active,
+    )
 
     if result is None:
         raise RuntimeError("Result is empty")
@@ -177,7 +192,8 @@ def run_transformation_dict_in_process(
     result_checksum = result_buffer.get_checksum()
     if not scratch:
         # Keep the result buffer around so resolve() can find it.
-        result_buffer.tempref()
+        if len(result_buffer):
+            result_buffer.tempref()
 
     return result_checksum
 
@@ -227,7 +243,7 @@ def get_transformation_inputs_output(
 
 
 __all__ = [
-    "run_transformation_dict_in_process",
+    "run_transformation_dict",
     "get_transformation_inputs_output",
     "is_driver_context",
 ]

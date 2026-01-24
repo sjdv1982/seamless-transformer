@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 import sys
 import os
 import shutil
@@ -155,12 +156,16 @@ def _main(argv: list[str] | None = None) -> int:
     max_upload_size = os.environ.get("SEAMLESS_MAX_UPLOAD_SIZE", "100 MB")
     max_upload_size = human2bytes(max_upload_size)
 
-    seamless_config.init(workdir=os.getcwd())
-    from seamless_config.select import get_selected_cluster
+    from seamless_config.extern_clients import set_remote_clients_from_env
 
-    if get_selected_cluster() is None:
-        print(f"Cannot upload without a cluster defined", file=sys.stderr)
-        exit(1)
+    if not set_remote_clients_from_env(include_dask=False):
+
+        seamless_config.init(workdir=os.getcwd())
+        from seamless_config.select import get_selected_cluster
+
+        if get_selected_cluster() is None:
+            print(f"Cannot upload without a cluster defined", file=sys.stderr)
+            exit(1)
 
     destination_folder = None
     try:

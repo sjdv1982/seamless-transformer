@@ -10,7 +10,7 @@ When called, spawn() fires up N workers. Each worker sets `set_is_worker(True)` 
 Parent requests are always Checksum objects, accompanied by two parameters: `scratch` (a bool) and `tf_dunder` (a dict). Whenever a checksum is received, the worker launches a thread that does the following:
 
 - The checksum is resolved into a dict `.resolve(celltype="plain")`
-- `/seamless1/seamless-transformer/seamless_transformer/run.py::run_transformation_dict_in_process` is called.
+- `/seamless1/seamless-transformer/seamless_transformer/run.py::run_transformation_dict` is called.
 After the thread has ended,`.tempref()` is called on the result checksum. The result checksum is returned, or an exception traceback serialized as string. In the latter case, the parent process re-raises the exception in the caller frame that made the request.
 
 In the parent process, a `has_spawned()` flag is set in `seamless_transformer.worker`. Future calls to `spawn()` check against this flag and raise a RuntimeError.
@@ -29,7 +29,7 @@ If they miss, the following code paths are considered:
     In case of an exception string, the worker re-raises the exception in the caller frame that made the request.
 
 - If neither are true:
-    Follow the default code path that calls `/seamless1/seamless-transformer/seamless_transformer/run.py::run_transformation_dict_in_process`
+    Follow the default code path that calls `/seamless1/seamless-transformer/seamless_transformer/run.py::run_transformation_dict`
 
 ## Changes on the worker
 

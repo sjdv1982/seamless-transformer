@@ -176,12 +176,21 @@ def _main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             err(str(exc))
 
-    seamless_config.init(workdir=os.getcwd())
-
     max_download_files = os.environ.get("SEAMLESS_MAX_DOWNLOAD_FILES", "2000")
     max_download_files = int(max_download_files)
     max_download_size = os.environ.get("SEAMLESS_MAX_DOWNLOAD_SIZE", "500 MB")
     max_download_size = human2bytes(max_download_size)
+
+    from seamless_config.extern_clients import set_remote_clients_from_env
+
+    if not set_remote_clients_from_env(include_dask=False):
+
+        seamless_config.init(workdir=os.getcwd())
+        from seamless_config.select import get_selected_cluster
+
+        if get_selected_cluster() is None:
+            print(f"Cannot download without a cluster defined", file=sys.stderr)
+            exit(1)
 
     ################################################################
 

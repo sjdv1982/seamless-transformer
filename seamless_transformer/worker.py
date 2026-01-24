@@ -15,6 +15,7 @@ Would be a seamless-base (buffer cache) feature.
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import threading
 import concurrent.futures as _cf
@@ -30,7 +31,7 @@ from concurrent.futures.thread import _worker as _cf_worker
 import weakref
 from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import seamless.caching.buffer_cache as _buffer_cache
 import seamless.buffer_class as _buffer_class
@@ -39,12 +40,9 @@ from seamless.caching.buffer_cache import get_buffer_cache
 
 from .process import ChildChannel, ProcessManager, ConnectionClosed
 from .process.manager import ProcessError
-from .run import run_transformation_dict_in_process
+from .run import run_transformation_dict
 
 _DASK_AVAILABLE_ENV = "SEAMLESS_DASK_AVAILABLE"
-_DASK_SCHEDULER_ENV = "SEAMLESS_DASK_SCHEDULER"
-_DASK_WORKERS_ENV = "SEAMLESS_DASK_WORKERS"
-_DASK_REMOTE_CLIENTS_ENV = "SEAMLESS_DASK_REMOTE_CLIENTS"
 _ALLOW_REMOTE_CLIENTS_ENV = "SEAMLESS_ALLOW_REMOTE_CLIENTS_IN_WORKER"
 _has_spawned = False
 _dask_available = os.environ.get(_DASK_AVAILABLE_ENV) == "1"
@@ -394,59 +392,6 @@ def _set_dask_available(value: bool) -> None:
         os.environ.pop(_DASK_AVAILABLE_ENV, None)
 
 
-def _configure_remote_clients_from_env() -> None:
-    payload = os.environ.get(_DASK_REMOTE_CLIENTS_ENV)
-    if not payload:
-        return
-    try:
-        import json
-        from seamless.config import set_remote_clients
-
-        set_remote_clients(json.loads(payload), in_remote=True)
-    except Exception:
-        pass
-
-
-def _configure_dask_client_from_env() -> None:
-    try:
-        from seamless import is_worker
-
-        if is_worker():
-            return
-    except Exception:
-        return
-    scheduler_address = os.environ.get(_DASK_SCHEDULER_ENV)
-    if not scheduler_address:
-        return
-    try:
-        from seamless_dask.transformer_client import (
-            get_seamless_dask_client,
-            set_seamless_dask_client,
-        )
-    except Exception:
-        return
-    if get_seamless_dask_client() is not None:
-        return
-    try:
-        from distributed import Client as DistributedClient
-        from seamless_dask.client import SeamlessDaskClient
-
-        try:
-            worker_count = int(os.environ.get(_DASK_WORKERS_ENV, "1") or 1)
-        except Exception:
-            worker_count = 1
-        dask_client = DistributedClient(
-            scheduler_address, timeout="10s", set_as_default=False
-        )
-        sd_client = SeamlessDaskClient(
-            dask_client,
-            worker_plugin_workers=worker_count,
-        )
-        set_seamless_dask_client(sd_client)
-    except Exception:
-        pass
-
-
 def _request_parent_sync(op: str, payload: Any) -> Any:
     channel, loop = _require_child_channel()
     future = asyncio.run_coroutine_threadsafe(channel.request(op, payload), loop)
@@ -477,6 +422,8 @@ def _upload_buffer_to_parent(buf: Buffer, pointer: Dict[str, Any]) -> None:
 
 
 def _buffer_ref_op(buf: Buffer, op: str) -> None:
+    if not len(buf):
+        return
     checksum = buf.get_checksum()
     try:
         if op == "tempref" and len(buf.content) <= 1024 * 1024:
@@ -575,6 +522,77 @@ def _patch_worker_primitives() -> None:
 
 
 def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
+    return _execute_transformation_impl(payload, _format_pruned_exec_traceback)
+
+
+def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
+    from . import SeamlessStreamTransformationError
+
+    stdout_buffer = io.BytesIO()
+    stderr_buffer = io.BytesIO()
+    stdout_wrapper = io.TextIOWrapper(
+        stdout_buffer, encoding="utf-8", write_through=True
+    )
+    stderr_wrapper = io.TextIOWrapper(
+        stderr_buffer, encoding="utf-8", write_through=True
+    )
+    previous_stdout = sys.stdout
+    previous_stderr = sys.stderr
+    sys.stdout = stdout_wrapper
+    sys.stderr = stderr_wrapper
+    try:
+
+        def _format_request_exc(exc: BaseException) -> str:
+            if isinstance(exc, SeamlessStreamTransformationError):
+                return str(exc)
+            return _format_pruned_exec_traceback()
+
+        result = _execute_transformation_impl(payload, _format_request_exc)
+    finally:
+        try:
+            stdout_wrapper.flush()
+            stderr_wrapper.flush()
+        finally:
+            sys.stdout = previous_stdout
+            sys.stderr = previous_stderr
+            try:
+                stdout_wrapper.detach()
+            except Exception:
+                pass
+            try:
+                stderr_wrapper.detach()
+            except Exception:
+                pass
+    if isinstance(result, str):
+        stdout_text = stdout_buffer.getvalue().decode("utf-8", errors="replace")
+        stderr_text = stderr_buffer.getvalue().decode("utf-8", errors="replace")
+        if stdout_text:
+            if not result:
+                result = "\n"
+            result += (
+                "\n*************************************************\n"
+                "* Standard output\n"
+                "*************************************************\n"
+                f"{stdout_text}\n"
+                "*************************************************\n"
+            )
+        if stderr_text:
+            if not result:
+                result = "\n"
+            result += (
+                "\n*************************************************\n"
+                "* Standard error\n"
+                "*************************************************\n"
+                f"{stderr_text}\n"
+                "*************************************************\n"
+            )
+    return result
+
+
+def _execute_transformation_impl(
+    payload: Dict[str, Any],
+    format_exc: Callable[[BaseException], str],
+) -> Checksum | str:
     owner_dask_key = _normalize_owner_dask_key(payload.get("owner_dask_key"))
     previous_owner = _set_current_owner_dask_key(owner_dask_key)
     owner_dask_priority = _normalize_owner_dask_priority(
@@ -612,31 +630,51 @@ def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
         try:
             if transformation_dict is None:
                 transformation_dict = tf_checksum.resolve(celltype="plain")
-            result = run_transformation_dict_in_process(
+            result = run_transformation_dict(
                 transformation_dict, tf_checksum, tf_dunder, scratch
             )
             result_checksum = Checksum(result)
             result_checksum.tempref()
             return result_checksum
-        except Exception:
-            return traceback.format_exc()
+        except Exception as exc:
+            return format_exc(exc)
     finally:
         _set_current_owner_dask_key(previous_owner)
         _set_current_owner_dask_priority(previous_priority)
 
 
+def _format_pruned_exec_traceback() -> str:
+    exc_type, exc, tb = sys.exc_info()
+    if exc_type is None or exc is None:
+        return traceback.format_exc()
+    if tb is None:
+        return "".join(traceback.format_exception_only(exc_type, exc))
+    frames = traceback.extract_tb(tb)
+    # Drop the outer frames so user tracebacks start at user code (exec_code is 4th frame).
+    frames = frames[4:]
+    if not frames:
+        return "".join(traceback.format_exception_only(exc_type, exc))
+    formatted = ["Traceback (most recent call last):\n"]
+    formatted.extend(traceback.format_list(frames))
+    formatted.extend(traceback.format_exception_only(exc_type, exc))
+    return "".join(formatted)
+
+
 async def _child_initializer(channel: ChildChannel) -> None:
+    from seamless_config.extern_clients import set_remote_clients_from_env
+
     global _child_channel, _child_loop, _quiet
     _child_channel = channel
     _child_loop = asyncio.get_running_loop()
     set_is_worker(True)
     _patch_worker_primitives()
-    _configure_remote_clients_from_env()
-    _configure_dask_client_from_env()
+    set_remote_clients_from_env(include_dask=True)
 
     async def handle_execute(payload: Dict[str, Any]) -> Checksum | str:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _execute_transformation, payload)
+        return await loop.run_in_executor(
+            None, _execute_transformation_request, payload
+        )
 
     async def handle_quiet(_payload: Any) -> str:
         _quiet = True

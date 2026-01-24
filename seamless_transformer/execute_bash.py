@@ -30,7 +30,8 @@ def _write_file(pinname, data, filemode):
 
 
 def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN):
-    from .transformation_class import TransformationError
+    from . import SeamlessStreamTransformationError
+
     from . import global_lock
 
     env = os.environ.copy()
@@ -138,7 +139,7 @@ conda activate {conda_environment_}
             bashcode2,
             shell=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             executable="/bin/bash",
             env=env,
             preexec_fn=os.setsid,
@@ -154,7 +155,11 @@ conda activate {conda_environment_}
         process.wait()
 
         if process.returncode:
-            raise TransformationError(
+            if process.stdout:
+                sys.stdout.buffer.write(process.stdout.read())
+            if process.stderr:
+                sys.stderr.buffer.write(process.stderr.read())
+            raise SeamlessStreamTransformationError(
                 """
 Bash transformer exception
 ==========================
@@ -185,7 +190,7 @@ Error: Result file/folder RESULT does not exist
 """.format(
                 bashcode
             )
-            raise TransformationError(msg)
+            raise SeamlessStreamTransformationError(msg)
 
         if os.path.isdir(resultfile):
             result = {}
@@ -198,7 +203,22 @@ Error: Result file/folder RESULT does not exist
                     rdata = read_data(data)
                     result[member] = rdata
             if not len(result):
-                raise TransformationError("Result dir is empty")
+                msg = """
+Bash transformer exception
+==========================
+
+Error: Result folder RESULT is empty
+
+*************************************************
+* Command
+*************************************************
+{}
+*************************************************
+""".format(
+                    bashcode
+                )
+                raise SeamlessStreamTransformationError(msg)
+
         else:
             with open(resultfile, "rb") as f:
                 resultdata = f.read()

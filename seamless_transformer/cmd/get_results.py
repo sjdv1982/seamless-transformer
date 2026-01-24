@@ -150,6 +150,8 @@ def get_result_buffer(
             "Cannot download result. Cannot write checksum for one or more result targets"
         )
         return None
+    elif cannot_download:
+        err_func("Cannot download result, and no result targets")
     return result_buffer.content
 
 

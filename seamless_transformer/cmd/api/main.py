@@ -709,31 +709,34 @@ def _main(argv: list[str] | None = None) -> int:
     However, we must interject overrulings of the execution command,
     based on the args
     """
-    from seamless_config import change_stage, set_workdir
-    from seamless_config.config_files import load_config_files
-    from seamless_config.select import (
-        select_execution,
-        get_selected_cluster,
-        get_execution,
-    )
+    from seamless_config.extern_clients import set_remote_clients_from_env
 
-    set_workdir(os.getcwd())
-    load_config_files()
-    if args.dry_run or args.qsubmit:
-        import seamless_remote.database_remote
+    if not set_remote_clients_from_env(include_dask=True):
+        from seamless_config import change_stage, set_workdir
+        from seamless_config.config_files import load_config_files
+        from seamless_config.select import (
+            select_execution,
+            get_selected_cluster,
+            get_execution,
+        )
 
-        seamless_remote.database_remote.DISABLED = True
-        select_execution("process")
-        if args.upload or args.qsubmit:
-            if get_selected_cluster() is None:
-                err(f"--upload or --qsubmit require a cluster")
-    else:
-        if args.local:
-            if get_execution() == "remote":
-                select_execution("process")
+        set_workdir(os.getcwd())
+        load_config_files()
+        if args.dry_run or args.qsubmit:
+            import seamless_remote.database_remote
 
-    change_stage()
-    # /CONFIG
+            seamless_remote.database_remote.DISABLED = True
+            select_execution("process")
+            if args.upload or args.qsubmit:
+                if get_selected_cluster() is None:
+                    err(f"--upload or --qsubmit require a cluster")
+        else:
+            if args.local:
+                if get_execution() == "remote":
+                    select_execution("process")
+
+        change_stage()
+        # /CONFIG
 
     max_upload_files = os.environ.get("SEAMLESS_MAX_UPLOAD_FILES", "400")
     max_upload_files = int(max_upload_files)
@@ -1051,7 +1054,7 @@ def _main(argv: list[str] | None = None) -> int:
                 result = result.lstrip("\n")
                 if result.endswith("\n"):
                     result = result.rstrip("\n") + "\n"
-                sys.stderr.write(result)
+                sys.stdout.write(result)
 
 
 def main(argv: list[str] | None = None) -> int:

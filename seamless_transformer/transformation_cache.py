@@ -7,7 +7,7 @@ import os
 
 from seamless import CacheMissError, Checksum, is_worker
 
-from .run import run_transformation_dict_in_process
+from .run import run_transformation_dict
 from . import worker
 from seamless_config.select import get_execution
 
@@ -172,7 +172,7 @@ class TransformationCache:
             loop = asyncio.get_running_loop()
             result_checksum = await loop.run_in_executor(
                 None,
-                run_transformation_dict_in_process,
+                run_transformation_dict,
                 transformation_dict,
                 tf_checksum,
                 tf_dunder,
