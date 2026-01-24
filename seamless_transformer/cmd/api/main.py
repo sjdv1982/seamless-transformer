@@ -711,7 +711,10 @@ def _main(argv: list[str] | None = None) -> int:
     """
     from seamless_config.extern_clients import set_remote_clients_from_env
 
-    if not set_remote_clients_from_env(include_dask=True):
+    include_dask = True
+    if args.dry_run or args.qsubmit or args.local:
+        include_dask = False
+    if not set_remote_clients_from_env(include_dask=include_dask):
         from seamless_config import change_stage, set_workdir
         from seamless_config.config_files import load_config_files
         from seamless_config.select import (

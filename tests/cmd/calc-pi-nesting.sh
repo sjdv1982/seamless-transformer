@@ -1,3 +1,3 @@
 #!/bin/bash
 set -u -e
-seamless-run -vvv ./calc-pi-nested.sh $1 $2 calc_pi.py
+seamless-run -i calc_pi.py -vvv ./calc-pi-nested.sh $1 $2
