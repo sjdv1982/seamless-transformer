@@ -8,6 +8,7 @@ import threading
 from seamless import Buffer, Checksum
 from .cached_compile import exec_code
 from .injector import transformer_injector as injector
+from .module_builder import build_all_modules
 from .transformation_namespace import build_transformation_namespace_sync
 from .transformation_utils import is_deep_celltype, pack_deep_structure
 from .execute_bash import execute_bash
@@ -36,6 +37,7 @@ def _execute(
 ):
     with _driver_context(driver_active):
         with injector.active_workspace(module_workspace, namespace):
+            _inject_main_globals(module_workspace, namespace)
             exec_code(
                 code,
                 identifier,
@@ -50,6 +52,16 @@ def _execute(
                 msg = "Output variable name '%s' undefined" % output_name
                 raise RuntimeError(msg) from None
     return result
+
+
+def _inject_main_globals(module_workspace, namespace):
+    main_mod = module_workspace.get("main")
+    if main_mod is None:
+        return
+    for name, value in main_mod.__dict__.items():
+        if name.startswith("__"):
+            continue
+        namespace[name] = value
 
 
 def run_transformation_dict(
@@ -125,19 +137,12 @@ def run_transformation_dict(
                 pass
 
     module_workspace = {}
-    """
-    STUB
-    compilers = transformation.get("__compilers__", default_compilers)
-    languages = transformation.get("__languages__", default_languages)
-    build_all_modules(
-        modules_to_build,
-        module_workspace,
-        compilers=compilers,
-        languages=languages,
-        module_debug_mounts=None,
-    )
-    /STUB
-    """
+    if modules_to_build:
+        build_all_modules(
+            modules_to_build,
+            module_workspace,
+            module_debug_mounts=None,
+        )
     assert code is not None
 
     namespace.pop(output_name, None)

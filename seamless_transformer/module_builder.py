@@ -1,0 +1,432 @@
+"""Minimal module builder for seamless.transformer."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from types import ModuleType
+from weakref import WeakKeyDictionary
+import ast
+import inspect
+import pathlib
+import sys
+import textwrap
+
+from .injector import Package
+
+
+module_definition_cache: "WeakKeyDictionary[ModuleType, dict]" = WeakKeyDictionary()
+
+
+def get_pypackage_dependencies(pycode: str, package_name: str | None, is_init: bool):
+    tree = ast.parse(pycode)
+    deps = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                dep = name.name
+                if package_name is None or not dep.startswith(package_name):
+                    continue
+                deps.add(dep)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                if package_name is None or not node.module.startswith(package_name):
+                    continue
+            elif is_init and node.level == 1 and node.module is None:
+                for name in node.names:
+                    deps.add("." + name.name)
+                continue
+            dep = "." * node.level
+            if node.module is not None:
+                dep += node.module
+            deps.add(dep)
+        else:
+            continue
+
+    return sorted(list(deps))
+
+
+def pypackage_to_moduledict(pypackage_dirdict, internal_package_name=None):
+    code = {}
+    if internal_package_name:
+        code["__name__"] = internal_package_name
+
+    def analyze(d, prefix):
+        for k, v in d.items():
+            if isinstance(v, dict):
+                new_prefix = prefix
+                if new_prefix:
+                    new_prefix += "."
+                new_prefix += k
+                analyze(v, new_prefix)
+                continue
+            if not isinstance(k, str) or not k.endswith(".py"):
+                continue
+            f = k[:-3]
+            if prefix:
+                f = prefix + "." + f
+            pycode = v
+            is_init = f.endswith("__init__")
+            deps0 = get_pypackage_dependencies(pycode, internal_package_name, is_init)
+            deps = []
+            ff = f.split(".")
+            for dep in deps0:
+                d = dep
+                dots = 0
+                dep2 = dep
+                if not dep.startswith("."):
+                    pos = len(ff)
+                    if ff[-1] == "__init__":
+                        pos -= 1
+                    ind = dep.find(".")
+                    if ind == -1:
+                        if pos == 0:
+                            continue
+                        d = pos * "."
+                    else:
+                        d = pos * "." + dep[ind + 1 :]
+                while d.startswith("."):
+                    dots += 1
+                    d = d[1:]
+                if not d:
+                    dep2 = ""
+                    dpref = ".".join(ff[:-dots])
+                    if dpref:
+                        dep2 += "." + dpref + "."
+                    dep2 += "__init__"
+                else:
+                    dep2 = "."
+                    dpref = ".".join(ff[:-dots])
+                    if dpref:
+                        dep2 += dpref + "."
+                    dep2 += d
+                if dep2 == f:
+                    continue
+                deps.append(dep2)
+            deps = sorted(list(deps))
+            item = {
+                "language": "python",
+                "code": pycode,
+                "dependencies": deps,
+            }
+            code[f] = item
+
+    dirdict = {}
+    for k, v in pypackage_dirdict.items():
+        if not isinstance(v, str):
+            dirdict[k] = v
+            continue
+        kk = k.split("/")
+        d = dirdict
+        for p in kk[:-1]:
+            d = d.setdefault(p, {})
+        d[kk[-1]] = v
+    analyze(dirdict, "")
+    return {
+        "language": "python",
+        "type": "interpreted",
+        "code": code,
+    }
+
+
+def _restore_dependencies(module_definition):
+    dep_orig = module_definition.pop("dependencies-ORIGINAL", None)
+    if dep_orig is not None:
+        module_definition["dependencies"] = dep_orig
+    code = module_definition["code"]
+    if isinstance(code, dict):
+        for sub_def in code.values():
+            _restore_dependencies(sub_def)
+
+
+def _render_namespace_symbol(name: str, value) -> str:
+    if inspect.isfunction(value) or inspect.isclass(value):
+        try:
+            src = inspect.getsource(value)
+        except OSError:
+            return f"{name} = {repr(value)}\n"
+        src = textwrap.dedent(src).rstrip() + "\n"
+        if name != getattr(value, "__name__", name):
+            src += f"{name} = {value.__name__}\n"
+        return src
+    return f"{name} = {repr(value)}\n"
+
+
+def module_definition_from_namespace(namespace: dict) -> dict:
+    lines = ["# Generated by seamless-transformer", "from __future__ import annotations"]
+    for name in sorted(namespace.keys()):
+        if name.startswith("__"):
+            continue
+        lines.append("")
+        lines.append(_render_namespace_symbol(name, namespace[name]).rstrip())
+    code = "\n".join(lines).strip() + "\n"
+    return {"code": code, "language": "python", "type": "interpreted"}
+
+
+def build_globals_module_definition(globals_dict: dict) -> dict:
+    return module_definition_from_namespace(globals_dict)
+
+
+def merge_module_definitions(base: dict, overlay: dict) -> dict:
+    merged = deepcopy(base)
+    base_code = merged.get("code")
+    overlay_code = overlay.get("code")
+    if isinstance(base_code, str) and isinstance(overlay_code, str):
+        merged["code"] = base_code.rstrip() + "\n\n" + overlay_code.lstrip()
+        merged.setdefault("language", overlay.get("language", "python"))
+        merged.setdefault("type", "interpreted")
+        return merged
+    if isinstance(base_code, dict) and isinstance(overlay_code, str):
+        init_def = base_code.get("__init__")
+        if init_def is None:
+            base_code["__init__"] = {
+                "language": "python",
+                "code": overlay_code,
+                "dependencies": [],
+            }
+        else:
+            init_code = init_def.get("code", "")
+            init_def["code"] = init_code.rstrip() + "\n\n" + overlay_code.lstrip()
+        merged["code"] = base_code
+        merged.setdefault("language", overlay.get("language", "python"))
+        merged.setdefault("type", "interpreted")
+        return merged
+    return merged
+
+
+def get_module_definition(module: ModuleType) -> dict:
+    if module in module_definition_cache:
+        result0 = module_definition_cache[module]
+        result = deepcopy(result0)
+        if "__init__" in result and "code" not in result:
+            result = {"code": result, "language": "python", "type": "interpreted"}
+        _restore_dependencies(result)
+        return result
+
+    module_file = getattr(module, "__file__", None)
+    if not module_file:
+        return module_definition_from_namespace(module.__dict__)
+
+    def getsource(mod):
+        with open(mod.__file__) as f:
+            return f.read().strip("\n")
+
+    if module_file.endswith("__init__.py"):
+        module_dir = pathlib.Path(module_file).parent
+        dirdict = {}
+        for modname, mod in sys.modules.items():
+            if not modname.startswith(module.__name__):
+                continue
+            modfile0 = pathlib.Path(mod.__file__)
+            modfile1 = modfile0.relative_to(module_dir)
+            modfile = modfile1.as_posix()
+            dirdict[modfile] = getsource(mod)
+        result = pypackage_to_moduledict(dirdict)
+    else:
+        code = getsource(module)
+        result = {"code": code, "language": "python", "type": "interpreted"}
+    return result
+
+
+def build_interpreted_module(
+    full_module_name,
+    module_definition,
+    module_workspace,
+    module_error_name,
+    parent_module_name=None,
+    *,
+    module_debug_mounts=None,
+):
+    language = module_definition["language"]
+    code = module_definition["code"]
+    if isinstance(code, dict):
+        return build_interpreted_package(
+            full_module_name,
+            language,
+            code,
+            module_workspace,
+            parent_module_name=parent_module_name,
+            module_error_name=module_error_name,
+            module_debug_mounts=module_debug_mounts,
+        )
+
+    if language not in ("python", "ipython"):
+        raise ValueError(f"Unsupported module language: {language}")
+    filename = (module_error_name or full_module_name) + ".py"
+    mod = ModuleType(full_module_name)
+    if parent_module_name is not None:
+        package_name = parent_module_name
+        if package_name.endswith(".__init__"):
+            package_name = package_name[: -len(".__init__")]
+        else:
+            pos = package_name.rfind(".")
+            if pos > -1:
+                package_name = package_name[:pos]
+        mod.__package__ = package_name
+    mod.__path__ = []
+    namespace = mod.__dict__
+    sysmodules = {}
+    try:
+        for ws_modname, ws_mod in module_workspace.items():
+            ws_modname2 = ws_modname
+            if ws_modname2.endswith(".__init__"):
+                ws_modname2 = ws_modname2[: -len(".__init__")]
+            sysmod = sys.modules.pop(ws_modname2, None)
+            sysmodules[ws_modname2] = sysmod
+            sys.modules[ws_modname2] = ws_mod
+        code_obj = compile(code, filename, "exec")
+        exec(code_obj, namespace)
+    finally:
+        for sysmodname, sysmod in sysmodules.items():
+            if sysmod is None:
+                sys.modules.pop(sysmodname, None)
+            else:
+                sys.modules[sysmodname] = sysmod
+    return mod
+
+
+def build_interpreted_package(
+    full_module_name,
+    language,
+    package_definition,
+    module_workspace,
+    *,
+    parent_module_name,
+    module_error_name,
+    module_debug_mounts,
+):
+    if language != "python":
+        raise ValueError(f"Unsupported package language: {language}")
+    if "__init__" not in package_definition:
+        raise ValueError("Package definition missing __init__")
+    if parent_module_name is None:
+        parent_module_name = full_module_name
+        mod = ModuleType(full_module_name)
+        module_workspace[full_module_name] = mod
+
+    p = {}
+    mapping = {}
+    for k, v in package_definition.items():
+        if k == "__name__":
+            continue
+        if not isinstance(k, str) or not isinstance(v, dict):
+            raise TypeError("Invalid package definition")
+        if "code" not in v or not isinstance(v["code"], str):
+            raise TypeError(f"Invalid code entry for {k}")
+        vv = v
+        if v.get("dependencies"):
+            vv = v.copy()
+            v["dependencies-ORIGINAL"] = deepcopy(v["dependencies"])
+            for depnr, dep in enumerate(v["dependencies"]):
+                dep2 = parent_module_name + dep if dep[:1] == "." else dep
+                if dep2 == "__init__":
+                    dep2 = parent_module_name + "." + dep2
+                vv["dependencies"][depnr] = dep2
+        if k.startswith(".."):
+            raise ValueError(f"Invalid module name: {k}")
+        kk = parent_module_name + k if k[:1] == "." else k
+        p[kk] = v
+        k2 = k if k[:-1] == "." else "." + k
+        modname = full_module_name + k2
+        mapping[modname] = kk
+    build_all_modules(
+        p,
+        module_workspace,
+        mtype="interpreted",
+        parent_module_name=parent_module_name,
+        module_error_name=module_error_name,
+        module_debug_mounts=module_debug_mounts,
+        internal_package_name=package_definition.get("__name__"),
+    )
+    return Package(mapping)
+
+
+def build_module(
+    module_definition,
+    module_workspace,
+    *,
+    module_debug_mounts,
+    module_error_name,
+    mtype=None,
+    parent_module_name=None,
+):
+    if mtype is None:
+        mtype = module_definition.get("type", "interpreted")
+    if mtype != "interpreted":
+        raise ValueError(f"Unsupported module type: {mtype}")
+    full_module_name = module_error_name or f"seamless_module_{abs(hash(str(module_definition)))}"
+    mod = build_interpreted_module(
+        full_module_name,
+        module_definition,
+        module_workspace,
+        parent_module_name=parent_module_name,
+        module_error_name=module_error_name,
+        module_debug_mounts=module_debug_mounts,
+    )
+    if parent_module_name is None:
+        module_definition_cache[mod] = module_definition
+    return full_module_name, mod
+
+
+def build_all_modules(
+    modules_to_build,
+    module_workspace,
+    *,
+    module_debug_mounts=None,
+    mtype=None,
+    parent_module_name=None,
+    module_error_name=None,
+    internal_package_name=None,
+):
+    full_module_names = {}
+    all_modules = sorted(list(modules_to_build.keys()))
+    while modules_to_build:
+        modules_to_build_new = {}
+        for modname, module_def in modules_to_build.items():
+            deps = module_def.get("dependencies", [])
+            for dep in deps:
+                if dep not in module_workspace:
+                    modules_to_build_new[modname] = module_def
+                    break
+            else:
+                modname2 = parent_module_name + "." + modname if parent_module_name else None
+                modname3 = modname
+                if module_error_name is not None:
+                    modname3 = module_error_name + "." + modname
+                modname4 = modname2 or modname
+                mod = build_module(
+                    module_def,
+                    module_workspace,
+                    mtype=mtype,
+                    parent_module_name=modname2,
+                    module_error_name=modname3,
+                    module_debug_mounts=module_debug_mounts,
+                )
+                full_module_names[modname] = mod[0]
+                module_workspace[modname4] = mod[1]
+                if internal_package_name is not None:
+                    pos = modname4.find(".")
+                    modname5 = internal_package_name
+                    if pos > -1:
+                        modname5 += modname4[pos:]
+                    module_workspace[modname5] = mod[1]
+        if len(modules_to_build_new) == len(modules_to_build):
+            deps = {}
+            for modname, module_def in modules_to_build.items():
+                cdeps = module_def.get("dependencies")
+                if cdeps:
+                    deps[modname] = cdeps
+            raise RuntimeError(
+                "Circular or unfulfilled dependencies: "
+                f"{deps} (all modules: {all_modules})"
+            )
+        modules_to_build = modules_to_build_new
+    return full_module_names
+
+
+__all__ = [
+    "build_all_modules",
+    "build_globals_module_definition",
+    "get_module_definition",
+    "merge_module_definitions",
+    "module_definition_from_namespace",
+]

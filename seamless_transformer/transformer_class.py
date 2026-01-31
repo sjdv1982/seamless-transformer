@@ -139,6 +139,7 @@ class Transformer(Generic[P, R]):
         self._language = language
         self._args = {}
         self._modules = {}
+        self._globals = {}
         self._celltypes = {}
         self._set_code(code)
         """
@@ -208,6 +209,11 @@ class Transformer(Generic[P, R]):
         """The imported modules"""
         return ModulesWrapper(self._modules)
 
+    @property
+    def globals(self):
+        """Global symbols injected via modules.main."""
+        return GlobalsWrapper(self._globals)
+
     '''
     STUB
     @property
@@ -248,6 +254,11 @@ class Transformer(Generic[P, R]):
 
         meta = deepcopy(self._meta)
         modules = {}
+        from .module_builder import (
+            build_globals_module_definition,
+            get_module_definition,
+            merge_module_definitions,
+        )
         """
         STUB
         for module_name, module in self._modules.items():
@@ -258,6 +269,19 @@ class Transformer(Generic[P, R]):
             modules[module_name] = module_definition
         /STUB
         """
+        for module_name, module in self._modules.items():
+            if isinstance(module, dict):
+                module_definition = module
+            else:
+                module_definition = get_module_definition(module)
+            modules[module_name] = module_definition
+
+        if self._globals:
+            globals_def = build_globals_module_definition(self._globals)
+            if "main" in modules:
+                modules["main"] = merge_module_definitions(modules["main"], globals_def)
+            else:
+                modules["main"] = globals_def
 
         pre_transformation = direct_transformer_to_pretransformation(
             self._codebuf,
@@ -507,7 +531,7 @@ class ModulesWrapper:
         if 0:
             pass
         else:
-            if not isinstance(value, ModuleType):
+            if not isinstance(value, (ModuleType, dict)):
                 raise TypeError(type(value))
             self._modules[attr] = value
 
@@ -516,6 +540,44 @@ class ModulesWrapper:
 
     def __str__(self):
         return str(self._modules)
+
+    def __repr__(self):
+        return str(self)
+
+
+class GlobalsWrapper:
+    """Wrapper around an imperative transformer's global namespace."""
+
+    def __init__(self, globals_dict):
+        self._globals = globals_dict
+
+    def __getattr__(self, attr):
+        return self._globals.get(attr)
+
+    def __getitem__(self, key):
+        return self._globals.get(key)
+
+    def __setattr__(self, attr, value):
+        if attr.startswith("_"):
+            return super().__setattr__(attr, value)
+        return self.__setitem__(attr, value)
+
+    def __setitem__(self, key, value):
+        self._globals[key] = value
+
+    def __delattr__(self, attr: str) -> None:
+        if attr.startswith("_"):
+            return super().__delattr__(attr)
+        return self.__delitem__(attr)
+
+    def __delitem__(self, key) -> None:
+        self._globals.pop(key, None)
+
+    def __dir__(self):
+        return sorted(self._globals.keys())
+
+    def __str__(self):
+        return str(self._globals)
 
     def __repr__(self):
         return str(self)
