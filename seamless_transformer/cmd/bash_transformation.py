@@ -173,8 +173,6 @@ def run_transformation(
     First convert it into a bash transformation."""
     if undo:
         raise NotImplementedError("Undo is not supported in seamless-transformer yet")
-    if scratch and fingertip:
-        raise ValueError("Cannot require fingertip for scratch transformations")
 
     from seamless_transformer.transformation_class import (
         compute_transformation_sync,
@@ -206,8 +204,6 @@ async def run_transformation_async(
     First convert it into a bash transformation."""
     if undo:
         raise NotImplementedError("Undo is not supported in seamless-transformer yet")
-    if scratch and fingertip:
-        raise ValueError("Cannot require fingertip for scratch transformations")
 
     from seamless_transformer.transformation_class import transformation_from_dict
 

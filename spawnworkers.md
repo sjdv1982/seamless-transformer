@@ -19,11 +19,11 @@ checked as usual (the database cache only if `is_worker` is False).
 If they miss, the following code paths are considered:
 
 - If `has_spawned()` is True:
-    Assert that `is_worker` is False. Then, forward the call parameters (minus `require_fingertip`) to the worker manager, awaiting the result.
+    Assert that `is_worker` is False. Then, forward the call parameters (minus `require_value`) to the worker manager, awaiting the result.
     The manager will select one of the workers that has the least number of running requests, and send the request to that worker, and return the request checksum.
 
 - If `is_worker` is True:
-    Assert that `has_spawned()` is False. Then forward the call parameters (minus `require_fingertip`) as a request to the parent process, awaiting the result.
+    Assert that `has_spawned()` is False. Then forward the call parameters (minus `require_value`) as a request to the parent process, awaiting the result.
     The parent process forwards this request to the worker manager, who will handle it as described above.
     The resulting transformation checksum or exception string is returned to the worker that made the request to the parent. Right before, in case of a transformation checksum, the parent does a `.tempref()` on the checksum.
     In case of an exception string, the worker re-raises the exception in the caller frame that made the request.

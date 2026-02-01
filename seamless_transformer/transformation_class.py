@@ -466,7 +466,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             return self._result_checksum
         if self._computation_task is None and self._computation_future is None:
             if _dask_available() and not self._prefer_local_execution():
-                return self._compute_with_dask(require_value=True)
+                return self._compute_with_dask(require_value=False)
             task_loop = get_event_loop()
             self.start(loop=task_loop)
 
@@ -525,7 +525,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         Returns the result checksum
         In case of failure, set .exception and return None.
 
-        It is made sure that the result value will be available upon Checksum.resolve().
+        It is made sure that the result checksum is fingertippable (resolvable or recomputable).
         """
         return self._compute(api_origin="compute")
 
@@ -621,7 +621,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             if self._computation_task is None:
                 loop = loop or get_event_loop()
                 self._computation_task = loop.create_task(
-                    self._compute_with_dask_async(require_value=True)
+                    self._compute_with_dask_async(require_value=False)
                 )
                 self._computation_task.add_done_callback(self._future_cleanup)
             return self
@@ -647,13 +647,13 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 _ensure_loop_running(loop)
                 if driver_ctx_manager is None:
                     self._computation_task = loop.create_task(
-                        self._computation(require_value=True)
+                        self._computation(require_value=False)
                     )
                 else:
 
                     async def _run_with_driver():
                         with driver_ctx_manager(driver_context):
-                            return await self._computation(require_value=True)
+                            return await self._computation(require_value=False)
 
                     self._computation_task = loop.create_task(_run_with_driver())
                 self._computation_task.add_done_callback(self._future_cleanup)
@@ -668,12 +668,12 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             except Exception:
                 driver_context = False
             self._computation_future = _COMPUTE_EXECUTOR.submit(
-                self._compute_in_thread, True, driver_context
+                self._compute_in_thread, False, driver_context
             )
             return self
         loop = loop or get_event_loop()
         _ensure_loop_running(loop)
-        self._computation_task = loop.create_task(self._computation(require_value=True))
+        self._computation_task = loop.create_task(self._computation(require_value=False))
         self._computation_task.add_done_callback(self._future_cleanup)
         return self
 
@@ -733,11 +733,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         return buf.get_value(self.celltype)
 
     async def _run(self) -> T:
-        await self.computation(require_value=True)
+        await self.computation(require_value=False)
         checksum = self.result_checksum  # Will raise an exception if there is one
-        buf = await checksum.resolution()
-        assert isinstance(buf, Buffer)
-        return await buf.get_value_async(self.celltype)
+        return await checksum.fingertip(self.celltype)
 
     def task(self) -> asyncio.Task[T]:
         """Create a Task Run the transformation and returns the result,
@@ -750,13 +748,14 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     def run(self) -> T:
         """Run the transformation and returns the result,
 
-        First runs .compute, then resolve the result checksum into a value.
+        First runs .compute, then fingertip the result checksum into a value.
         Raise RuntimeError in case of an exception."""
 
         ensure_open("transformation run")
 
         self._compute(api_origin="run")
-        return self.value
+        checksum = self.result_checksum
+        return checksum.fingertip_sync(self.celltype)
 
     @property
     def celltype(self):
@@ -892,26 +891,25 @@ def transformation_from_pretransformation(
     def evaluator_sync(
         transformation_obj: Transformation, require_value: bool
     ) -> Checksum:
-        # Currently, require_value will always be true for sync evaluation
-        scratch = False if require_value else transformation_obj.scratch
+        scratch = transformation_obj.scratch
         tf_dunder_payload = _inject_dependency_dunder(transformation_obj, tf_dunder)
         return run_sync(
             pre_transformation.pretransformation_dict,
             tf_checksum=transformation_obj.transformation_checksum,
             tf_dunder=tf_dunder_payload,
             scratch=scratch,
-            require_fingertip=require_value,
+            require_value=require_value,
         )
 
     async def evaluator_async(transformation_obj, require_value: bool) -> Checksum:
-        scratch = False if require_value else transformation_obj.scratch
+        scratch = transformation_obj.scratch
         tf_dunder_payload = _inject_dependency_dunder(transformation_obj, tf_dunder)
         return await run(
             pre_transformation.pretransformation_dict,
             tf_checksum=transformation_obj.transformation_checksum,
             tf_dunder=tf_dunder_payload,
             scratch=scratch,
-            require_fingertip=require_value,
+            require_value=require_value,
         )
 
     def destructor(transformation_obj):  # pylint: disable=unused-argument

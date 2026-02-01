@@ -53,6 +53,23 @@ class TransformationCache:
 
     def __init__(self) -> None:
         self._transformation_cache: dict[Checksum, Checksum] = {}
+        self._rev_transformation_cache: dict[Checksum, set[Checksum]] = {}
+
+    def _register_transformation_result(
+        self, tf_checksum: Checksum, result_checksum: Checksum
+    ) -> None:
+        tf_checksum = Checksum(tf_checksum)
+        result_checksum = Checksum(result_checksum)
+        self._transformation_cache[tf_checksum] = result_checksum
+        rev = self._rev_transformation_cache.setdefault(result_checksum, set())
+        rev.add(tf_checksum)
+
+    def get_reverse_transformations(self, result_checksum: Checksum) -> list[Checksum]:
+        result_checksum = Checksum(result_checksum)
+        rev = self._rev_transformation_cache.get(result_checksum)
+        if not rev:
+            return []
+        return list(rev)
 
     async def run(
         self,
@@ -61,38 +78,56 @@ class TransformationCache:
         tf_checksum,
         tf_dunder,
         scratch: bool,
-        require_fingertip: bool,
+        require_value: bool,
+        force_local: bool = False,
     ) -> Checksum:
-        assert (not scratch) or (not require_fingertip)
+        """Run a transformation and return its result checksum.
+
+        require_value applies to the result: when True, ensure the result checksum
+        is resolvable (buffer available locally or via remote) before returning.
+        """
         tf_checksum = Checksum(tf_checksum)
         cached_result = self._transformation_cache.get(tf_checksum)
         if cached_result is not None:
-            _debug(f"cache hit {tf_checksum.hex()}")
-            if not scratch:
-                await buffer_remote.promise(cached_result)
-                cached_result.tempref()
-            return cached_result
+            if require_value:
+                try:
+                    await cached_result.resolution()
+                except CacheMissError:
+                    cached_result = None
+                else:
+                    if scratch:
+                        cached_result.tempref(scratch=True)
+            if cached_result is not None:
+                _debug(f"cache hit {tf_checksum.hex()}")
+                if not scratch:
+                    await buffer_remote.promise(cached_result)
+                    cached_result.tempref()
+                self._register_transformation_result(tf_checksum, cached_result)
+                return cached_result
 
-        if database_remote is not None and not is_worker():
+        if not force_local and database_remote is not None and not is_worker():
             _debug(f"query remote db for {tf_checksum.hex()}")
             remote_result = await database_remote.get_transformation_result(tf_checksum)
             _debug(f"remote db result {remote_result}")
             if remote_result is not None:
-                if require_fingertip:
+                if require_value:
                     try:
-                        _debug("waiting for fingertip resolution")
+                        _debug("waiting for result resolution")
                         # TODO: be more lazy and only evaluate the *potential* checksum resolution
                         await remote_result.resolution()
                     except CacheMissError:
-                        _debug("fingertip resolution cache miss")
+                        _debug("result resolution cache miss")
                         remote_result = None
                 if remote_result is not None:
                     _debug("using remote result")
                     if not scratch:
                         remote_result.tempref()
+                    elif require_value:
+                        remote_result.tempref(scratch=True)
+                    self._register_transformation_result(tf_checksum, remote_result)
                     return remote_result
 
-        execution = get_execution()
+        execution = "process" if force_local else get_execution()
         meta = (
             transformation_dict.get("__meta__")
             if isinstance(transformation_dict, dict)
@@ -103,7 +138,7 @@ class TransformationCache:
         _debug(
             f"execution={execution} has_spawned()={worker.has_spawned()} is_worker={is_worker()}"
         )
-        if execution == "remote":
+        if execution == "remote" and not force_local:
             # NOTE: this branch is only hit if no seamless Dask client has been defined
             if jobserver_remote is None:
                 raise RuntimeError(
@@ -139,7 +174,7 @@ class TransformationCache:
             if isinstance(result_checksum, str):
                 raise RuntimeError(result_checksum)
             result_checksum = Checksum(result_checksum)
-        elif worker.has_spawned() and not is_worker():
+        elif worker.has_spawned() and not is_worker() and not force_local:
             _debug("dispatching transformation to worker pool")
             result_checksum = await worker.dispatch_to_workers(
                 transformation_dict,
@@ -150,7 +185,7 @@ class TransformationCache:
             if isinstance(result_checksum, str):
                 raise RuntimeError(result_checksum)
             result_checksum = Checksum(result_checksum)
-        elif is_worker():
+        elif is_worker() and not force_local:
             assert not worker.has_spawned()
             _debug("forwarding transformation request to parent")
             result_checksum = await worker.forward_to_parent(
@@ -177,15 +212,18 @@ class TransformationCache:
                 tf_checksum,
                 tf_dunder,
                 scratch,
+                require_value,
             )
             result_checksum = Checksum(result_checksum)
 
-        if require_fingertip:
+        if require_value:
             try:
-                _debug("ensuring fingertip value for result")
+                _debug("ensuring result is resolvable")
                 await result_checksum.resolution()
+                if scratch:
+                    result_checksum.tempref(scratch=True)
             except Exception:
-                _debug("fingertip resolution failed; will continue")
+                _debug("result resolution failed; will continue")
 
         if not scratch:
             result_checksum.tempref()
@@ -199,7 +237,7 @@ class TransformationCache:
             #         result_checksum, output_celltype, sync_to_remote=True
             #     )
 
-        self._transformation_cache[tf_checksum] = result_checksum
+        self._register_transformation_result(tf_checksum, result_checksum)
         await _await_buffer_writer(result_checksum)
 
         return result_checksum
@@ -211,14 +249,25 @@ class TransformationCache:
         tf_checksum,
         tf_dunder,
         scratch: bool,
-        require_fingertip: bool,
+        require_value: bool,
+        force_local: bool = False,
     ) -> Checksum:
         tf_checksum = Checksum(tf_checksum)
         cached_result = self._transformation_cache.get(tf_checksum)
         if cached_result is not None:
-            if not scratch:
-                cached_result.tempref()
-            return cached_result
+            if require_value:
+                try:
+                    cached_result.resolve()
+                except CacheMissError:
+                    cached_result = None
+                else:
+                    if scratch:
+                        cached_result.tempref(scratch=True)
+            if cached_result is not None:
+                self._register_transformation_result(tf_checksum, cached_result)
+                if not scratch:
+                    cached_result.tempref()
+                return cached_result
 
         try:
             loop = asyncio.get_running_loop()
@@ -231,7 +280,8 @@ class TransformationCache:
                     tf_checksum=tf_checksum,
                     tf_dunder=tf_dunder,
                     scratch=scratch,
-                    require_fingertip=require_fingertip,
+                    require_value=require_value,
+                    force_local=force_local,
                 ),
                 loop,
             )
@@ -246,7 +296,8 @@ class TransformationCache:
                     tf_checksum=tf_checksum,
                     tf_dunder=tf_dunder,
                     scratch=scratch,
-                    require_fingertip=require_fingertip,
+                    require_value=require_value,
+                    force_local=force_local,
                 )
             )
         finally:
@@ -283,14 +334,16 @@ async def run(
     tf_checksum,
     tf_dunder,
     scratch: bool,
-    require_fingertip: bool,
+    require_value: bool,
+    force_local: bool = False,
 ) -> Checksum:
     return await get_transformation_cache().run(
         transformation_dict,
         tf_checksum=tf_checksum,
         tf_dunder=tf_dunder,
         scratch=scratch,
-        require_fingertip=require_fingertip,
+        require_value=require_value,
+        force_local=force_local,
     )
 
 
@@ -300,14 +353,74 @@ def run_sync(
     tf_checksum,
     tf_dunder,
     scratch: bool,
-    require_fingertip: bool,
+    require_value: bool,
+    force_local: bool = False,
 ) -> Checksum:
     return get_transformation_cache().run_sync(
         transformation_dict,
         tf_checksum=tf_checksum,
         tf_dunder=tf_dunder,
         scratch=scratch,
-        require_fingertip=require_fingertip,
+        require_value=require_value,
+        force_local=force_local,
+    )
+
+
+async def recompute_from_transformation_checksum(
+    tf_checksum: Checksum | str,
+    *,
+    scratch: bool = True,
+    require_value: bool = True,
+) -> Checksum | None:
+    try:
+        tf_checksum_obj = Checksum(tf_checksum)
+        transformation_dict = await tf_checksum_obj.resolution(celltype="plain")
+    except Exception:
+        return None
+    if not isinstance(transformation_dict, dict):
+        return None
+    return await get_transformation_cache().run(
+        transformation_dict,
+        tf_checksum=tf_checksum_obj,
+        tf_dunder={},
+        scratch=scratch,
+        require_value=require_value,
+        force_local=True,
+    )
+
+
+def recompute_from_transformation_checksum_sync(
+    tf_checksum: Checksum | str,
+    *,
+    scratch: bool = True,
+    require_value: bool = True,
+) -> Checksum | None:
+    try:
+        tf_checksum_obj = Checksum(tf_checksum)
+        transformation_dict = tf_checksum_obj.resolve(celltype="plain")
+    except Exception:
+        return None
+    if not isinstance(transformation_dict, dict):
+        return None
+    return get_transformation_cache().run_sync(
+        transformation_dict,
+        tf_checksum=tf_checksum_obj,
+        tf_dunder={},
+        scratch=scratch,
+        require_value=require_value,
+        force_local=True,
+    )
+
+
+def get_reverse_transformations(result_checksum: Checksum) -> list[Checksum]:
+    return get_transformation_cache().get_reverse_transformations(result_checksum)
+
+
+def register_transformation_result(
+    tf_checksum: Checksum, result_checksum: Checksum
+) -> None:
+    get_transformation_cache()._register_transformation_result(  # type: ignore[attr-defined]
+        tf_checksum, result_checksum
     )
 
 
@@ -316,4 +429,8 @@ __all__ = [
     "get_transformation_cache",
     "run",
     "run_sync",
+    "recompute_from_transformation_checksum",
+    "recompute_from_transformation_checksum_sync",
+    "get_reverse_transformations",
+    "register_transformation_result",
 ]

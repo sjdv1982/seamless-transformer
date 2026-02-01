@@ -65,7 +65,11 @@ def _inject_main_globals(module_workspace, namespace):
 
 
 def run_transformation_dict(
-    transformation_dict: Dict[str, Any], tf_checksum: Checksum, tf_dunder, scratch: bool
+    transformation_dict: Dict[str, Any],
+    tf_checksum: Checksum,
+    tf_dunder,
+    scratch: bool,
+    require_value: bool = False,
 ) -> Checksum:
     """Execute a transformation dict.
 
@@ -199,6 +203,9 @@ def run_transformation_dict(
         # Keep the result buffer around so resolve() can find it.
         if len(result_buffer):
             result_buffer.tempref()
+    elif require_value:
+        if len(result_buffer):
+            result_buffer.tempref(scratch=True)
 
     return result_checksum
 
