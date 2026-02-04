@@ -1,6 +1,6 @@
 import seamless.config
 
-seamless.config.set_stage("persistent")
+seamless.config.set_stage("persistent-test")
 seamless.config.init()
 
 from seamless.transformer import delayed

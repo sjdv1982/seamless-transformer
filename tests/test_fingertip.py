@@ -7,28 +7,12 @@ import seamless.config
 from seamless.caching.buffer_cache import get_buffer_cache
 from seamless.transformer import delayed
 
+from seamless.config import set_stage
 
-def _disable_remote() -> None:
-    from seamless.config import set_stage
-
-    set_stage("fingertip")
-    try:
-        from seamless_remote import (
-            buffer_remote,
-            database_remote,
-            daskserver_remote,
-            jobserver_remote,
-        )
-    except Exception:
-        return
-    buffer_remote.DISABLED = True
-    database_remote.DISABLED = True
-    daskserver_remote.DISABLED = True
-    jobserver_remote.DISABLED = True
+set_stage("fingertip")
 
 
 def test_fingertip_recompute_scratch():
-    _disable_remote()
     seamless.config.init()
 
     @delayed
@@ -39,8 +23,10 @@ def test_fingertip_recompute_scratch():
     func.local = True
 
     tf = func(2, 3)
+    print("Transformation:", tf.construct())
     result_checksum = tf.compute()
     assert isinstance(result_checksum, Checksum), tf.exception
+    print("Result:", result_checksum)
 
     result_checksum.tempref(scratch=True)
     get_buffer_cache().purge_scratch(result_checksum)
@@ -65,7 +51,6 @@ def test_fingertip_recompute_scratch():
 
 
 def test_run_fingertip_scratch():
-    _disable_remote()
     seamless.config.init()
 
     @delayed
