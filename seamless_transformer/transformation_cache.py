@@ -94,12 +94,11 @@ class TransformationCache:
                     await cached_result.resolution()
                 except CacheMissError:
                     cached_result = None
-                else:
-                    if scratch:
-                        cached_result.tempref(scratch=True)
             if cached_result is not None:
                 _debug(f"cache hit {tf_checksum.hex()}")
-                if not scratch:
+                if scratch:
+                    cached_result.tempref(scratch=True)
+                else:
                     await buffer_remote.promise(cached_result)
                     cached_result.tempref()
                 self._register_transformation_result(tf_checksum, cached_result)
@@ -120,10 +119,10 @@ class TransformationCache:
                         remote_result = None
                 if remote_result is not None:
                     _debug("using remote result")
-                    if not scratch:
-                        remote_result.tempref()
-                    elif require_value:
+                    if scratch:
                         remote_result.tempref(scratch=True)
+                    else:
+                        remote_result.tempref()
                     self._register_transformation_result(tf_checksum, remote_result)
                     return remote_result
 
@@ -220,12 +219,12 @@ class TransformationCache:
             try:
                 _debug("ensuring result is resolvable")
                 await result_checksum.resolution()
-                if scratch:
-                    result_checksum.tempref(scratch=True)
             except Exception:
                 _debug("result resolution failed; will continue")
 
-        if not scratch:
+        if scratch:
+            result_checksum.tempref(scratch=True)
+        else:
             result_checksum.tempref()
 
         if database_remote is not None and not is_worker():
@@ -260,12 +259,11 @@ class TransformationCache:
                     cached_result.resolve()
                 except CacheMissError:
                     cached_result = None
-                else:
-                    if scratch:
-                        cached_result.tempref(scratch=True)
             if cached_result is not None:
                 self._register_transformation_result(tf_checksum, cached_result)
-                if not scratch:
+                if scratch:
+                    cached_result.tempref(scratch=True)
+                else:
                     cached_result.tempref()
                 return cached_result
 

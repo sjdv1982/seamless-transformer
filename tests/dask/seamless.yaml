@@ -5,3 +5,8 @@
 # - persistent: false
 # .seamless.yaml: define a cluster, e.g.
 # - cluster: local
+
+- stage fingertip:
+    - execution: process
+    - remote: daskserver
+    - persistent: false

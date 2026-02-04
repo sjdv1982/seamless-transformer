@@ -211,6 +211,14 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     def scratch(self, value: bool) -> None:
         self._scratch = value
 
+    @property
+    def allow_input_fingertip(self) -> bool:
+        """If True, inputs may be fingertipped when resolving their buffers."""
+        try:
+            return bool(self._meta is not None and self._meta.get("allow_input_fingertip"))
+        except Exception:
+            return False
+
     def construct(self) -> Checksum | None:
         """
         Evaluate dependencies and calculate the transformation checksum from the inputs

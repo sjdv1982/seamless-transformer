@@ -326,6 +326,21 @@ class Transformer(Generic[P, R]):
         self._scratch = value
 
     @property
+    def allow_input_fingertip(self) -> bool:
+        """If True, inputs may be fingertipped when resolving their buffers."""
+        return bool(self._meta.get("allow_input_fingertip", False))
+
+    @allow_input_fingertip.setter
+    def allow_input_fingertip(self, value: bool):
+        if not isinstance(value, bool):
+            raise TypeError(type(value))
+        if value:
+            self.meta = {"allow_input_fingertip": True}
+        else:
+            if "allow_input_fingertip" in self._meta:
+                self._meta.pop("allow_input_fingertip", None)
+
+    @property
     def direct_print(self):
         """Causes the transformer to directly print any messages,
         instead of buffering them and storing them in Transformer.logs.

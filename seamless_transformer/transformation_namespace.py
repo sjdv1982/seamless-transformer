@@ -74,6 +74,11 @@ def build_transformation_namespace_sync(
     deep_structures_to_unpack: Dict[str, Tuple[Any, str]] = {}
     namespace["PINS"] = {}
     namespace["OUTPUTPIN"] = transformation["__output__"][1]
+    meta = transformation.get("__meta__")
+    if isinstance(meta, dict):
+        allow_input_fingertip = bool(meta.get("allow_input_fingertip", False))
+    else:
+        allow_input_fingertip = False
     modules_to_build: Dict[str, Any] = {}
     as_ = transformation.get("__as__", {})
     format_section = transformation.get("__format__", {})
@@ -165,7 +170,13 @@ def build_transformation_namespace_sync(
             if pinname == "code" and fallback_code_text is not None:
                 code = fallback_code_text
                 continue
-            raise
+            if allow_input_fingertip:
+                try:
+                    buffer = checksum.fingertip_sync()
+                except Exception:
+                    raise
+            else:
+                raise
         if buffer is None:
             raise CacheMissError(checksum.hex())
 

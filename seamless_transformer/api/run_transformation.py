@@ -124,11 +124,16 @@ def _main(argv: list[str] | None = None) -> int:
         default=False,
         action="store_true",
     )
+    parser.add_argument(
+        "--fingertip",
+        help="Allow fingertipping missing input buffers.",
+        default=False,
+        action="store_true",
+    )
     parser.add_argument("--output", help="Output file (default: stdout)")
 
-    # TODO: --dunder, --fingertip, --undo, --global-info need new-codebase support.
+    # TODO: --dunder, --undo, --global-info need new-codebase support.
     # parser.add_argument("--dunder", help="Dunder file with transformation metadata")
-    # parser.add_argument("--fingertip", action="store_true")
     # parser.add_argument("--undo", action="store_true", default=False)
     # parser.add_argument("--global-info", dest="global_info")
 
@@ -171,18 +176,24 @@ def _main(argv: list[str] | None = None) -> int:
         print(excs, file=sys.stderr)
         return 1
 
-    if args.direct_print:
+    if args.direct_print or args.fingertip:
         meta = transformation_dict.get("__meta__")
         if not isinstance(meta, dict):
             meta = {}
-        meta["__direct_print__"] = True
+        if args.direct_print:
+            meta["__direct_print__"] = True
+        if args.fingertip:
+            meta["allow_input_fingertip"] = True
         transformation_dict["__meta__"] = meta
 
     tf_dunder = _extract_dunder(transformation_dict)
     try:
+        meta = {}
+        if args.fingertip:
+            meta["allow_input_fingertip"] = True
         transformation = transformation_from_dict(
             transformation_dict,
-            meta={},
+            meta=meta,
             scratch=bool(args.scratch),
             tf_dunder=tf_dunder,
         )

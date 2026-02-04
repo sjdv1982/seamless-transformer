@@ -206,7 +206,19 @@ class PreTransformation:
                 except Exception:
                     pass
         if not is_worker():
-            checksum.incref()
+            try:
+                from seamless.caching.buffer_cache import get_buffer_cache
+
+                scratch_ref = get_buffer_cache().is_scratch_ref(checksum)
+            except Exception:
+                scratch_ref = False
+            meta = self._pretransformation_dict.get("__meta__")
+            if isinstance(meta, dict) and meta.get("allow_input_fingertip"):
+                scratch_ref = True
+            if scratch_ref:
+                checksum.tempref(scratch=True)
+            else:
+                checksum.incref()
         self._value_refs.append(checksum)
         return checksum
 

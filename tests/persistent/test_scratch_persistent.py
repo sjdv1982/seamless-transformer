@@ -12,7 +12,7 @@ _SKIP_EXIT = 77
 
 def _run_script(path: Path, env: dict[str, str]) -> None:
     proc = subprocess.run(
-        [sys.executable, str(path)],
+        [sys.executable, "-u", str(path)],
         env=env,
         capture_output=True,
         text=True,
