@@ -1365,6 +1365,10 @@ class _WorkerManager:
                     if dask_client is None:
                         submission = None
                     else:
+                        meta_payload = transformation_dict.get("__meta__", {}) or {}
+                        allow_input_fingertip = bool(
+                            meta_payload.get("allow_input_fingertip", False)
+                        )
                         submission = TransformationSubmission(
                             transformation_dict=transformation_dict,
                             inputs={},
@@ -1373,6 +1377,7 @@ class _WorkerManager:
                             tf_dunder=tf_dunder,
                             scratch=scratch,
                             require_value=False,
+                            allow_input_fingertip=allow_input_fingertip,
                         )
                         dep_checksums = _dependency_checksums_from_tf_dunder(tf_dunder)
                         inputs: Dict[str, TransformationInputSpec] = {}
@@ -1393,9 +1398,16 @@ class _WorkerManager:
                                     dep_futures = get_futures(dep_tf_checksum)
                             if dep_futures is not None:
                                 if dep_futures.fat is None:
-                                    dep_futures.fat = dask_client.ensure_fat_future(
-                                        dep_futures
-                                    )
+                                    if allow_input_fingertip:
+                                        dep_futures.fat = (
+                                            dask_client.ensure_fat_finger_future(
+                                                dep_futures
+                                            )
+                                        )
+                                    else:
+                                        dep_futures.fat = dask_client.ensure_fat_future(
+                                            dep_futures
+                                        )
                                 inputs[pinname] = TransformationInputSpec(
                                     name=pinname,
                                     celltype=celltype,
@@ -1424,9 +1436,16 @@ class _WorkerManager:
                                 checksum=checksum_hex,
                                 kind="checksum",
                             )
-                            input_futures[pinname] = (
-                                dask_client.get_fat_checksum_future(checksum_hex)
-                            )
+                            if allow_input_fingertip:
+                                input_futures[pinname] = (
+                                    dask_client.get_fat_finger_checksum_future(
+                                        checksum_hex
+                                    )
+                                )
+                            else:
+                                input_futures[pinname] = (
+                                    dask_client.get_fat_checksum_future(checksum_hex)
+                                )
                         submission.inputs = inputs
                         submission.input_futures = input_futures
             if dask_client is None or submission is None:
@@ -1698,6 +1717,9 @@ class _WorkerManager:
                             return permission_denied
 
                     try:
+                        allow_input_fingertip = bool(
+                            getattr(submission, "allow_input_fingertip", False)
+                        )
                         if isinstance(transformation_dict, dict):
                             dep_checksums = _dependency_checksums_from_tf_dunder(
                                 tf_dunder
@@ -1720,9 +1742,16 @@ class _WorkerManager:
                                         dep_futures = get_futures(dep_tf_checksum)
                                 if dep_futures is not None:
                                     if dep_futures.fat is None:
-                                        dep_futures.fat = dask_client.ensure_fat_future(
-                                            dep_futures
-                                        )
+                                        if allow_input_fingertip:
+                                            dep_futures.fat = (
+                                                dask_client.ensure_fat_finger_future(
+                                                    dep_futures
+                                                )
+                                            )
+                                        else:
+                                            dep_futures.fat = (
+                                                dask_client.ensure_fat_future(dep_futures)
+                                            )
                                     inputs[pinname] = TransformationInputSpec(
                                         name=pinname,
                                         celltype=celltype,
@@ -1751,9 +1780,16 @@ class _WorkerManager:
                                     checksum=checksum_hex,
                                     kind="checksum",
                                 )
-                                input_futures[pinname] = (
-                                    dask_client.get_fat_checksum_future(checksum_hex)
-                                )
+                                if allow_input_fingertip:
+                                    input_futures[pinname] = (
+                                        dask_client.get_fat_finger_checksum_future(
+                                            checksum_hex
+                                        )
+                                    )
+                                else:
+                                    input_futures[pinname] = (
+                                        dask_client.get_fat_checksum_future(checksum_hex)
+                                    )
                             submission.inputs = inputs
                             submission.input_futures = input_futures
                         priority_boost = (
