@@ -85,11 +85,17 @@ def build_transformation_namespace_sync(
     FILESYSTEM: Dict[str, Any] = {}
     if isinstance(format_section, dict):
         for pinname, fmt in format_section.items():
-            filesystem = fmt.get("filesystem") if isinstance(fmt, dict) else None
+            if not isinstance(fmt, dict):
+                continue
+            filesystem = fmt.get("filesystem")
             if filesystem is None:
                 continue
             fs_entry = dict(filesystem)
             fs_entry.setdefault("filesystem", False)
+            # TODO: why do we still have hash patterns???
+            hash_pattern = fmt.get("hash_pattern")
+            if hash_pattern is not None:
+                fs_entry["hash_pattern"] = hash_pattern
             FILESYSTEM[pinname] = fs_entry
     namespace["FILESYSTEM"] = FILESYSTEM
     read_folder_directories = _get_read_folder_directories()

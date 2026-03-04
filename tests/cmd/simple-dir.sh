@@ -1,0 +1,1 @@
+seamless-run 'ls data; echo RESULT; paste data/b.txt data/a.txt | awk '\''NF == 2 && $1 > 10{print $2}'\'' '

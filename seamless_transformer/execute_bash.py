@@ -10,7 +10,7 @@ from io import BytesIO
 
 import numpy as np
 
-from seamless import Buffer
+from seamless import Buffer, Checksum
 
 from seamless.util.mixed.get_form import get_form
 from seamless.util.mount_directory import write_to_directory
@@ -27,6 +27,23 @@ def _write_file(pinname, data, filemode):
         os.makedirs(parent_dir, exist_ok=True)
     with open(pinname, filemode) as pinf:
         pinf.write(data)
+
+
+def _looks_like_deep_folder(data) -> bool:
+    # TODO: dirty! Anyway, why do we still have hash patterns???
+    if not isinstance(data, dict) or not data:
+        return False
+    for value in data.values():
+        try:
+            if len(value) != 64:
+                return False
+        except TypeError:
+            return False
+        try:
+            Checksum(value)
+        except Exception:
+            return False
+    return True
 
 
 def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN):
@@ -96,8 +113,12 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
                     os.symlink(v, pin)
                     continue
                 elif FILESYSTEM[pin]["mode"] == "directory":
+                    fs_entry = FILESYSTEM[pin]
+                    deep = fs_entry.get("hash_pattern") == {"*": "##"}
+                    if not deep:
+                        deep = _looks_like_deep_folder(v)
                     write_to_directory(
-                        pin, v, cleanup=False, deep=False, text_only=False
+                        pin, v, cleanup=False, deep=deep, text_only=False
                     )
                     env[pin] = pin
                     continue
