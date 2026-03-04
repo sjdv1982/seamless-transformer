@@ -11,6 +11,7 @@ from .parsing import fill_checksum_arguments
 
 from .message import message as msg
 
+
 def load(yamlfile):
     """Load interface from YAML file"""
     with open(yamlfile) as f:
@@ -42,30 +43,36 @@ def locate_files(command):
 
     args1 = [Path(command[0]), Path(command[0]).expanduser()]
     for arg1 in args1:
-        execarg1 = subprocess.getoutput("which {}".format(arg1.as_posix())).strip()
-        if execarg1:
-            msg(
-                2,
-                "first argument '{}' is in PATH, map to '{}'".format(
-                    arg1.as_posix(), execarg1
-                ),
-            )
-            execarg1dir = os.path.split(execarg1)[0]
-            if (
-                not execarg1dir.endswith("/bin")
-                and not execarg1dir.endswith("/sbin")
-                and not execarg1dir.endswith("/usr")
-            ):
+        if arg1.as_posix().strip() in ("conda",):
+            is_posix = True
+        else:
+            execarg1 = subprocess.getoutput("which {}".format(arg1.as_posix())).strip()
+            if execarg1:
                 msg(
-                    1,
-                    "first argument '{}' does not seem a POSIX tool. Explicitly upload it as '{}'".format(  # pylint: disable=line-too-long
+                    2,
+                    "first argument '{}' is in PATH, map to '{}'".format(
                         arg1.as_posix(), execarg1
                     ),
                 )
-                mapped_execarg = execarg1
+                execarg1dir = os.path.split(execarg1)[0]
+                if (
+                    not execarg1dir.endswith("/bin")
+                    and not execarg1dir.endswith("/sbin")
+                    and not execarg1dir.endswith("/usr")
+                ):
+                    msg(
+                        1,
+                        "first argument '{}' does not seem a POSIX tool. Explicitly upload it as '{}'".format(  # pylint: disable=line-too-long
+                            arg1.as_posix(), execarg1
+                        ),
+                    )
+                    mapped_execarg = execarg1
 
-            arg1 = Path(execarg1)
-        else:
+                arg1 = Path(execarg1)
+                is_posix = False
+            else:
+                is_posix = True
+        if is_posix:
             mapped_execarg = arg1.as_posix()
 
         if arg1.exists():
