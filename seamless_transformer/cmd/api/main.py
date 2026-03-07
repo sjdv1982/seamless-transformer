@@ -76,6 +76,19 @@ def _parse_scoped_value(value: str, label: str) -> tuple[str, str | None]:
     return value, None
 
 
+def _load_input_file(path: str) -> list[str]:
+    if not os.path.isfile(path):
+        err(f"--input-file '{path}' is not a file")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError as exc:
+        err(f"--input-file '{path}' could not be read: {exc}")
+
+    return [line.strip() for line in lines if line.strip()]
+
+
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -186,6 +199,15 @@ def _main(argv: list[str] | None = None) -> int:
     """,
         action="append",
         dest="extra_inputs",
+    )
+    parser.add_argument(
+        "-I",
+        "--input-file",
+        help="""Add file paths listed one per line from FILE as inputs.
+
+    Lines may be empty; empty lines are ignored.
+    """,
+        dest="input_files",
     )
 
     parser.add_argument(
@@ -444,20 +466,26 @@ def _main(argv: list[str] | None = None) -> int:
             argtypes_initial.update(argtypes_guess)
             argtypes_initial.update(argtypes_temp)
 
-    argtypes_extra_inputs = {}
+    extra_inputs: list[str] = []
     if args.extra_inputs:
+        extra_inputs.extend(args.extra_inputs)
+    if args.input_files:
+        extra_inputs.extend(_load_input_file(args.input_files))
+
+    argtypes_extra_inputs = {}
+    if extra_inputs:
         argtypes_extra_inputs = guess_arguments(
-            args.extra_inputs,
+            extra_inputs,
             overrule_ext=True,
             overrule_no_ext=True,
         )
-        for inp in args.extra_inputs:
+        for inp in extra_inputs:
             assert inp in argtypes_extra_inputs
             if (
                 argtypes_extra_inputs[inp] == "value"
                 or argtypes_extra_inputs[inp]["type"] == "value"
             ):
-                err(f"--input argument '{inp}': file/directory does not exist")
+                err(f"input argument '{inp}': file/directory does not exist")
 
     argtypesstr = json.dumps(unchecksum(argtypes_initial), sort_keys=False, indent=2)
     msg(1, "initial argtypes dict:\n" + argtypesstr)
