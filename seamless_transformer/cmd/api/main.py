@@ -877,6 +877,17 @@ def _main(argv: list[str] | None = None) -> int:
 
     ################################################################
 
+    conda_environment = args.conda_environment
+    if conda_environment is None:
+        conda_environment = interface_data.get("environment", {}).get(
+            "conda_environment"
+        )
+
+    environment = {}
+    if conda_environment is not None:
+        msg(1, f'Set conda environment to "{conda_environment}"')
+        environment["conda_environment"] = conda_environment
+
     transformation_checksum, transformation_dict = prepare_bash_transformation(
         commandstring,
         checksum_dict,
@@ -884,8 +895,7 @@ def _main(argv: list[str] | None = None) -> int:
         make_executables=make_executables,
         capture_stdout=capture_stdout,
         result_targets=result_targets,
-        ### TODO environment=env._to_lowlevel(bash=True),
-        environment={},  ###
+        environment=environment,
         variables=variables,
         meta=meta,
         dry_run=(args.dry_run and not args.upload),

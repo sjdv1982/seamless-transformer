@@ -111,8 +111,13 @@ def run_transformation_dict(
     driver_active = bool(meta.get("driver")) if isinstance(meta, dict) else False
 
     env_checksum0 = transformation.get("__env__")
+    env_dict = {}
     if env_checksum0 is not None:
-        raise NotImplementedError("Environments are not supported yet")
+        env_buffer = Checksum(env_checksum0).resolve()
+        if env_buffer is not None:
+            env_dict = env_buffer.get_value("plain")
+        if not isinstance(env_dict, dict):
+            env_dict = {}
 
     inputs, output_name, output_celltype, output_subcelltype = (
         get_transformation_inputs_output(transformation)
@@ -169,8 +174,8 @@ def run_transformation_dict(
         namespace["execute_bash"] = execute_bash
         namespace["bashcode"] = code
         pins = namespace.get("PINS", {})
-        namespace["pins_"] = sorted(k for k in pins.keys() if k != "conda_environment_")
-        namespace["conda_environment_"] = pins.get("conda_environment_", "")
+        namespace["pins_"] = sorted(pins.keys())
+        namespace["conda_environment_"] = env_dict.get("conda_environment", "")
         code = (
             f"{output_name} = execute_bash("
             "bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN)"
