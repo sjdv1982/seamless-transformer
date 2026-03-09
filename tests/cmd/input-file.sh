@@ -1,1 +1,1 @@
-seamless-run -vvv -I extra-inputs.txt 'cat data/b.txt'
+seamless-run -vvv -I extra-inputs.txt 'echo OK; cat data/b.txt'
