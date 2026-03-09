@@ -86,7 +86,15 @@ def _load_input_file(path: str) -> list[str]:
     except OSError as exc:
         err(f"--input-file '{path}' could not be read: {exc}")
 
-    return [line.strip() for line in lines if line.strip()]
+    result = []
+    pathdir = os.path.dirname(path)
+    for line in lines:
+        line = line.strip()
+        if line.startswith("/"):
+            result.append(line)
+        else:
+            result.append(os.path.join(pathdir, line))
+    return result
 
 
 def _main(argv: list[str] | None = None) -> int:
