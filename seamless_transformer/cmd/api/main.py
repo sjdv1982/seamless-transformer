@@ -93,7 +93,7 @@ def _load_input_file(path: str) -> list[str]:
         if line.startswith("/"):
             result.append(line)
         else:
-            result.append(os.path.join(pathdir, line))
+            result.append(os.path.normpath(os.path.join(pathdir, line)))
     return result
 
 
