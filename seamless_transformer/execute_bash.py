@@ -149,9 +149,22 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
 trap 'jobs -p | xargs -r kill' EXIT
 """
         if conda_environment_:
-            CONDA_ROOT = os.environ.get("CONDA_ROOT", None)
+            conda_root = os.environ.get("CONDA_ROOT")
+            if not conda_root:
+                try:
+                    conda_root = subprocess.check_output(
+                        ["conda", "info", "--base"],
+                        stderr=subprocess.DEVNULL,
+                    ).decode().strip()
+                except Exception:
+                    pass
+            if not conda_root:
+                raise RuntimeError(
+                    "Cannot activate conda environment: "
+                    "could not determine conda root directory"
+                )
             bash_header += f"""
-source {CONDA_ROOT}/etc/profile.d/conda.sh
+source {conda_root}/etc/profile.d/conda.sh
 conda activate {conda_environment_}
 """
 
