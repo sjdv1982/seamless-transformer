@@ -333,11 +333,59 @@ class _CommandVisitor(bashlex.ast.nodevisitor):
         return True
 
 
+def get_primary_pipeline(
+    bashtrees: list, commands: "list[Command]", primary_index: int
+) -> tuple[int, int]:
+    """Find the pipeline (or command node) containing commands[primary_index].
+
+    Returns (start_idx, end_idx) as indices into commands, where
+    commands[start_idx:end_idx] are all commands in the same pipeline.
+
+    Same logic as get_commands for primary_index=0, but position-driven
+    instead of always taking the first element.
+    """
+    target_start = commands[primary_index].start
+
+    # Start from whichever top-level tree contains the target command.
+    first = bashtrees[0]
+    for bashtree in bashtrees:
+        if bashtree.pos[0] <= target_start < bashtree.pos[1]:
+            first = bashtree
+            break
+
+    # Peel one layer of compound/list — same as get_commands, but find the
+    # element containing target_start rather than always taking index 0.
+    if first.kind == "compound" and first.list:
+        for child in first.list:
+            if hasattr(child, "pos") and child.pos[0] <= target_start < child.pos[1]:
+                first = child
+                break
+    elif first.kind == "list" and first.parts:
+        for part in first.parts:
+            if hasattr(part, "pos") and part.pos[0] <= target_start < part.pos[1]:
+                first = part
+                break
+
+    if first.kind == "command":
+        return (primary_index, primary_index + 1)
+    if first.kind == "pipeline":
+        pipe_start, pipe_end = first.pos
+        start_idx = end_idx = None
+        for i, com in enumerate(commands):
+            if com.start >= pipe_start and com.end <= pipe_end:
+                if start_idx is None:
+                    start_idx = i
+                end_idx = i + 1
+        return (start_idx, end_idx)
+    return (primary_index, primary_index + 1)
+
+
 def get_commands(
     commandstring: str,
-) -> tuple[list[Command], int | None, bashlex.parser.ast.node | None]:
+    primary: int = 0,
+) -> tuple[list[Command], tuple[int, int] | None, bashlex.parser.ast.node | None]:
     """Parse a bash command string into a list of Command instances.
-    The length of the first bash pipeline is also returned.
+    The range of the primary bash pipeline is also returned as (start, end) indices.
     If the command is a pipeline between parentheses, its redirect is returned as well.
     """
     try:
@@ -348,7 +396,7 @@ def get_commands(
     for bashtree in bashtrees:
         visitor.visit(bashtree)
     commands = sorted(visitor.commands, key=lambda command: command.start)
-    first_pipeline = None
+    primary_pipeline = None
     pipeline_redirect = None
     if len(bashtrees):
         first = bashtrees[0]
@@ -364,17 +412,9 @@ def get_commands(
         elif first.kind == "list" and len(first.parts):
             first = first.parts[0]
 
-        if first.kind == "command":
-            first_pipeline = 1
-        elif first.kind == "pipeline":
-            end = first.pos[1]
-            for comnr, com in enumerate(commands):
-                if com.start > end:
-                    first_pipeline = comnr
-                    break
-            else:
-                first_pipeline = len(commands)
-    return commands, first_pipeline, pipeline_redirect
+        if commands:
+            primary_pipeline = get_primary_pipeline(bashtrees, commands, primary)
+    return commands, primary_pipeline, pipeline_redirect
 
 
 class _RedirectionVisitor(bashlex.ast.nodevisitor):

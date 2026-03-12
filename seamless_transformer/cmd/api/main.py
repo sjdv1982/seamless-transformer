@@ -244,6 +244,20 @@ def _main(argv: list[str] | None = None) -> int:
     )
 
     parser.add_argument(
+        "--prologue",
+        action="append",
+        dest="prologues",
+        help="Prepend CMD literally to the bash command (repeatable).",
+    )
+
+    parser.add_argument(
+        "--primary",
+        type=int,
+        default=1,
+        help="Treat the N-th command (1-indexed) as the primary command for argtype analysis.",
+    )
+
+    parser.add_argument(
         "-y",
         "--yes",
         dest="auto_confirm",
@@ -365,6 +379,8 @@ def _main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args()
 
+    primary_index = args.primary - 1  # convert to 0-indexed
+
     if args.dry_run:
         if args.qsubmit:
             err("--qsubmit and --dry cannot be used together")
@@ -453,9 +469,12 @@ def _main(argv: list[str] | None = None) -> int:
     else:
         commandstring = " ".join(command)
 
-    commands, first_pipeline, pipeline_redirect = get_commands(commandstring)
+    commands, primary_pipeline, pipeline_redirect = get_commands(commandstring, primary=primary_index)
 
-    first_command = commands[0]
+    if primary_index >= len(commands):
+        err(f"--primary {args.primary} but only {len(commands)} command(s) found")
+
+    first_command = commands[primary_index]
 
     (
         interface_argindex,
@@ -491,9 +510,11 @@ def _main(argv: list[str] | None = None) -> int:
             overrule_no_ext = True
 
         try:
-            if first_pipeline:
-                for com in commands[1:first_pipeline]:
-                    first_pipeline_words += com.words
+            if primary_pipeline:
+                pp_start, pp_end = primary_pipeline
+                for com in commands[pp_start:pp_end]:
+                    if com is not first_command:
+                        first_pipeline_words += com.words
             argtypes_guess = guess_arguments(
                 first_pipeline_words,
                 overrule_ext=overrule_ext,
@@ -618,7 +639,7 @@ def _main(argv: list[str] | None = None) -> int:
             msg(3, f"Updated interface data: {json.dumps(interface_data, indent=2)}")
 
     for commandnr, command in enumerate(commands):
-        if commandnr > 0:
+        if commandnr != primary_index:
             msg(1, f"Command #{commandnr+1}: {command.commandstring}")
             (
                 interface_argindex,
@@ -644,12 +665,12 @@ def _main(argv: list[str] | None = None) -> int:
             new_shim = _new_interface_data.get("shim")
             if new_shim is not None:
                 shim = new_shim
-            update_interface_data(_new_interface_data, first=(commandnr == 0))
+            update_interface_data(_new_interface_data, first=(commandnr == primary_index))
 
-        if commandnr == 0:
+        if commandnr == primary_index:
             interface_py_file = None
         if interface_py_file is not None:
-            if commandnr == 0:
+            if commandnr == primary_index:
                 command_words = mapped_first_pipeline
             else:
                 command_words = copy(command.words)
@@ -667,7 +688,7 @@ def _main(argv: list[str] | None = None) -> int:
             new_shim = _new_interface_data.get("shim")
             if new_shim is not None:
                 shim = new_shim
-            update_interface_data(_new_interface_data, first=(commandnr == 0))
+            update_interface_data(_new_interface_data, first=(commandnr == primary_index))
 
             if shim:
                 wordnode = command.wordnodes[interface_argindex]
@@ -874,6 +895,9 @@ def _main(argv: list[str] | None = None) -> int:
         commandstring = (
             commandstring[: node.pos[0]] + word + commandstring[node.pos[1] :]
         )
+
+    if args.prologues:
+        commandstring = "; ".join(args.prologues) + "; " + commandstring
 
     msg(1, "bash command:\n", commandstring, "\n")
 
