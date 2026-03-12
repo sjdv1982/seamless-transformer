@@ -124,3 +124,24 @@ def test_cmd_input_file(tmp_path: Path) -> None:
     # Input paths from file should appear in argtypes dictionary preparation logs.
     assert '"data/a.txt": {' in got
     assert '"data/b.txt": {' in got
+
+
+def test_cmd_var_injection(tmp_path: Path) -> None:
+    _require_cmd_tests_enabled()
+    _ensure_cmd_available("seamless-run")
+    _skip_if_docker_unusable()
+    cmd_dir = _copy_cmd_fixture(tmp_path)
+
+    value = "seamless-var-integration-ok"
+    script = cmd_dir / "print_env.py"
+    script.write_text(
+        "import os\nprint(os.environ['SEAMLESS_VAR_TEST'])\n", encoding="utf-8"
+    )
+    proc = _run(
+        ["seamless-run", "--var", f"SEAMLESS_VAR_TEST={value}", "python", "print_env.py"],
+        cwd=cmd_dir,
+        timeout=60,
+        env=_isolated_env(tmp_path),
+    )
+    got = proc.stdout
+    assert value in got

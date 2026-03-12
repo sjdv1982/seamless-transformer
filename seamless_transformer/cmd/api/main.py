@@ -7,6 +7,7 @@ from copy import copy
 import sys
 import os
 import json
+import re
 import traceback
 import threading
 import logging
@@ -95,6 +96,20 @@ def _load_input_file(path: str) -> list[str]:
         else:
             result.append(os.path.normpath(os.path.join(pathdir, line)))
     return result
+
+
+def _parse_var_spec(spec: str) -> tuple[str, str]:
+    if "=" not in spec:
+        err(f"Invalid --var '{spec}': expected NAME=VALUE")
+    name, value = spec.split("=", 1)
+    if not name:
+        err(f"Invalid --var '{spec}': variable name is empty")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        err(
+            f"Invalid --var '{spec}': variable name '{name}' "
+            "must match [A-Za-z_][A-Za-z0-9_]*"
+        )
+    return name, value
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -216,6 +231,16 @@ def _main(argv: list[str] | None = None) -> int:
     Lines may be empty; empty lines are ignored.
     """,
         dest="input_files",
+    )
+    parser.add_argument(
+        "--var",
+        action="append",
+        dest="explicit_vars",
+        help="""Inject a variable input NAME=VALUE (repeatable).
+
+    The injected variable is part of the transformation identity and is
+    available to the bash command environment.
+    """,
     )
 
     parser.add_argument(
@@ -377,6 +402,16 @@ def _main(argv: list[str] | None = None) -> int:
     if len(command) == 0:
         parser.print_usage()  # TODO: add to usage message
         return 1
+
+    cli_variables = {}
+    if args.explicit_vars:
+        for varspec in args.explicit_vars:
+            varname, varvalue = _parse_var_spec(varspec)
+            if varname in cli_variables and cli_variables[varname][0] != varvalue:
+                err(
+                    f"Variable '{varname}' specified multiple times with different values"
+                )
+            cli_variables[varname] = (varvalue, "str")
 
     ################################################################
 
@@ -845,7 +880,7 @@ def _main(argv: list[str] | None = None) -> int:
     ################################################################
 
     command = commandstring.split()
-    variables = None
+    variables = cli_variables.copy() if cli_variables else None
     if len(commands) == 1:
         found_canonical = False
         canonical = interface_data.get("canonical", [])
@@ -864,11 +899,19 @@ def _main(argv: list[str] | None = None) -> int:
                 break
             else:
                 msg(1, f"Found canonical command match:\n  {canon['command']}")
-                variables = {}
+                variables_from_canonical = {}
                 for w1, w2 in zip(canon_cmd, command):
                     if w1[0] == "$" and w1[1:] in varnames:
                         varname = w1[1:]
-                        variables[varname] = (w2, vartypes[varname])
+                        variables_from_canonical[varname] = (w2, vartypes[varname])
+                if cli_variables:
+                    for varname in cli_variables:
+                        if varname in variables_from_canonical:
+                            err(
+                                f"Variable '{varname}' is already defined by canonical command matching"
+                            )
+                    variables_from_canonical.update(cli_variables)
+                variables = variables_from_canonical
                 msg(2, f"Variables:\n  {variables}")
                 commandstring = canon["command"]
                 found_canonical = True
