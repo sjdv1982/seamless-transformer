@@ -4,6 +4,7 @@ from seamless.transformer import direct, delayed, spawn
 import seamless.config
 import seamless
 
+seamless.config.set_stage("database")
 seamless.config.init()
 
 DELAY = 0.5

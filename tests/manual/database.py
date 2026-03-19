@@ -4,6 +4,7 @@ from seamless.transformer import direct, delayed
 import seamless
 import seamless.config
 
+seamless.config.set_stage("database")
 seamless.config.init()
 
 

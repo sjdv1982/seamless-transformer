@@ -33,9 +33,11 @@ def test_calc_pi():
 
     seed = 0
     np.random.seed(seed)
-    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "1000"))
+    # ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "1000")) # on a compute cluster
+    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "250"))  # on one machine
     seeds = np.random.randint(0, 999999, ntrials)
-    ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "300000000"))
+    # ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "300000000"))  # on a compute cluster
+    ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "30000000"))  # on one machine
 
     start = time.perf_counter()
     tasks = [calc_pi(seeds[idx], ndots).start() for idx in range(ntrials)]

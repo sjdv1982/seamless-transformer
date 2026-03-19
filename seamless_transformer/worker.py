@@ -9,7 +9,7 @@ TODO: implement shared memory refcount
 Would replace the current prefetch+write shared mem + worker download+confirm+cleanup cycle,
   which is transport-oriented, not resource-oriented.
 Current mechanism for worker upload untouched.
-Would be a seamless-base (buffer cache) feature.
+Would be a seamless-core (buffer cache) feature.
 """
 
 from __future__ import annotations
@@ -478,6 +478,12 @@ def _checksum_resolve(self: Checksum, celltype=None):
         _request_parent_sync("downloaded", {"pointer": pointer})
 
 
+async def _checksum_resolution(self: Checksum, celltype=None):
+    """Worker-safe async checksum resolver that proxies data access via parent IPC."""
+
+    return _checksum_resolve(self, celltype)
+
+
 def _patch_worker_primitives() -> None:
     global _primitives_patched, _dummy_buffer_cache
     if _primitives_patched:
@@ -509,15 +515,16 @@ def _patch_worker_primitives() -> None:
     _buffer_class.get_buffer_cache = _worker_buffer_cache  # type: ignore[assignment]
 
     # Checksum refcounting is disabled inside a worker.
-    Checksum.incref = lambda self: None  # type: ignore[assignment]
-    Checksum.decref = lambda self: None  # type: ignore[assignment]
+    Checksum.incref = lambda self, *args, **kwargs: None  # type: ignore[assignment]
+    Checksum.decref = lambda self, *args, **kwargs: None  # type: ignore[assignment]
     Checksum.tempref = (  # type: ignore[assignment]
-        lambda self, interest=128.0, fade_factor=2.0, fade_interval=2.0: None
+        lambda self, interest=128.0, fade_factor=2.0, fade_interval=2.0, **kwargs: None
     )
     Buffer.incref = _buffer_incref  # type: ignore[assignment]
     Buffer.decref = _buffer_decref  # type: ignore[assignment]
     Buffer.tempref = _buffer_tempref  # type: ignore[assignment]
     Checksum.resolve = _checksum_resolve  # type: ignore[assignment]
+    Checksum.resolution = _checksum_resolution  # type: ignore[assignment]
     _primitives_patched = True
 
 
@@ -1750,7 +1757,9 @@ class _WorkerManager:
                                             )
                                         else:
                                             dep_futures.fat = (
-                                                dask_client.ensure_fat_future(dep_futures)
+                                                dask_client.ensure_fat_future(
+                                                    dep_futures
+                                                )
                                             )
                                     inputs[pinname] = TransformationInputSpec(
                                         name=pinname,
@@ -1788,7 +1797,9 @@ class _WorkerManager:
                                     )
                                 else:
                                     input_futures[pinname] = (
-                                        dask_client.get_fat_checksum_future(checksum_hex)
+                                        dask_client.get_fat_checksum_future(
+                                            checksum_hex
+                                        )
                                     )
                             submission.inputs = inputs
                             submission.input_futures = input_futures

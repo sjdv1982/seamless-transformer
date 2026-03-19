@@ -56,8 +56,10 @@ calc_pi_all.driver = True
 
 def test_calc_pi():
     seed = 0
-    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "1000"))
-    ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "300000000"))
+    # ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "1000")) # on a compute cluster
+    ntrials = int(os.environ.get("SEAMLESS_TEST_PI_TRIALS", "250"))  # on one machine
+    # ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "300000000"))  # on a compute cluster
+    ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "30000000"))  # on one machine
     checksum_only = False
     result = calc_pi_all(seed, ntrials, checksum_only=checksum_only, ndots=ndots)
     print(result)

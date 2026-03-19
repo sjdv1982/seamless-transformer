@@ -1,4 +1,4 @@
-- project: myproject
+- project: seamless-test
 - execution: remote
 - remote: daskserver
 # for pure-dask test:
@@ -7,6 +7,5 @@
 # - cluster: local
 
 - stage fingertip:
-    - execution: process
-    - remote: daskserver
-    - persistent: false
+      - execution: process
+      - persistent: false

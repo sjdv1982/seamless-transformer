@@ -1,24 +1,27 @@
-- project: myproject
+- project: seamless-test
 - execution: remote
 
 - stage jobserver-test:
-          - execution: remote
-          - remote: jobserver
+    - execution: remote
+    - remote: jobserver
+
+- stage database:
+    - execution: process
 
 - stage simple-remote:
-          - execution: remote
-          - remote: daskserver
+    - execution: remote
+    - remote: daskserver
 
 - stage spawn-config:
-          - execution: spawn
+    - execution: spawn
 
 - stage spawn-persistent:
-          - execution: spawn
+    - execution: spawn
 
 - stage persistent-test:
-          - execution: process
-          - persistent: true
+    - execution: process
+    - persistent: true
 
 - stage fingertip:
-          - execution: process
-          - persistent: true
+    - execution: process
+    - persistent: true
