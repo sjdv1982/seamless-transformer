@@ -3,7 +3,7 @@
 - remote: daskserver
 # for pure-dask test:
 # - persistent: false
-# .seamless.yaml: define a cluster, e.g.
+# seamless.profile.yaml: define a cluster, e.g.
 # - cluster: local
 
 - stage fingertip:

@@ -50,7 +50,7 @@ def _copy_cmd_fixture(tmp_path: Path) -> Path:
     # Newer seamless-run looks for `.SEAMLESS.yaml`; keep the legacy lowercase files too.
     (dest / ".SEAMLESS.yaml").write_text(cfg, encoding="utf-8")
     (dest / "SEAMLESS.yaml").write_text(cfg, encoding="utf-8")
-    (dest / ".seamless.yaml").write_text("- cluster: null\n", encoding="utf-8")
+    (dest / "seamless.profile.yaml").write_text("- cluster: null\n", encoding="utf-8")
     (dest / "seamless.yaml").write_text("- project: cmd-test\n- execution: process\n", encoding="utf-8")
     return dest
 
