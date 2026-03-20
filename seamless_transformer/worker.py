@@ -821,11 +821,10 @@ class _WorkerManager:
         _run_coro(lambda: self.loop.shutdown_asyncgens(), 1.0 if wait else 0.2)
         if _DEBUG_SHUTDOWN:
             print(
-                "[_WorkerManager.close] asyncgens closed, shutting down executor",
+                "[_WorkerManager.close] asyncgens closed, draining pending tasks",
                 file=sys.stderr,
                 flush=True,
             )
-        _run_coro(lambda: self.loop.shutdown_default_executor(), 1.0 if wait else 0.2)
 
         async def _drain_pending_tasks():
             current = asyncio.current_task(loop=self.loop)
@@ -850,6 +849,12 @@ class _WorkerManager:
         except Exception:
             pass
         try:
+            # The worker-manager loop uses a custom daemon default executor for
+            # blocking pipe I/O (Connection.recv/send). Cancelling the asyncio
+            # tasks that await run_in_executor() does not stop those blocking
+            # calls, and on Python 3.10 shutdown_default_executor() can hang
+            # forever waiting to join the threads. Shut the daemon executor
+            # down non-blockingly instead and rely on process teardown.
             self._executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
