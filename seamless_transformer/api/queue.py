@@ -212,22 +212,9 @@ def main(argv: list[str] | None = None) -> int:
     if not set_remote_clients_from_env(include_dask=True):
         from seamless_config import change_stage, set_workdir
         from seamless_config.config_files import load_config_files
-        from seamless_config.select import (
-            select_execution,
-            get_selected_cluster,
-        )
 
         set_workdir(os.getcwd())
         load_config_files()
-        if args.dry_run or args.qsubmit:
-            import seamless_remote.database_remote
-
-            seamless_remote.database_remote.DISABLED = True
-            select_execution("process")
-            if get_selected_cluster() is None:
-                print("--upload or --qsubmit require a cluster", file=sys.stderr)
-                exit(1)
-
         change_stage()
         # /CONFIG
     queue_file = _queue_file_from_env(args.quiet)

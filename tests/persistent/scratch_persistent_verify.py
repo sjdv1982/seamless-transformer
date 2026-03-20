@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -34,33 +33,32 @@ async def _assert_rev_present(result_checksum: Checksum, tf_checksum: Checksum) 
         )
 
 
-async def _undo_transformation(tf_checksum: Checksum, result_checksum: Checksum) -> None:
+async def _undo_transformation(
+    tf_checksum: Checksum, result_checksum: Checksum
+) -> None:
     from seamless_remote import database_remote
 
     ok = await database_remote.undo_transformation_result(tf_checksum, result_checksum)
     if ok is False:
-        raise RuntimeError("Failed to contest transformation result")
+        raise RuntimeError(
+            "Failed to undo transformation result, could no set it to 'irreproducible'"
+        )
 
 
 def _run_cli(
     tf_checksum: Checksum, *, fingertip: bool, workdir: Path
 ) -> subprocess.CompletedProcess[str]:
-    exe = "seamless-run-transformation"
-    cmd = [exe, tf_checksum.hex(), "--scratch", "--stage", "persistent"]
+    cmd = [
+        sys.executable,
+        "-m",
+        "seamless_transformer.api.run_transformation",
+        tf_checksum.hex(),
+        "--scratch",
+        "--stage",
+        "persistent-test",
+    ]
     if fingertip:
         cmd.append("--fingertip")
-    if shutil.which(exe) is None:
-        cmd = [
-            sys.executable,
-            "-m",
-            "seamless_transformer.api.run_transformation",
-            tf_checksum.hex(),
-            "--scratch",
-            "--stage",
-            "persistent",
-        ]
-        if fingertip:
-            cmd.append("--fingertip")
     return subprocess.run(
         cmd,
         cwd=workdir,
@@ -76,7 +74,7 @@ def main() -> None:
         try:
             workdir = Path(__file__).resolve().parent.parent
             seamless.config.set_workdir(workdir)
-            seamless.config.set_stage("persistent")
+            seamless.config.set_stage("persistent-test")
         except _config.ConfigurationError as exc:
             _skip(f"Persistent scratch requires configured remote: {exc}")
 
@@ -87,7 +85,10 @@ def main() -> None:
 
         if not buffer_remote.has_write_server() or not buffer_remote.has_read_server():
             _skip("Buffer read/write servers must be configured")
-        if not database_remote.has_write_server() or not database_remote.has_read_server():
+        if (
+            not database_remote.has_write_server()
+            or not database_remote.has_read_server()
+        ):
             _skip("Database read/write servers must be configured")
 
         state_path = os.environ.get("SEAMLESS_SCRATCH_PERSISTENT_PATH")
@@ -124,7 +125,9 @@ def main() -> None:
         except CacheMissError:
             pass
         else:
-            raise RuntimeError("Scratch result unexpectedly resolvable before input test")
+            raise RuntimeError(
+                "Scratch result unexpectedly resolvable before input test"
+            )
 
         @delayed
         def add_one(x) -> float:
@@ -201,9 +204,7 @@ def main() -> None:
             )
             raise RuntimeError(f"CLI failed with --fingertip:\n{output}")
         output_lines = [
-            line.strip()
-            for line in (proc.stdout or "").splitlines()
-            if line.strip()
+            line.strip() for line in (proc.stdout or "").splitlines() if line.strip()
         ]
         if not output_lines:
             raise RuntimeError("CLI produced no checksum output")

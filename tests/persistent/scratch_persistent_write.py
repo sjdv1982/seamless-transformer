@@ -42,7 +42,7 @@ def main() -> None:
         try:
             workdir = Path(__file__).resolve().parent.parent
             seamless.config.set_workdir(workdir)
-            seamless.config.set_stage("persistent")
+            seamless.config.set_stage("persistent-test")
         except _config.ConfigurationError as exc:
             _skip(f"Persistent scratch requires configured remote: {exc}")
 
@@ -53,7 +53,10 @@ def main() -> None:
 
         if not buffer_remote.has_write_server() or not buffer_remote.has_read_server():
             _skip("Buffer read/write servers must be configured")
-        if not database_remote.has_write_server() or not database_remote.has_read_server():
+        if (
+            not database_remote.has_write_server()
+            or not database_remote.has_read_server()
+        ):
             _skip("Database read/write servers must be configured")
 
         @delayed
