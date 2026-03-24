@@ -55,6 +55,9 @@ except Exception:  # pragma: no cover - optional dependency
     select_subproject = None
 
 
+CONFIG_FILENAMES = ("seamless.yaml", "seamless.profile.yaml")
+
+
 def extract_dunder(transformation_dict):
     core_keys = {"__language__", "__output__", "__as__", "__format__"}
     return {
@@ -110,6 +113,17 @@ def _parse_var_spec(spec: str) -> tuple[str, str]:
             "must match [A-Za-z_][A-Za-z0-9_]*"
         )
     return name, value
+
+
+def _require_config_file(workdir: str) -> None:
+    config_dir = pathlib.Path(workdir).resolve()
+    for filename in CONFIG_FILENAMES:
+        if (config_dir / filename).is_file():
+            return
+    filenames = " or ".join(CONFIG_FILENAMES)
+    raise ValueError(
+        f"No {filenames} found in '{config_dir}' (use --local to bypass this check)"
+    )
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -399,6 +413,12 @@ def _main(argv: list[str] | None = None) -> int:
     msg(1, "Verbosity set to {}".format(verbosity))
     msg(1, "seamless-run {}".format(__version__))
     msg(3, "Command:", json.dumps(command, indent=4))
+
+    if not args.local:
+        try:
+            _require_config_file(os.getcwd())
+        except ValueError as exc:
+            err(str(exc))
 
     if args.project:
         if select_project is None:
@@ -802,36 +822,38 @@ def _main(argv: list[str] | None = None) -> int:
     based on the args
     """
     from seamless_config.extern_clients import set_remote_clients_from_env
+    from seamless_config import change_stage, set_workdir
+    from seamless_config.config_files import load_config_files
+    from seamless_config.select import (
+        select_execution,
+        get_selected_cluster,
+        get_execution,
+    )
 
     include_dask = True
     if args.dry_run or args.qsubmit or args.local:
         include_dask = False
-    if not set_remote_clients_from_env(include_dask=include_dask):
-        from seamless_config import change_stage, set_workdir
-        from seamless_config.config_files import load_config_files
-        from seamless_config.select import (
-            select_execution,
-            get_selected_cluster,
-            get_execution,
-        )
-
+    try:
         set_workdir(os.getcwd())
-        load_config_files()
-        if args.dry_run or args.qsubmit:
-            import seamless_remote.database_remote
+        if not set_remote_clients_from_env(include_dask=include_dask):
+            load_config_files()
+            if args.dry_run or args.qsubmit:
+                import seamless_remote.database_remote
 
-            seamless_remote.database_remote.DISABLED = True
-            select_execution("process")
-            if args.upload or args.qsubmit:
-                if get_selected_cluster() is None:
-                    err(f"--upload or --qsubmit require a cluster")
-        else:
-            if args.local:
-                if get_execution() == "remote":
-                    select_execution("process")
+                seamless_remote.database_remote.DISABLED = True
+                select_execution("process")
+                if args.upload or args.qsubmit:
+                    if get_selected_cluster() is None:
+                        err(f"--upload or --qsubmit require a cluster")
+            else:
+                if args.local:
+                    if get_execution() == "remote":
+                        select_execution("process")
 
-        change_stage()
+            change_stage()
         # /CONFIG
+    except ValueError as exc:
+        err(str(exc))
 
     max_upload_files = os.environ.get("SEAMLESS_MAX_UPLOAD_FILES", "400")
     max_upload_files = int(max_upload_files)
