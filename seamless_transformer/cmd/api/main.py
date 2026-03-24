@@ -122,8 +122,17 @@ def _require_config_file(workdir: str) -> None:
             return
     filenames = " or ".join(CONFIG_FILENAMES)
     raise ValueError(
-        f"No {filenames} found in '{config_dir}' (use --local to bypass this check)"
+        f"No {filenames} found in '{config_dir}' "
+        "(use --local or set SEAMLESS_LOCAL=1 to bypass this check)"
     )
+
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    value = value.strip().lower()
+    return value not in ("", "0", "false", "no", "off")
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -414,7 +423,9 @@ def _main(argv: list[str] | None = None) -> int:
     msg(1, "seamless-run {}".format(__version__))
     msg(3, "Command:", json.dumps(command, indent=4))
 
-    if not args.local:
+    local_mode = args.local or _env_flag("SEAMLESS_LOCAL")
+
+    if not local_mode:
         try:
             _require_config_file(os.getcwd())
         except ValueError as exc:
@@ -831,7 +842,7 @@ def _main(argv: list[str] | None = None) -> int:
     )
 
     include_dask = True
-    if args.dry_run or args.qsubmit or args.local:
+    if args.dry_run or args.qsubmit or local_mode:
         include_dask = False
     try:
         set_workdir(os.getcwd())
@@ -846,7 +857,7 @@ def _main(argv: list[str] | None = None) -> int:
                     if get_selected_cluster() is None:
                         err(f"--upload or --qsubmit require a cluster")
             else:
-                if args.local:
+                if local_mode:
                     if get_execution() == "remote":
                         select_execution("process")
 
