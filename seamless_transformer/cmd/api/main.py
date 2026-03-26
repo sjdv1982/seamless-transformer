@@ -49,6 +49,11 @@ from seamless.checksum.json_ import json_dumps_bytes
 from seamless_transformer.transformation_utils import tf_get_buffer
 
 try:
+    from seamless_config import get_seamless_cache
+except Exception:  # pragma: no cover - optional dependency
+    get_seamless_cache = lambda: None
+
+try:
     from seamless_config.select import select_project, select_subproject
 except Exception:  # pragma: no cover - optional dependency
     select_project = None
@@ -123,16 +128,8 @@ def _require_config_file(workdir: str) -> None:
     filenames = " or ".join(CONFIG_FILENAMES)
     raise ValueError(
         f"No {filenames} found in '{config_dir}' "
-        "(use --local or set SEAMLESS_LOCAL=1 to bypass this check)"
+        "(set SEAMLESS_CACHE=/path/to/cache for quick-and-dirty persistent caching)"
     )
-
-
-def _env_flag(name: str) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return False
-    value = value.strip().lower()
-    return value not in ("", "0", "false", "no", "off")
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -363,8 +360,8 @@ def _main(argv: list[str] | None = None) -> int:
 
     parser.add_argument(
         "--local",
-        help="""Don't delegate the transformation to the assistant, but execute directly.
-    This is most useful for scripts that contain themselves seamless-run commands""",
+        help="""Don't delegate the transformation to a remote server, but execute in-process.
+    This is most useful for driver scripts that contain themselves seamless-run commands""",
         action="store_true",
     )
 
@@ -423,9 +420,10 @@ def _main(argv: list[str] | None = None) -> int:
     msg(1, "seamless-run {}".format(__version__))
     msg(3, "Command:", json.dumps(command, indent=4))
 
-    local_mode = args.local or _env_flag("SEAMLESS_LOCAL")
+    local_mode = args.local
+    cache_mode = get_seamless_cache() is not None
 
-    if not local_mode:
+    if not cache_mode:
         try:
             _require_config_file(os.getcwd())
         except ValueError as exc:
@@ -500,7 +498,9 @@ def _main(argv: list[str] | None = None) -> int:
     else:
         commandstring = " ".join(command)
 
-    commands, primary_pipeline, pipeline_redirect = get_commands(commandstring, primary=primary_index)
+    commands, primary_pipeline, pipeline_redirect = get_commands(
+        commandstring, primary=primary_index
+    )
 
     if primary_index >= len(commands):
         err(f"--primary {args.primary} but only {len(commands)} command(s) found")
@@ -696,7 +696,9 @@ def _main(argv: list[str] | None = None) -> int:
             new_shim = _new_interface_data.get("shim")
             if new_shim is not None:
                 shim = new_shim
-            update_interface_data(_new_interface_data, first=(commandnr == primary_index))
+            update_interface_data(
+                _new_interface_data, first=(commandnr == primary_index)
+            )
 
         if commandnr == primary_index:
             interface_py_file = None
@@ -719,7 +721,9 @@ def _main(argv: list[str] | None = None) -> int:
             new_shim = _new_interface_data.get("shim")
             if new_shim is not None:
                 shim = new_shim
-            update_interface_data(_new_interface_data, first=(commandnr == primary_index))
+            update_interface_data(
+                _new_interface_data, first=(commandnr == primary_index)
+            )
 
             if shim:
                 wordnode = command.wordnodes[interface_argindex]

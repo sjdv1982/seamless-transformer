@@ -32,32 +32,33 @@ def test_main_requires_config_before_stage(monkeypatch, tmp_path):
     assert not stage_calls
 
 
-def test_main_local_bypasses_config_requirement(monkeypatch):
+def test_main_local_still_requires_config(monkeypatch):
     called = False
 
     def fake_require_config_file(workdir):
         nonlocal called
         called = True
-        raise AssertionError("config detection should be skipped in --local mode")
+        raise RuntimeError("config check should still run in --local mode")
 
     monkeypatch.setattr(cmd_main, "_require_config_file", fake_require_config_file)
     monkeypatch.setattr(sys, "argv", ["seamless-run", "--local"])
 
-    assert cmd_main._main() == 1
-    assert called is False
+    with pytest.raises(RuntimeError, match="still run in --local mode"):
+        cmd_main._main()
+    assert called is True
 
 
-def test_main_seamless_local_env_bypasses_config_requirement(monkeypatch):
+def test_main_seamless_cache_env_bypasses_config_requirement(monkeypatch):
     called = False
 
     def fake_require_config_file(workdir):
         nonlocal called
         called = True
         raise AssertionError(
-            "config detection should be skipped when SEAMLESS_LOCAL is set"
+            "config detection should be skipped when SEAMLESS_CACHE is set"
         )
 
-    monkeypatch.setenv("SEAMLESS_LOCAL", "1")
+    monkeypatch.setenv("SEAMLESS_CACHE", "/tmp/seamless-cache")
     monkeypatch.setattr(cmd_main, "_require_config_file", fake_require_config_file)
     monkeypatch.setattr(sys, "argv", ["seamless-run"])
 
