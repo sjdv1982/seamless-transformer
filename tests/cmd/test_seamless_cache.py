@@ -45,7 +45,7 @@ def test_seamless_run_dry_uses_seamless_cache_without_yaml(monkeypatch, tmp_path
     assert select.get_selected_cluster() == "__SEAMLESS_CACHE__"
     cluster, project, subproject, stage, substage = select.get_current()
     assert cluster == "__SEAMLESS_CACHE__"
-    assert project == workdir.name
+    assert project == select.PROJECT_TOPLEVEL
     assert subproject is None
     assert stage is None
     assert substage is None
