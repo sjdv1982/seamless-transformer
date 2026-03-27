@@ -109,17 +109,17 @@ function seamless-mode-toggle() {
         echo seamless-mode-off
         seamless-mode-off
     else        
-        echo seamless-mode-on '-v'
-        seamless-mode-on '-v'
+        echo seamless-mode-on
+        seamless-mode-on
     fi 
 }    
 
-function seamless-mode() {    
+function seamless-mode-bind() {
     bind -x '"\C-u3":seamless-mode-toggle'
     bind '"\C-u4": accept-line'
     bind '"\C-uu":"\C-u3\C-u4"'
-    echo 'seamless mode is now available'
-    echo 'You can enable it or disable it with the following commands:'
+    echo 'seamless mode binding is now active'
+    echo 'You can enable or disable seamless mode with the following commands:'
     echo ''
     echo 'seamless-mode-on, seamless-mode-off, seamless-mode-toggle'
     echo 'seamless-mode-toggle has been bound to a hotkey: Press Ctrl-U, then U'
