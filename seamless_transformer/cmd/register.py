@@ -9,6 +9,7 @@ import json
 import os
 import tempfile
 from http.client import HTTPConnection
+from typing import Literal
 from urllib.parse import urlsplit
 
 from seamless import Buffer, Checksum
@@ -16,6 +17,13 @@ from seamless.checksum.calculate_checksum import calculate_checksum
 from seamless.checksum.json_ import json_dumps_bytes
 from seamless.caching.buffer_cache import get_buffer_cache
 from .message import message as msg
+
+TransferMode = Literal["copy", "hardlink", "symlink"]
+DestinationEntryPolicy = Literal["skip", "verify", "repair"]
+
+
+class DestinationEntryError(RuntimeError):
+    """Raised when a destination entry violates the requested integrity policy."""
 
 
 def _ensure_cached(buffer: Buffer) -> None:
@@ -35,21 +43,33 @@ def _has_hashserver_prefix(directory: str) -> bool:
     return os.path.exists(os.path.join(directory, ".HASHSERVER_PREFIX"))
 
 
-def _resolve_destination_path(destination_folder: str, checksum_hex: str) -> str:
+def _resolve_destination_path(
+    destination_folder: str, checksum_hex: str, *, create_dirs: bool = True
+) -> str:
     if _has_hashserver_prefix(destination_folder):
         prefix = checksum_hex[:2]
         target_dir = os.path.join(destination_folder, prefix)
-        os.makedirs(target_dir, exist_ok=True)
-        _ensure_dir_permissions(target_dir, 0o3775)
+        if create_dirs:
+            os.makedirs(target_dir, exist_ok=True)
+            _ensure_dir_permissions(target_dir, 0o3775)
         return os.path.join(target_dir, checksum_hex)
     return os.path.join(destination_folder, checksum_hex)
 
 
 def _write_buffer_to_destination(
-    buffer: bytes, destination_folder: str, checksum_hex: str
+    buffer: bytes,
+    destination_folder: str,
+    checksum_hex: str,
+    *,
+    overwrite: bool = False,
 ) -> None:
-    path = _resolve_destination_path(destination_folder, checksum_hex)
-    if os.path.exists(path):
+    actual_checksum = calculate_checksum(buffer)
+    if actual_checksum != checksum_hex:
+        raise DestinationEntryError(
+            f"Refusing to write checksum '{checksum_hex}': source bytes have checksum '{actual_checksum}'"
+        )
+    path = _resolve_destination_path(destination_folder, checksum_hex, create_dirs=True)
+    if os.path.lexists(path) and not overwrite:
         _ensure_dir_permissions(path, 0o444)
         return
     target_dir = os.path.dirname(path)
@@ -65,6 +85,45 @@ def _write_buffer_to_destination(
                 os.unlink(tmp_path)
         except Exception:
             pass
+
+
+def _destination_entry_mismatch_message(path: str, checksum_hex: str) -> str:
+    return f"Destination entry '{path}' does not match checksum '{checksum_hex}'"
+
+
+def _existing_destination_entry_valid(path: str, checksum_hex: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            buffer = f.read()
+    except Exception:
+        return False
+    return calculate_checksum(buffer) == checksum_hex
+
+
+def _handle_existing_destination_entry(
+    destination_folder: str,
+    checksum_hex: str,
+    *,
+    existing_entry_policy: DestinationEntryPolicy = "skip",
+    repair_buffer: bytes | None = None,
+) -> bool:
+    path = _resolve_destination_path(destination_folder, checksum_hex, create_dirs=False)
+    if not os.path.lexists(path):
+        return False
+    if existing_entry_policy == "skip":
+        return True
+    if _existing_destination_entry_valid(path, checksum_hex):
+        return True
+    if existing_entry_policy == "verify":
+        raise DestinationEntryError(
+            _destination_entry_mismatch_message(path, checksum_hex)
+        )
+    if repair_buffer is None:
+        return False
+    _write_buffer_to_destination(
+        repair_buffer, destination_folder, checksum_hex, overwrite=True
+    )
+    return True
 
 
 def _ensure_url_scheme(url: str) -> str:
@@ -158,21 +217,32 @@ def _buffers_exist_remote(checksum_hexes: list[str]) -> set[str]:
 
 
 def _buffers_exist_local(
-    destination_folder: str, checksum_hexes: list[str]
+    destination_folder: str,
+    checksum_hexes: list[str],
+    *,
+    existing_entry_policy: DestinationEntryPolicy = "skip",
 ) -> set[str]:
     if not checksum_hexes:
         return set()
     present = set()
-    has_prefix = _has_hashserver_prefix(destination_folder)
     for checksum_hex in checksum_hexes:
         if checksum_hex in present:
             continue
-        if has_prefix:
-            path = os.path.join(destination_folder, checksum_hex[:2], checksum_hex)
-        else:
-            path = os.path.join(destination_folder, checksum_hex)
-        if os.path.exists(path):
+        path = _resolve_destination_path(
+            destination_folder, checksum_hex, create_dirs=False
+        )
+        if not os.path.lexists(path):
+            continue
+        if existing_entry_policy == "skip":
             present.add(checksum_hex)
+            continue
+        if _existing_destination_entry_valid(path, checksum_hex):
+            present.add(checksum_hex)
+            continue
+        if existing_entry_policy == "verify":
+            raise DestinationEntryError(
+                _destination_entry_mismatch_message(path, checksum_hex)
+            )
     return present
 
 
@@ -181,7 +251,10 @@ def _buffer_exists_remote(checksum: Checksum) -> bool:
 
 
 def check_checksums_present(
-    checksum_hexes: list[str], destination_folder: str | None = None
+    checksum_hexes: list[str],
+    destination_folder: str | None = None,
+    *,
+    existing_entry_policy: DestinationEntryPolicy = "skip",
 ) -> set[str]:
     present = set()
     cache = get_buffer_cache()
@@ -197,7 +270,13 @@ def check_checksums_present(
             remaining.append(checksum_hex)
     if remaining:
         if destination_folder is not None:
-            present.update(_buffers_exist_local(destination_folder, remaining))
+            present.update(
+                _buffers_exist_local(
+                    destination_folder,
+                    remaining,
+                    existing_entry_policy=existing_entry_policy,
+                )
+            )
         else:
             present.update(_buffers_exist_remote(remaining))
     return present
@@ -228,7 +307,12 @@ def _write_buffer_remote(buffer: Buffer) -> None:
 
 
 def register_buffer(
-    buffer: bytes, destination_folder: str | None = None, dry_run: bool = False
+    buffer: bytes,
+    destination_folder: str | None = None,
+    dry_run: bool = False,
+    *,
+    transfer_mode: TransferMode | None = None,
+    existing_entry_policy: DestinationEntryPolicy = "skip",
 ) -> str:
     """Register a buffer locally; optionally write it to destination or remote."""
     buf = Buffer(buffer)
@@ -239,8 +323,19 @@ def register_buffer(
         return checksum.hex()
 
     if destination_folder is not None:
+        if transfer_mode is None:
+            transfer_mode = "copy"
         try:
-            _write_buffer_to_destination(buffer, destination_folder, checksum.hex())
+            already_present = _handle_existing_destination_entry(
+                destination_folder,
+                checksum.hex(),
+                existing_entry_policy=existing_entry_policy,
+                repair_buffer=buffer,
+            )
+            if not already_present:
+                _write_buffer_to_destination(buffer, destination_folder, checksum.hex())
+        except DestinationEntryError:
+            raise
         except Exception as exc:
             msg(
                 0,
@@ -255,12 +350,21 @@ def register_buffer(
 
 
 def register_dict(
-    data: dict, destination_folder: str | None = None, dry_run: bool = False
+    data: dict,
+    destination_folder: str | None = None,
+    dry_run: bool = False,
+    *,
+    transfer_mode: TransferMode | None = None,
+    existing_entry_policy: DestinationEntryPolicy = "skip",
 ) -> str:
     """Register the buffer underlying a dict (celltype="plain")."""
     buffer = json_dumps_bytes(data) + b"\n"
     return register_buffer(
-        buffer, destination_folder=destination_folder, dry_run=dry_run
+        buffer,
+        destination_folder=destination_folder,
+        dry_run=dry_run,
+        transfer_mode=transfer_mode,
+        existing_entry_policy=existing_entry_policy,
     )
 
 
@@ -275,7 +379,12 @@ def check_file(filename: str) -> tuple[bool, str, int]:
 
 
 def register_file(
-    filename: str, destination_folder: str | None = None, hardlink: bool = False
+    filename: str,
+    destination_folder: str | None = None,
+    hardlink: bool = False,
+    *,
+    transfer_mode: TransferMode | None = None,
+    existing_entry_policy: DestinationEntryPolicy = "skip",
 ) -> str:
     """Calculate a file checksum and register its contents.
 
@@ -285,12 +394,36 @@ def register_file(
         buffer = f.read()
 
     checksum_hex = calculate_checksum(buffer)
-    if hardlink and destination_folder is not None:
-        destlink = _resolve_destination_path(destination_folder, checksum_hex)
-        if not os.path.exists(destlink):
+    if transfer_mode is None and hardlink:
+        transfer_mode = "hardlink"
+    if destination_folder is not None:
+        if transfer_mode is None:
+            transfer_mode = "copy"
+        if _handle_existing_destination_entry(
+            destination_folder,
+            checksum_hex,
+            existing_entry_policy=existing_entry_policy,
+            repair_buffer=buffer,
+        ):
+            return checksum_hex
+        destlink = _resolve_destination_path(
+            destination_folder, checksum_hex, create_dirs=True
+        )
+        if transfer_mode == "copy":
+            _write_buffer_to_destination(buffer, destination_folder, checksum_hex)
+        elif transfer_mode == "hardlink":
             os.link(filename, destlink)
+        elif transfer_mode == "symlink":
+            os.symlink(os.path.abspath(filename), destlink)
+        else:
+            raise ValueError(transfer_mode)
         return checksum_hex
-    return register_buffer(buffer, destination_folder=destination_folder)
+    return register_buffer(
+        buffer,
+        destination_folder=destination_folder,
+        transfer_mode=transfer_mode,
+        existing_entry_policy=existing_entry_policy,
+    )
 
 
 def check_buffer(buffer: bytes) -> tuple[bool, str]:

@@ -8,7 +8,12 @@ from seamless.checksum.calculate_checksum import calculate_checksum
 from seamless.checksum.serialize import serialize_sync as serialize
 from seamless import Checksum
 from .message import message as msg
-from .register import register_file, register_buffer, check_checksums_present
+from .register import (
+    DestinationEntryError,
+    register_file,
+    register_buffer,
+    check_checksums_present,
+)
 from .bytes2human import bytes2human
 from .confirm import confirm_yn
 from .exceptions import SeamlessSystemExit
@@ -53,7 +58,9 @@ def files_to_checksums(
     auto_confirm: str | None,
     destination_folder: str | None = None,
     hardlink_destination: bool = False,
-    dry_run: bool = False
+    transfer_mode: str | None = None,
+    existing_entry_policy: str = "skip",
+    dry_run: bool = False,
 ):
     """Convert a list of filenames to a dict of filename-to-checksum items
     In addition, each file buffer is uploaded.
@@ -67,6 +74,10 @@ def files_to_checksums(
     destination_folder: instead of uploading to a buffer server, write to this folder
     hardlink_destination: in the destination folder, don't write files, create hardlinks instead.
     """
+    if transfer_mode is None and hardlink_destination:
+        transfer_mode = "hardlink"
+    elif transfer_mode is None and destination_folder is not None:
+        transfer_mode = "copy"
 
     all_filelist = [f for f in filelist if f not in directories]
     directory_files = {}
@@ -87,9 +98,14 @@ def files_to_checksums(
         file_infos = list(executor.map(_file_checksum_and_length, all_filelist))
 
     file_checksums = [info[0] for info in file_infos]
-    present_checksums = check_checksums_present(
-        file_checksums, destination_folder=destination_folder
-    )
+    try:
+        present_checksums = check_checksums_present(
+            file_checksums,
+            destination_folder=destination_folder,
+            existing_entry_policy=existing_entry_policy,
+        )
+    except DestinationEntryError as exc:
+        raise SeamlessSystemExit(str(exc)) from exc
 
     upload_filelist = []
     for filename, (checksum, buffer_length) in zip(all_filelist, file_infos):
@@ -132,9 +148,14 @@ def files_to_checksums(
         for dirname, buffer in deepfolder_buffers.items():
             checksum = calculate_checksum(buffer)
             dir_checksums[dirname] = checksum
-        present_dir_checksums = check_checksums_present(
-            list(dir_checksums.values()), destination_folder=destination_folder
-        )
+        try:
+            present_dir_checksums = check_checksums_present(
+                list(dir_checksums.values()),
+                destination_folder=destination_folder,
+                existing_entry_policy=existing_entry_policy,
+            )
+        except DestinationEntryError as exc:
+            raise SeamlessSystemExit(str(exc)) from exc
         for dirname, checksum in dir_checksums.items():
             buffer = deepfolder_buffers[dirname]
             directory_indices[dirname] = buffer, checksum
@@ -201,23 +222,34 @@ def files_to_checksums(
             register_file,
             destination_folder=destination_folder,
             hardlink=hardlink_destination,
+            transfer_mode=transfer_mode,
+            existing_entry_policy=existing_entry_policy,
         )
-        with ThreadPoolExecutor(max_workers=nparallel) as executor:
-            for filename, checksum in zip(
-                upload_filelist, executor.map(reg_file, upload_filelist)
-            ):
-                assert all_result[filename] == checksum, (
-                    filename,
-                    checksum,
-                    all_result[filename],
-                )
+        try:
+            with ThreadPoolExecutor(max_workers=nparallel) as executor:
+                for filename, checksum in zip(
+                    upload_filelist, executor.map(reg_file, upload_filelist)
+                ):
+                    assert all_result[filename] == checksum, (
+                        filename,
+                        checksum,
+                        all_result[filename],
+                    )
+        except DestinationEntryError as exc:
+            raise SeamlessSystemExit(str(exc)) from exc
 
     if upload_buffers and not dry_run:
         reg_buf = functools.partial(
-            register_buffer, destination_folder=destination_folder
+            register_buffer,
+            destination_folder=destination_folder,
+            transfer_mode=transfer_mode,
+            existing_entry_policy=existing_entry_policy,
         )
-        with ThreadPoolExecutor(max_workers=nparallel) as executor:
-            executor.map(reg_buf, upload_buffers.values())
+        try:
+            with ThreadPoolExecutor(max_workers=nparallel) as executor:
+                list(executor.map(reg_buf, upload_buffers.values()))
+        except DestinationEntryError as exc:
+            raise SeamlessSystemExit(str(exc)) from exc
 
     result = {filename: all_result[filename] for filename in filelist}
 

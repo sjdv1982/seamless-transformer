@@ -37,6 +37,48 @@ def _parse_scoped_value(value: str, label: str) -> tuple[str, str | None]:
     return value, None
 
 
+def _get_transfer_mode(args) -> str | None:
+    if args.copy:
+        return "copy"
+    if args.hardlink:
+        return "hardlink"
+    if args.symlink:
+        return "symlink"
+    return None
+
+
+def _get_existing_entry_policy(args) -> str:
+    if args.dest_verify:
+        return "verify"
+    if args.dest_repair:
+        return "repair"
+    return "skip"
+
+
+def _get_auto_destination_folder() -> str | None:
+    try:
+        import seamless_remote.buffer_remote as buffer_remote
+    except Exception:
+        return None
+    try:
+        extern_clients = buffer_remote.inspect_extern_clients()
+    except Exception:
+        extern_clients = []
+    try:
+        launched_clients = buffer_remote.inspect_launched_clients()
+    except Exception:
+        launched_clients = []
+    buffer_clients = extern_clients + launched_clients
+    candidates = [
+        client.get("directory")
+        for client in buffer_clients
+        if not client.get("readonly") and client.get("directory")
+    ]
+    if len(candidates) == 1:
+        return os.path.expanduser(candidates[0])
+    return None
+
+
 def _main(argv: list[str] | None = None) -> int:
 
     import argparse
@@ -79,10 +121,20 @@ def _main(argv: list[str] | None = None) -> int:
     )
 
     parser.add_argument(
+        "--destination",
+        help="Write directly into this destination buffer directory and bypass seamless-config",
+    )
+
+    transfer_mode_group = parser.add_mutually_exclusive_group()
+    transfer_mode_group.add_argument(
+        "--copy",
+        help="Copy files into the destination directory. This is the safe direct-write mode.",
+        action="store_true",
+    )
+    transfer_mode_group.add_argument(
         "--hardlink",
         help="""Create hardlinks in the destination directory.
-        By default, files and directories get copied into the destination directory.
-        With this option, hardlinks are created instead.
+        This is unsafe: modifying the original file later can corrupt the bufferdir.
 
         WARNING: never modify the original file in-place!!!
         Examples of in-place modification: 
@@ -90,6 +142,32 @@ def _main(argv: list[str] | None = None) -> int:
             - appending to a file using ">>".
         This will lead to checksum corruption!!
         """,
+        action="store_true",
+    )
+    transfer_mode_group.add_argument(
+        "--symlink",
+        help="""Create symlinks in the destination directory.
+        This is unsafe: modifying or retargeting the original file later can corrupt the bufferdir.""",
+        action="store_true",
+    )
+
+    destination_policy_group = parser.add_mutually_exclusive_group()
+    destination_policy_group.add_argument(
+        "--dest-skip",
+        dest="dest_skip",
+        help="If the destination checksum path already exists, trust it and skip verification",
+        action="store_true",
+    )
+    destination_policy_group.add_argument(
+        "--dest-verify",
+        dest="dest_verify",
+        help="If the destination checksum path already exists, verify its contents and fail on mismatch",
+        action="store_true",
+    )
+    destination_policy_group.add_argument(
+        "--dest-repair",
+        dest="dest_repair",
+        help="If the destination checksum path already exists and mismatches, replace it with a valid regular file",
         action="store_true",
     )
 
@@ -121,7 +199,7 @@ def _main(argv: list[str] | None = None) -> int:
 
     parser.add_argument("files_and_directories", nargs=argparse.REMAINDER)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     for a in args.files_and_directories:
         if a.startswith("-"):
             err(f"Option {a} must be specified before upload targets")
@@ -131,70 +209,85 @@ def _main(argv: list[str] | None = None) -> int:
     set_verbosity(verbosity)
     msg(1, "Verbosity set to {}".format(verbosity))
 
-    if args.project:
-        if select_project is None:
-            err("seamless_config is unavailable; cannot set --project")
-        try:
-            project, subproject = _parse_scoped_value(args.project, "project")
-            select_project(project)
-            if subproject:
-                select_subproject(subproject)
-        except Exception as exc:
-            err(str(exc))
-    if args.stage:
-        try:
-            stage, substage = _parse_scoped_value(args.stage, "stage")
-            if substage:
-                seamless_config.set_stage(stage, substage, workdir=os.getcwd())
-            else:
-                seamless_config.set_stage(stage, workdir=os.getcwd())
-        except Exception as exc:
-            err(str(exc))
+    requested_transfer_mode = _get_transfer_mode(args)
+    existing_entry_policy = _get_existing_entry_policy(args)
+    destination_folder = None
+    transfer_mode = requested_transfer_mode
+
+    if args.destination:
+        if args.project:
+            err("--destination cannot be combined with --project")
+        if args.stage:
+            err("--destination cannot be combined with --stage")
+        destination_folder = os.path.expanduser(args.destination)
+        if transfer_mode is None:
+            transfer_mode = "copy"
+    else:
+        if args.project:
+            if select_project is None:
+                err("seamless_config is unavailable; cannot set --project")
+            try:
+                project, subproject = _parse_scoped_value(args.project, "project")
+                select_project(project)
+                if subproject:
+                    select_subproject(subproject)
+            except Exception as exc:
+                err(str(exc))
+        if args.stage:
+            try:
+                stage, substage = _parse_scoped_value(args.stage, "stage")
+                if substage:
+                    seamless_config.set_stage(stage, substage, workdir=os.getcwd())
+                else:
+                    seamless_config.set_stage(stage, workdir=os.getcwd())
+            except Exception as exc:
+                err(str(exc))
 
     max_upload_files = os.environ.get("SEAMLESS_MAX_UPLOAD_FILES", "400")
     max_upload_files = int(max_upload_files)
     max_upload_size = os.environ.get("SEAMLESS_MAX_UPLOAD_SIZE", "100 MB")
     max_upload_size = human2bytes(max_upload_size)
 
-    from seamless_config.extern_clients import set_remote_clients_from_env
+    if destination_folder is None:
+        from seamless_config.extern_clients import set_remote_clients_from_env
 
-    if not set_remote_clients_from_env(include_dask=False):
+        if not set_remote_clients_from_env(include_dask=False):
+            seamless_config.init(workdir=os.getcwd())
+            from seamless_config.select import get_selected_cluster
 
-        seamless_config.init(workdir=os.getcwd())
-        from seamless_config.select import get_selected_cluster
+            selected_cluster = get_selected_cluster()
+            if selected_cluster is None:
+                print("Cannot upload without a cluster defined", file=sys.stderr)
+                return 1
+        else:
+            from seamless_config.select import get_selected_cluster
 
-        if get_selected_cluster() is None:
-            print(f"Cannot upload without a cluster defined", file=sys.stderr)
-            exit(1)
+            selected_cluster = get_selected_cluster()
 
-    destination_folder = None
-    try:
-        import seamless_remote.buffer_remote as buffer_remote
-    except Exception:
-        buffer_clients = []
-    else:
-        try:
-            extern_clients = buffer_remote.inspect_extern_clients()
-        except Exception:
-            extern_clients = []
-        try:
-            launched_clients = buffer_remote.inspect_launched_clients()
-        except Exception:
-            launched_clients = []
-        buffer_clients = extern_clients + launched_clients
-    candidates = [
-        client.get("directory")
-        for client in buffer_clients
-        if not client.get("readonly") and client.get("directory")
-    ]
-    if len(candidates) == 1:
-        destination_folder = os.path.expanduser(candidates[0])
-        if args.auto_confirm is None:
-            args.auto_confirm = "yes"
-        msg(1, f"Use buffer directory '{destination_folder}' for upload")
+        is_local_cluster = False
+        if selected_cluster is not None:
+            try:
+                from seamless_config.cluster import get_cluster
 
-    if args.hardlink and not destination_folder:
-        err("--hardlink requires a destination folder")
+                is_local_cluster = get_cluster(selected_cluster).type == "local"
+            except Exception:
+                is_local_cluster = False
+
+        if is_local_cluster:
+            destination_folder = _get_auto_destination_folder()
+            if destination_folder is not None:
+                if args.auto_confirm is None:
+                    args.auto_confirm = "yes"
+                msg(1, f"Use buffer directory '{destination_folder}' for upload")
+                if transfer_mode is None:
+                    transfer_mode = "copy"
+
+        if requested_transfer_mode is not None and destination_folder is None:
+            if not is_local_cluster:
+                err(
+                    "Direct destination mode requires a selected local cluster or --destination"
+                )
+            err(f"--{requested_transfer_mode} requires a destination folder")
 
     paths = [
         path.rstrip(os.sep)
@@ -212,6 +305,8 @@ def _main(argv: list[str] | None = None) -> int:
             auto_confirm=args.auto_confirm,
             destination_folder=destination_folder,
             hardlink_destination=args.hardlink,
+            transfer_mode=transfer_mode,
+            existing_entry_policy=existing_entry_policy,
         )
     except SeamlessSystemExit as exc:
         err(*exc.args)
