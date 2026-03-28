@@ -1,9 +1,12 @@
 import asyncio
+import functools
 import json
 import os
+import shutil
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from typing import Literal
 
 from seamless import Checksum, CacheMissError
 from seamless.caching.buffer_cache import get_buffer_cache
@@ -13,8 +16,12 @@ from .exceptions import SeamlessSystemExit
 from .confirm import confirm_yna
 from .message import message as msg, message_and_exit as err
 from .bytes2human import bytes2human
+from .register import _resolve_destination_path
 
 stdout_lock = threading.Lock()
+
+TransferMode = Literal["copy", "hardlink", "symlink"]
+DestinationEntryPolicy = Literal["skip", "verify", "repair"]
 
 
 def _run_coro_in_thread(coro):
@@ -49,7 +56,55 @@ def exists_file(filename, download_checksum):
     return current_checksum == download_checksum.hex()
 
 
-def get_buffer_length(checksums):
+def _buffer_source_path(source_directory: str, checksum_hex: str) -> str | None:
+    path = _resolve_destination_path(
+        source_directory, checksum_hex, create_dirs=False
+    )
+    if os.path.lexists(path):
+        return path
+    return None
+
+
+def _get_buffer_length_direct(source_directory: str, checksum_hex: str) -> int | None:
+    path = _buffer_source_path(source_directory, checksum_hex)
+    if path is None:
+        return None
+    try:
+        return os.path.getsize(path)
+    except Exception:
+        return None
+
+
+def _remove_path(path: str) -> None:
+    if not os.path.lexists(path):
+        return
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    else:
+        os.unlink(path)
+
+
+def _handle_existing_target(
+    filename: str,
+    checksum_hex: str,
+    *,
+    existing_entry_policy: DestinationEntryPolicy,
+) -> bool:
+    if not os.path.lexists(filename):
+        return False
+    if existing_entry_policy == "skip":
+        return True
+    if exists_file(filename, checksum_hex):
+        return True
+    if existing_entry_policy == "verify":
+        raise SeamlessSystemExit(
+            f"Destination entry '{filename}' does not match checksum '{checksum_hex}'"
+        )
+    _remove_path(filename)
+    return False
+
+
+def get_buffer_length(checksums, *, source_directory: str | None = None):
     cache = get_buffer_cache()
     results = {}
     missing = []
@@ -68,6 +123,13 @@ def get_buffer_length(checksums):
         else:
             results[checksum] = None
             missing.append((checksum, checksum_obj))
+
+    if source_directory is not None:
+        for checksum, _checksum_obj in list(missing):
+            length = _get_buffer_length_direct(source_directory, checksum)
+            if length is not None:
+                results[checksum] = length
+        missing = [(cs, obj) for cs, obj in missing if results[cs] is None]
 
     if missing:
         try:
@@ -100,7 +162,7 @@ def get_buffer_length(checksums):
     return results
 
 
-def download_file(filename, file_checksum):
+def _download_file_remote(filename, file_checksum):
     try:
         file_checksum = Checksum(file_checksum)
     except Exception:
@@ -133,6 +195,66 @@ def download_file(filename, file_checksum):
         return
 
 
+def _download_file_direct(
+    filename: str,
+    file_checksum: str,
+    *,
+    source_directory: str,
+    transfer_mode: TransferMode,
+    existing_entry_policy: DestinationEntryPolicy,
+) -> None:
+    try:
+        file_checksum = Checksum(file_checksum)
+    except Exception:
+        return
+    checksum_hex = file_checksum.hex()
+    if _handle_existing_target(
+        filename, checksum_hex, existing_entry_policy=existing_entry_policy
+    ):
+        return
+    source_path = _buffer_source_path(source_directory, checksum_hex)
+    if source_path is None:
+        with stdout_lock:
+            msg(
+                0,
+                f"Cannot download contents of file '{filename}', checksum '{checksum_hex}'",
+            )
+        return
+    os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
+    try:
+        if transfer_mode == "copy":
+            shutil.copyfile(source_path, filename)
+        elif transfer_mode == "hardlink":
+            os.link(source_path, filename)
+        elif transfer_mode == "symlink":
+            os.symlink(os.path.abspath(source_path), filename)
+        else:
+            raise ValueError(transfer_mode)
+    except Exception:
+        with stdout_lock:
+            msg(0, f"Cannot download file '{filename}'")
+        return
+
+
+def download_file(
+    filename,
+    file_checksum,
+    *,
+    source_directory: str | None = None,
+    transfer_mode: TransferMode = "copy",
+    existing_entry_policy: DestinationEntryPolicy = "skip",
+):
+    if source_directory is not None:
+        return _download_file_direct(
+            filename,
+            file_checksum,
+            source_directory=source_directory,
+            transfer_mode=transfer_mode,
+            existing_entry_policy=existing_entry_policy,
+        )
+    return _download_file_remote(filename, file_checksum)
+
+
 def download_index(index_checksum: Checksum, dirname):
     index_checksum = Checksum(index_checksum)
     cache = get_buffer_cache()
@@ -159,26 +281,32 @@ def download(
     max_download_files,
     auto_confirm,
     index_checksums=None,
+    source_directory: str | None = None,
+    transfer_mode: TransferMode = "copy",
+    existing_entry_policy: DestinationEntryPolicy = "skip",
 ):
-    with ThreadPoolExecutor(max_workers=100) as executor:
-        file_existing = list(
-            executor.map(exists_file, checksum_dict.keys(), checksum_dict.values())
-        )
-        file_existing = [k for k, v in zip(checksum_dict.keys(), file_existing) if v]
-        if len(file_existing):
-            msg(2, f"Skip {len(file_existing)} files that already exist")
-
     checksum_dict_original = checksum_dict
     checksum_dict = checksum_dict.copy()
-    for k in file_existing:
-        checksum_dict.pop(k)
-        if k in files:
-            files.remove(k)
+    skipped_targets = []
+    for target, checksum in list(checksum_dict.items()):
+        try:
+            skip = _handle_existing_target(
+                target, checksum, existing_entry_policy=existing_entry_policy
+            )
+        except SeamlessSystemExit:
+            raise
+        if skip:
+            skipped_targets.append(target)
+            checksum_dict.pop(target)
+            if target in files:
+                files.remove(target)
+    if skipped_targets:
+        msg(2, f"Skip {len(skipped_targets)} files that already exist")
 
     if len(checksum_dict):
         msg(2, f"Download {len(checksum_dict)} files")
     checksums = set(checksum_dict.values())
-    buffer_lengths = get_buffer_length(checksums)
+    buffer_lengths = get_buffer_length(checksums, source_directory=source_directory)
 
     size_load_per_file = 100000
     size_load_per_unknown_file = 10000000000
@@ -301,13 +429,27 @@ def download(
             curr_checksum_dict = {
                 os.path.join(download_target, k): v for k, v in curr_download.items()
             }
+            downloader = functools.partial(
+                download_file,
+                source_directory=source_directory,
+                transfer_mode=transfer_mode,
+                existing_entry_policy=existing_entry_policy,
+            )
             with ThreadPoolExecutor(max_workers=20) as executor:
-                executor.map(
-                    download_file,
-                    curr_checksum_dict.keys(),
-                    curr_checksum_dict.values(),
+                list(
+                    executor.map(
+                        downloader,
+                        curr_checksum_dict.keys(),
+                        curr_checksum_dict.values(),
+                    )
                 )
             if index_checksums is not None:
                 write_checksum(download_target, index_checksums[download_target])
         else:
-            download_file(download_target, curr_download)
+            download_file(
+                download_target,
+                curr_download,
+                source_directory=source_directory,
+                transfer_mode=transfer_mode,
+                existing_entry_policy=existing_entry_policy,
+            )

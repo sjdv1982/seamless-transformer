@@ -21,6 +21,7 @@ from seamless_transformer.cmd.message import (
     message as msg,
     message_and_exit as err,
 )
+from seamless_transformer.cmd.register import _resolve_destination_path
 
 try:
     from seamless_config.select import select_project, select_subproject
@@ -42,7 +43,63 @@ def _parse_scoped_value(value: str, label: str) -> tuple[str, str | None]:
     return value, None
 
 
-def _get_buffer_content(checksum: Checksum) -> bytes | None:
+def _get_transfer_mode(args) -> str | None:
+    if args.copy:
+        return "copy"
+    if args.hardlink:
+        return "hardlink"
+    if args.softlink:
+        return "symlink"
+    return None
+
+
+def _get_existing_entry_policy(args) -> str:
+    if args.dest_verify:
+        return "verify"
+    if args.dest_repair:
+        return "repair"
+    return "skip"
+
+
+def _get_auto_destination_folder() -> str | None:
+    try:
+        import seamless_remote.buffer_remote as buffer_remote
+    except Exception:
+        return None
+    try:
+        extern_clients = buffer_remote.inspect_extern_clients()
+    except Exception:
+        extern_clients = []
+    try:
+        launched_clients = buffer_remote.inspect_launched_clients()
+    except Exception:
+        launched_clients = []
+    buffer_clients = extern_clients + launched_clients
+    candidates = [
+        client.get("directory")
+        for client in buffer_clients
+        if not client.get("readonly") and client.get("directory")
+    ]
+    if len(candidates) == 1:
+        return os.path.expanduser(candidates[0])
+    return None
+
+
+def _get_buffer_content(
+    checksum: Checksum, *, source_directory: str | None = None
+) -> bytes | None:
+    if source_directory is not None:
+        path = _resolve_destination_path(
+            source_directory, Checksum(checksum).hex(), create_dirs=False
+        )
+        if os.path.lexists(path):
+            try:
+                with open(path, "rb") as f:
+                    buffer = f.read()
+                if Buffer(buffer).get_checksum() == Checksum(checksum):
+                    return buffer
+            except Exception:
+                pass
     cache = get_buffer_cache()
     buffer = cache.get(checksum)
     if buffer is None:
@@ -69,6 +126,57 @@ def _main(argv: list[str] | None = None) -> int:
         "--stage",
         metavar="STAGE[:SUBSTAGE]",
         help="set Seamless project stage (and substage). Each project stage has independent storage",
+    )
+
+    parser.add_argument(
+        "--destination",
+        help="Read buffers directly from this destination buffer directory and bypass seamless-config",
+    )
+
+    transfer_mode_group = parser.add_mutually_exclusive_group()
+    transfer_mode_group.add_argument(
+        "--copy",
+        help="Copy files from the destination buffer directory into the output paths",
+        action="store_true",
+    )
+    transfer_mode_group.add_argument(
+        "--hardlink",
+        help="Create hardlinks from the destination buffer directory into the output paths",
+        action="store_true",
+    )
+    transfer_mode_group.add_argument(
+        "--softlink",
+        "--symlink",
+        dest="softlink",
+        help="Create symlinks from the destination buffer directory into the output paths",
+        action="store_true",
+    )
+
+    destination_policy_group = parser.add_mutually_exclusive_group()
+    destination_policy_group.add_argument(
+        "--dest-skip",
+        dest="dest_skip",
+        help="If the destination file already exists, trust it and skip verification",
+        action="store_true",
+    )
+    destination_policy_group.add_argument(
+        "--dest-verify",
+        dest="dest_verify",
+        help="If the destination file already exists, verify its contents and fail on mismatch",
+        action="store_true",
+    )
+    destination_policy_group.add_argument(
+        "--dest-repair",
+        dest="dest_repair",
+        help="If the destination file already exists and mismatches, replace it",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--dest-rm",
+        help="Remove existing extra files in target directories that are not listed in the downloaded index",
+        action="store_true",
+        default=False,
     )
 
     parser.add_argument(
@@ -156,41 +264,81 @@ def _main(argv: list[str] | None = None) -> int:
     verbosity = min(args.verbosity, 3)
     set_verbosity(verbosity)
 
-    if args.project:
-        if select_project is None:
-            err("seamless_config is unavailable; cannot set --project")
-        try:
-            project, subproject = _parse_scoped_value(args.project, "project")
-            select_project(project)
-            if subproject:
-                select_subproject(subproject)
-        except Exception as exc:
-            err(str(exc))
-    if args.stage:
-        try:
-            stage, substage = _parse_scoped_value(args.stage, "stage")
-            if substage:
-                seamless_config.set_stage(stage, substage, workdir=os.getcwd())
-            else:
-                seamless_config.set_stage(stage, workdir=os.getcwd())
-        except Exception as exc:
-            err(str(exc))
+    requested_transfer_mode = _get_transfer_mode(args)
+    existing_entry_policy = _get_existing_entry_policy(args)
+    source_directory = None
+    transfer_mode = requested_transfer_mode
+
+    if args.destination:
+        if args.project:
+            err("--destination cannot be combined with --project")
+        if args.stage:
+            err("--destination cannot be combined with --stage")
+        source_directory = os.path.expanduser(args.destination)
+        if transfer_mode is None:
+            transfer_mode = "copy"
+    else:
+        if args.project:
+            if select_project is None:
+                err("seamless_config is unavailable; cannot set --project")
+            try:
+                project, subproject = _parse_scoped_value(args.project, "project")
+                select_project(project)
+                if subproject:
+                    select_subproject(subproject)
+            except Exception as exc:
+                err(str(exc))
+        if args.stage:
+            try:
+                stage, substage = _parse_scoped_value(args.stage, "stage")
+                if substage:
+                    seamless_config.set_stage(stage, substage, workdir=os.getcwd())
+                else:
+                    seamless_config.set_stage(stage, workdir=os.getcwd())
+            except Exception as exc:
+                err(str(exc))
 
     max_download_files = os.environ.get("SEAMLESS_MAX_DOWNLOAD_FILES", "2000")
     max_download_files = int(max_download_files)
     max_download_size = os.environ.get("SEAMLESS_MAX_DOWNLOAD_SIZE", "500 MB")
     max_download_size = human2bytes(max_download_size)
 
-    from seamless_config.extern_clients import set_remote_clients_from_env
+    if source_directory is None:
+        from seamless_config.extern_clients import set_remote_clients_from_env
 
-    if not set_remote_clients_from_env(include_dask=False):
+        if not set_remote_clients_from_env(include_dask=False):
+            seamless_config.init(workdir=os.getcwd())
+            from seamless_config.select import get_selected_cluster
 
-        seamless_config.init(workdir=os.getcwd())
-        from seamless_config.select import get_selected_cluster
+            selected_cluster = get_selected_cluster()
+            if selected_cluster is None:
+                print("Cannot download without a cluster defined", file=sys.stderr)
+                return 1
+        else:
+            from seamless_config.select import get_selected_cluster
 
-        if get_selected_cluster() is None:
-            print(f"Cannot download without a cluster defined", file=sys.stderr)
-            exit(1)
+            selected_cluster = get_selected_cluster()
+
+        is_local_cluster = False
+        if selected_cluster is not None:
+            try:
+                from seamless_config.cluster import get_cluster
+
+                is_local_cluster = get_cluster(selected_cluster).type == "local"
+            except Exception:
+                is_local_cluster = False
+
+        if is_local_cluster:
+            source_directory = _get_auto_destination_folder()
+            if source_directory is not None and transfer_mode is None:
+                transfer_mode = "copy"
+
+        if requested_transfer_mode is not None and source_directory is None:
+            if not is_local_cluster:
+                err(
+                    "Direct destination mode requires a selected local cluster or --destination"
+                )
+            err(f"--{requested_transfer_mode} requires a destination folder")
 
     ################################################################
 
@@ -255,7 +403,9 @@ def _main(argv: list[str] | None = None) -> int:
                 index_checksum = Checksum(index_checksum)
                 if not (args.index_only or args.directory):
                     msg(0, f"{index_err}, downloading from checksum ...")
-                index_buffer_content = _get_buffer_content(index_checksum)
+                index_buffer_content = _get_buffer_content(
+                    index_checksum, source_directory=source_directory
+                )
                 if index_buffer_content is None:
                     if parsed_checksum:
                         err(f"Cannot download index buffer for {parsed_checksum}")
@@ -339,10 +489,14 @@ def _main(argv: list[str] | None = None) -> int:
                     for (dirpath, _, filenames) in os.walk(directory)
                     for f in filenames
                 ]
-                for f in existing_files:
-                    if f not in to_download:
-                        os.remove(f)
-                        removed_files.append(f)
+                extra_files = [f for f in existing_files if f not in to_download]
+                if extra_files and not args.dest_rm:
+                    err(
+                        f"Directory '{directory}' contains {len(extra_files)} unlisted entries; use --dest-rm to remove them"
+                    )
+                for f in extra_files:
+                    os.remove(f)
+                    removed_files.append(f)
     if len(removed_files):
         msg(2, f"Removed {len(removed_files)} extra files in download directories")
 
@@ -366,7 +520,9 @@ def _main(argv: list[str] | None = None) -> int:
             err("Cannot download and print multiple files to stdout")
         else:
             cs = to_download[files[0]]
-            file_buffer = _get_buffer_content(Checksum(cs))
+            file_buffer = _get_buffer_content(
+                Checksum(cs), source_directory=source_directory
+            )
             if file_buffer is None:
                 err(f"Cannot download contents of file '{files[0]}', CacheMissError")
             sys.stdout.buffer.write(file_buffer)
@@ -379,6 +535,9 @@ def _main(argv: list[str] | None = None) -> int:
             max_download_size=max_download_size,
             max_download_files=max_download_files,
             auto_confirm=args.auto_confirm,
+            source_directory=source_directory,
+            transfer_mode=transfer_mode or "copy",
+            existing_entry_policy=existing_entry_policy,
         )
 
 
