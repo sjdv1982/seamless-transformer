@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Dict, Any
 
 from seamless import Buffer, Checksum
 
 
 DEEP_CELLTYPES = ("deepcell", "deepfolder")
+TRANSFORMATION_CORE_KEYS = {"__language__", "__output__", "__as__", "__format__"}
+TRANSFORMATION_LOCAL_DUNDER_KEYS = {"__meta__", "__env__"}
 
 
 def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
@@ -15,16 +18,16 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
 
     assert isinstance(transformation, dict)
     result: Dict[str, Any] = {}
-    core_keys = ("__language__", "__output__", "__as__", "__format__")
     for key, value in transformation.items():
-        if key in core_keys:
+        if key in TRANSFORMATION_CORE_KEYS:
+            result[key] = value
+            continue
+        if key in TRANSFORMATION_LOCAL_DUNDER_KEYS:
             result[key] = value
             continue
         if key in (
             "__compilers__",
             "__languages__",
-            "__meta__",
-            "__env__",
         ):
             continue
         if key in (
@@ -43,7 +46,7 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
             #           Keep a per-client cache list of all written sem2syn, but otherwise do a blocking await
             #      Maybe setup sem2syn messaging between spawn process and main, but probably YAGNI
             continue
-        if key.startswith("SPECIAL__"):
+        if key.startswith("META__"):
             continue
 
         celltype, subcelltype, checksum = value
@@ -52,6 +55,59 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
         result[key] = (celltype, subcelltype, checksum)
 
     return Buffer(result, celltype="plain")
+
+
+def extract_tf_dunder(transformation: Dict[str, Any]) -> Dict[str, Any]:
+    """Return execution-only dunder payload for worker/jobserver transport."""
+
+    return {
+        key: deepcopy(value)
+        for key, value in transformation.items()
+        if key.startswith("__")
+        and key not in TRANSFORMATION_CORE_KEYS
+        and key not in TRANSFORMATION_LOCAL_DUNDER_KEYS
+        and not key.startswith("__code")
+    }
+
+
+def extract_job_dunder(transformation: Dict[str, Any]) -> Dict[str, Any]:
+    """Return dunder payload required by standalone job directories."""
+
+    return {
+        key: deepcopy(value)
+        for key, value in transformation.items()
+        if key.startswith("__")
+        and key not in TRANSFORMATION_CORE_KEYS
+        and key != "__env__"
+        and not key.startswith("__code")
+    }
+
+
+def merge_transformation_meta(
+    transformation: Dict[str, Any], tf_dunder: Dict[str, Any] | None = None
+) -> Dict[str, Any]:
+    """Merge intrinsic transformation metadata with execution-side overrides."""
+
+    meta: Dict[str, Any] = {}
+    meta0 = transformation.get("__meta__")
+    if isinstance(meta0, dict):
+        meta.update(deepcopy(meta0))
+    if isinstance(tf_dunder, dict):
+        meta1 = tf_dunder.get("__meta__")
+        if isinstance(meta1, dict):
+            meta.update(deepcopy(meta1))
+    return meta
+
+
+def resolve_env_checksum(
+    transformation: Dict[str, Any], tf_dunder: Dict[str, Any] | None = None
+):
+    """Resolve the env checksum, preferring the transformation dict."""
+
+    env_checksum = transformation.get("__env__")
+    if env_checksum is None and isinstance(tf_dunder, dict):
+        env_checksum = tf_dunder.get("__env__")
+    return env_checksum
 
 
 def is_deep_celltype(celltype: str | None) -> bool:
@@ -104,6 +160,10 @@ def pack_deep_structure(structure, celltype: str):
 
 __all__ = [
     "tf_get_buffer",
+    "extract_tf_dunder",
+    "extract_job_dunder",
+    "merge_transformation_meta",
+    "resolve_env_checksum",
     "is_deep_celltype",
     "unpack_deep_structure",
     "pack_deep_structure",

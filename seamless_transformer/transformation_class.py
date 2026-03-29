@@ -12,7 +12,7 @@ from typing import Any, Dict, Generic, Optional, TYPE_CHECKING, TypeVar
 
 from seamless import Checksum, Buffer, ensure_open, is_worker
 from seamless.util.get_event_loop import get_event_loop
-from .transformation_utils import tf_get_buffer
+from .transformation_utils import extract_tf_dunder, tf_get_buffer
 from . import worker
 
 try:  # Optional Dask integration
@@ -833,14 +833,9 @@ def transformation_from_pretransformation(
     tf_dunder = tf_dunder or {}
 
     def _collect_tf_dunder() -> dict[str, Any]:
-        core_keys = {"__language__", "__output__", "__as__", "__format__"}
-        dunder = {
-            key: deepcopy(value)
-            for key, value in pre_transformation.pretransformation_dict.items()
-            if key.startswith("__")
-            and key not in core_keys
-            and not key.startswith("__code")
-        }
+        dunder = extract_tf_dunder(pre_transformation.pretransformation_dict)
+        if tf_dunder:
+            dunder.update(deepcopy(tf_dunder))
         meta_payload: dict[str, Any] = {}
         existing_meta = dunder.get("__meta__")
         if isinstance(existing_meta, dict):

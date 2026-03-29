@@ -43,10 +43,11 @@ from seamless_transformer.cmd.get_results import (
     get_result_buffer,
     maintain_futures,
 )
+from seamless_transformer.remote_job import REMOTE_JOB_META_KEY
 
 ### from seamless.Environment import Environment
 from seamless.checksum.json_ import json_dumps_bytes
-from seamless_transformer.transformation_utils import tf_get_buffer
+from seamless_transformer.transformation_utils import extract_job_dunder, tf_get_buffer
 
 try:
     from seamless_config import get_seamless_cache
@@ -61,15 +62,6 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 CONFIG_FILENAMES = ("seamless.yaml", "seamless.profile.yaml")
-
-
-def extract_dunder(transformation_dict):
-    core_keys = {"__language__", "__output__", "__as__", "__format__"}
-    return {
-        k: v
-        for k, v in transformation_dict.items()
-        if k.startswith("__") and k not in core_keys and not k.startswith("__code")
-    }
 
 
 def _parse_scoped_value(value: str, label: str) -> tuple[str, str | None]:
@@ -117,6 +109,13 @@ def _parse_var_spec(spec: str) -> tuple[str, str]:
             f"Invalid --var '{spec}': variable name '{name}' "
             "must match [A-Za-z_][A-Za-z0-9_]*"
         )
+    return name, value
+
+
+def _parse_metavar_spec(spec: str) -> tuple[str, str]:
+    name, value = _parse_var_spec(spec)
+    if name.upper().startswith("META__"):
+        err(f"Invalid --metavar '{spec}': name must not start with META__")
     return name, value
 
 
@@ -262,6 +261,20 @@ def _main(argv: list[str] | None = None) -> int:
     available to the bash command environment.
     """,
     )
+    parser.add_argument(
+        "--metavar",
+        action="append",
+        dest="explicit_metavars",
+        help=(
+            "Inject a meta variable NAME=VALUE (repeatable). "
+            "The variable is available to the bash command as $NAME but does NOT "
+            "contribute to the transformation identity. Two invocations that differ "
+            "only in --metavar values share the same cache entry. "
+            "Use for execution hints (thread counts, verbosity, debug flags) that "
+            "should not invalidate the cache. Use --var for values that are part of "
+            "the computation and should invalidate the cache when changed."
+        ),
+    )
 
     parser.add_argument(
         "--prologue",
@@ -380,6 +393,11 @@ def _main(argv: list[str] | None = None) -> int:
         dest="write_job",
         help="Requires --dry. Write out the (small) transformation job buffers into a job directory for seamless-run-transformation",
     )
+    parser.add_argument(
+        "--write-remote-job",
+        dest="write_remote_job",
+        help="Requires --dry. Store the remote job directory in transformation metadata and stop remote execution after materializing that directory",
+    )
 
     parser.add_argument(
         "--upload",
@@ -407,6 +425,8 @@ def _main(argv: list[str] | None = None) -> int:
     else:
         if args.write_job:
             err("-j/--write-job requires --dry")
+        if args.write_remote_job:
+            err("--write-remote-job requires --dry")
         if args.upload:
             err("--upload requires --dry")
     if args.write_job:
@@ -458,6 +478,19 @@ def _main(argv: list[str] | None = None) -> int:
                 )
             cli_variables[varname] = (varvalue, "str")
 
+    cli_meta_variables = {}
+    if args.explicit_metavars:
+        for varspec in args.explicit_metavars:
+            varname, varvalue = _parse_metavar_spec(varspec)
+            if (
+                varname in cli_meta_variables
+                and cli_meta_variables[varname][0] != varvalue
+            ):
+                err(
+                    f"Meta variable '{varname}' specified multiple times with different values"
+                )
+            cli_meta_variables[varname] = (varvalue, "str")
+
     ################################################################
 
     workdir = os.getcwd()
@@ -483,6 +516,10 @@ def _main(argv: list[str] | None = None) -> int:
         if meta is None:
             meta = {}
         meta["__direct_print__"] = True
+    if args.write_remote_job:
+        if meta is None:
+            meta = {}
+        meta[REMOTE_JOB_META_KEY] = args.write_remote_job
 
     if getattr(args, "ncores", None):
         if meta is None:
@@ -1001,6 +1038,7 @@ def _main(argv: list[str] | None = None) -> int:
         result_targets=result_targets,
         environment=environment,
         variables=variables,
+        meta_variables=cli_meta_variables,
         meta=meta,
         dry_run=(args.dry_run and not args.upload),
     )
@@ -1029,7 +1067,7 @@ def _main(argv: list[str] | None = None) -> int:
         if args.write_job is not None:
             os.mkdir(args.write_job)
             transformation_buffer = tf_get_buffer(transformation_dict)
-            dunder = extract_dunder(transformation_dict)
+            dunder = extract_job_dunder(transformation_dict)
             if dunder:
                 with open(os.path.join(args.write_job, "dunder.json"), "wb") as _f:
                     _f.write(json_dumps_bytes(dunder) + b"\n")

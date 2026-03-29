@@ -14,10 +14,9 @@ import seamless.config as seamless_config
 from seamless import CacheMissError, Checksum
 
 from seamless_transformer.cmd.file_load import read_checksum_file
-from seamless_transformer.transformation_class import (
-    compute_transformation_sync,
-    transformation_from_dict,
-)
+from seamless_transformer.remote_job import RemoteJobWritten
+from seamless_transformer.transformation_cache import run_sync
+from seamless_transformer.transformation_utils import extract_tf_dunder
 
 try:
     from seamless_config.select import select_project, select_subproject
@@ -57,15 +56,6 @@ def _resolve_transformation_dict(checksum: Checksum) -> dict[str, Any]:
     if "__output__" not in transformation:
         transformation["__output__"] = ("result", "mixed", None)
     return transformation
-
-
-def _extract_dunder(transformation_dict: dict[str, Any]) -> dict[str, Any]:
-    core_keys = {"__language__", "__output__", "__as__", "__format__"}
-    return {
-        k: v
-        for k, v in transformation_dict.items()
-        if k.startswith("__") and k not in core_keys and not k.startswith("__code")
-    }
 
 
 def _configure_logging(*, debug: bool, verbose: bool) -> None:
@@ -186,23 +176,19 @@ def _main(argv: list[str] | None = None) -> int:
             meta["allow_input_fingertip"] = True
         transformation_dict["__meta__"] = meta
 
-    tf_dunder = _extract_dunder(transformation_dict)
+    tf_dunder = extract_tf_dunder(transformation_dict)
     try:
-        meta = {}
-        if args.fingertip:
-            meta["allow_input_fingertip"] = True
-        transformation = transformation_from_dict(
+        result_checksum = run_sync(
             transformation_dict,
-            meta=meta,
-            scratch=bool(args.scratch),
+            tf_checksum=checksum,
             tf_dunder=tf_dunder,
-        )
-        result_checksum = compute_transformation_sync(
-            transformation,
+            scratch=bool(args.scratch),
             require_value=False,
         )
         if result_checksum is None:
             raise RuntimeError("Result checksum unavailable")
+    except RemoteJobWritten:
+        return 0
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1

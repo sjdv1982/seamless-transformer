@@ -6,7 +6,7 @@ import builtins
 from seamless import Checksum
 from seamless.checksum.serialize import serialize_sync as serialize
 
-from seamless_transformer.transformation_utils import tf_get_buffer
+from seamless_transformer.transformation_utils import extract_tf_dunder, tf_get_buffer
 
 from .message import message as msg
 from .register import register_buffer, register_dict
@@ -18,6 +18,7 @@ def prepare_bash_code(
     make_executables: list[str],
     result_targets: dict | None,
     capture_stdout: bool,
+    meta_variable_names: list[str] | None = None,
 ):
     """Adapt cmd-seamless bash command into bash code for a bash transformation.
     Deals with:
@@ -38,6 +39,10 @@ def prepare_bash_code(
         if has_cwd_executable:
             bashcode += "export PATH=./:$PATH\n"
         bashcode += f"chmod +x{make_executables_str}\n"
+
+    if meta_variable_names:
+        for name in sorted(meta_variable_names):
+            bashcode += f'export {name}="${{META__{name}}}"\n'
 
     if not result_targets:
         assert capture_stdout
@@ -69,7 +74,8 @@ def prepare_bash_transformation(
     capture_stdout: bool,
     environment: dict,
     meta: dict,
-    variables: dict,
+    variables: dict | None,
+    meta_variables: dict | None = None,
     dry_run: bool = False,
 ) -> str:
     """Prepare a bash transformation for execution.
@@ -91,15 +97,8 @@ def prepare_bash_transformation(
 
     Returns: transformation checksum, transformation dict
     """
-    bashcode = prepare_bash_code(
-        code,
-        make_executables=make_executables,
-        result_targets=result_targets,
-        capture_stdout=capture_stdout,
-    )
-
     new_args = {
-        "code": ("text", None, bashcode),
+        "code": ("text", None, None),
     }
     for attr in ("bashcode", "pins_"):
         if attr in checksum_dict:
@@ -143,6 +142,25 @@ def prepare_bash_transformation(
                 raise TypeError(celltype)
             new_args[k] = celltype, None, value
 
+    meta_variable_names = []
+    if meta_variables:
+        for k, (v, celltype) in meta_variables.items():
+            if celltype in ("int", "float", "bool", "str"):
+                value = getattr(builtins, celltype)(v)
+            else:
+                raise TypeError(celltype)
+            new_args[f"META__{k}"] = celltype, None, value
+            meta_variable_names.append(k)
+
+    bashcode = prepare_bash_code(
+        code,
+        make_executables=make_executables,
+        result_targets=result_targets,
+        capture_stdout=capture_stdout,
+        meta_variable_names=meta_variable_names,
+    )
+    new_args["code"] = ("text", None, bashcode)
+
     for k, v in new_args.items():
         celltype, subcelltype, value = v
         buffer = serialize(value, celltype)
@@ -155,17 +173,6 @@ def prepare_bash_transformation(
     tf_buffer.tempref()
 
     return tf_checksum, transformation_dict
-
-
-def _extract_dunder(transformation_dict: dict) -> dict:
-    core_keys = {"__language__", "__output__", "__as__", "__format__"}
-    return {
-        k: v
-        for k, v in transformation_dict.items()
-        if k.startswith("__") and k not in core_keys and not k.startswith("__code")
-    }
-
-
 def run_transformation(
     transformation_dict: dict, *, undo: bool, fingertip=False, scratch=False
 ):
@@ -179,7 +186,7 @@ def run_transformation(
         transformation_from_dict,
     )
 
-    tf_dunder = _extract_dunder(transformation_dict)
+    tf_dunder = extract_tf_dunder(transformation_dict)
     transformation = transformation_from_dict(
         transformation_dict,
         meta={},
@@ -207,7 +214,7 @@ async def run_transformation_async(
 
     from seamless_transformer.transformation_class import transformation_from_dict
 
-    tf_dunder = _extract_dunder(transformation_dict)
+    tf_dunder = extract_tf_dunder(transformation_dict)
     transformation = transformation_from_dict(
         transformation_dict,
         meta={},

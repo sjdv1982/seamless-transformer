@@ -1,3 +1,7 @@
 - project: cmd-test
 - execution: remote
 - remote: daskserver
+
+- stage remote-write-job:
+    - execution: remote
+    - remote: jobserver

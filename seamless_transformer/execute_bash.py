@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -44,6 +45,112 @@ def _looks_like_deep_folder(data) -> bool:
         except Exception:
             return False
     return True
+
+
+def _is_shell_env_name(name: str) -> bool:
+    if not name:
+        return False
+    if not (name[0].isalpha() or name[0] == "_"):
+        return False
+    for char in name[1:]:
+        if not (char.isalnum() or char == "_"):
+            return False
+    return True
+
+
+def write_bash_job(
+    bashcode, pins_, conda_environment_, PINS, FILESYSTEM, *, script_name="transform.sh"
+):
+    """Materialize a bash transformation job in the current directory."""
+
+    env = os.environ.copy()
+    base_env = env.copy()
+    for pin in pins_:
+        if pin == "pins_":
+            continue
+        if pin == "bashcode":
+            continue
+        v = PINS[pin]
+        if isinstance(v, Buffer):
+            v = v.content
+        if pin in FILESYSTEM:
+            if FILESYSTEM[pin]["filesystem"]:
+                env[pin] = v
+                pin_parent = os.path.dirname(pin)
+                if len(pin_parent):
+                    os.makedirs(pin_parent, exist_ok=True)
+                os.symlink(v, pin)
+                continue
+            elif FILESYSTEM[pin]["mode"] == "directory":
+                fs_entry = FILESYSTEM[pin]
+                deep = fs_entry.get("hash_pattern") == {"*": "##"}
+                if not deep:
+                    deep = _looks_like_deep_folder(v)
+                write_to_directory(pin, v, cleanup=False, deep=deep, text_only=False)
+                env[pin] = pin
+                continue
+        storage, form = get_form(v)
+        if storage.startswith("mixed"):
+            raise TypeError("pin '%s' has '%s' data" % (pin, storage))
+        if storage == "pure-plain":
+            if isinstance(form, str):
+                vv = str(v)
+                if not vv.endswith("\n"):
+                    vv += "\n"
+                if pin.find(".") == -1 and len(vv) <= 1000:
+                    env[pin] = vv.rstrip("\n")
+            else:
+                vv = json.dumps(v)
+            _write_file(pin, vv, "w")
+        elif isinstance(v, bytes):
+            _write_file(pin, v, "bw")
+        else:
+            if v.dtype == np.uint8 and v.ndim == 1:
+                vv = v.tobytes()
+                with open(pin, "bw") as pinf:
+                    pinf.write(vv)
+            else:
+                with open(pin, "bw") as pinf:
+                    np.save(pinf, v, allow_pickle=False)
+
+    bash_header = """set -u -e
+trap 'jobs -p | xargs -r kill' EXIT
+"""
+    if conda_environment_:
+        conda_root = os.environ.get("CONDA_ROOT")
+        if not conda_root:
+            try:
+                conda_root = subprocess.check_output(
+                    ["conda", "info", "--base"],
+                    stderr=subprocess.DEVNULL,
+                ).decode().strip()
+            except Exception:
+                pass
+        if not conda_root:
+            raise RuntimeError(
+                "Cannot activate conda environment: "
+                "could not determine conda root directory"
+            )
+        bash_header += f"""
+source {conda_root}/etc/profile.d/conda.sh
+conda activate {conda_environment_}
+"""
+
+    bashcode2 = bash_header + bashcode
+
+    script_lines = ["#!/bin/bash\n"]
+    for key in sorted(env):
+        if env[key] == base_env.get(key):
+            continue
+        if not _is_shell_env_name(key):
+            continue
+        script_lines.append(f"export {key}={shlex.quote(str(env[key]))}\n")
+    script_lines.append(bashcode2)
+    with open(script_name, "w", encoding="utf-8") as script_file:
+        script_file.writelines(script_lines)
+    os.chmod(script_name, 0o755)
+
+    return env, bashcode2
 
 
 def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN):
@@ -96,79 +203,13 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
         os.chdir(tempdir)
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, sighandler)
-        for pin in pins_:
-            if pin == "pins_":
-                continue
-            if pin == "bashcode":
-                continue
-            v = PINS[pin]
-            if isinstance(v, Buffer):
-                v = v.content
-            if pin in FILESYSTEM:
-                if FILESYSTEM[pin]["filesystem"]:
-                    env[pin] = v
-                    pin_parent = os.path.dirname(pin)
-                    if len(pin_parent):
-                        os.makedirs(pin_parent, exist_ok=True)
-                    os.symlink(v, pin)
-                    continue
-                elif FILESYSTEM[pin]["mode"] == "directory":
-                    fs_entry = FILESYSTEM[pin]
-                    deep = fs_entry.get("hash_pattern") == {"*": "##"}
-                    if not deep:
-                        deep = _looks_like_deep_folder(v)
-                    write_to_directory(
-                        pin, v, cleanup=False, deep=deep, text_only=False
-                    )
-                    env[pin] = pin
-                    continue
-            storage, form = get_form(v)
-            if storage.startswith("mixed"):
-                raise TypeError("pin '%s' has '%s' data" % (pin, storage))
-            if storage == "pure-plain":
-                if isinstance(form, str):
-                    vv = str(v)
-                    if not vv.endswith("\n"):
-                        vv += "\n"
-                    if pin.find(".") == -1 and len(vv) <= 1000:
-                        env[pin] = vv.rstrip("\n")
-                else:
-                    vv = json.dumps(v)
-                _write_file(pin, vv, "w")
-            elif isinstance(v, bytes):
-                _write_file(pin, v, "bw")
-            else:
-                if v.dtype == np.uint8 and v.ndim == 1:
-                    vv = v.tobytes()
-                    with open(pin, "bw") as pinf:
-                        pinf.write(vv)
-                else:
-                    with open(pin, "bw") as pinf:
-                        np.save(pinf, v, allow_pickle=False)
-        bash_header = """set -u -e
-trap 'jobs -p | xargs -r kill' EXIT
-"""
-        if conda_environment_:
-            conda_root = os.environ.get("CONDA_ROOT")
-            if not conda_root:
-                try:
-                    conda_root = subprocess.check_output(
-                        ["conda", "info", "--base"],
-                        stderr=subprocess.DEVNULL,
-                    ).decode().strip()
-                except Exception:
-                    pass
-            if not conda_root:
-                raise RuntimeError(
-                    "Cannot activate conda environment: "
-                    "could not determine conda root directory"
-                )
-            bash_header += f"""
-source {conda_root}/etc/profile.d/conda.sh
-conda activate {conda_environment_}
-"""
-
-        bashcode2 = bash_header + bashcode
+        env, bashcode2 = write_bash_job(
+            bashcode,
+            pins_,
+            conda_environment_,
+            PINS,
+            FILESYSTEM,
+        )
         process = subprocess.Popen(
             bashcode2,
             shell=True,
@@ -266,4 +307,4 @@ Error: Result folder RESULT is empty
     return result
 
 
-__all__ = ["execute_bash"]
+__all__ = ["execute_bash", "write_bash_job"]

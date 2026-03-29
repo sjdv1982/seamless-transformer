@@ -7,6 +7,7 @@ import os
 
 from seamless import CacheMissError, Checksum, is_worker
 
+from .remote_job import RemoteJobWritten, parse_remote_job_written
 from .run import run_transformation_dict
 from . import worker
 from seamless_config.select import get_execution
@@ -171,6 +172,9 @@ class TransformationCache:
                 scratch=scratch,
             )
             if isinstance(result_checksum, str):
+                remote_job_dir = parse_remote_job_written(result_checksum)
+                if remote_job_dir is not None:
+                    raise RemoteJobWritten(remote_job_dir)
                 raise RuntimeError(result_checksum)
             result_checksum = Checksum(result_checksum)
         elif worker.has_spawned() and not is_worker() and not force_local:
@@ -182,6 +186,9 @@ class TransformationCache:
                 scratch=scratch,
             )
             if isinstance(result_checksum, str):
+                remote_job_dir = parse_remote_job_written(result_checksum)
+                if remote_job_dir is not None:
+                    raise RemoteJobWritten(remote_job_dir)
                 raise RuntimeError(result_checksum)
             result_checksum = Checksum(result_checksum)
         elif is_worker() and not force_local:
@@ -194,6 +201,9 @@ class TransformationCache:
                 scratch=scratch,
             )
             if isinstance(result_checksum, str):
+                remote_job_dir = parse_remote_job_written(result_checksum)
+                if remote_job_dir is not None:
+                    raise RemoteJobWritten(remote_job_dir)
                 raise RuntimeError(result_checksum)
             try:
                 result_checksum = Checksum(result_checksum)
@@ -213,6 +223,9 @@ class TransformationCache:
                 scratch,
                 require_value,
             )
+            remote_job_dir = parse_remote_job_written(result_checksum)
+            if remote_job_dir is not None:
+                raise RemoteJobWritten(remote_job_dir)
             result_checksum = Checksum(result_checksum)
 
         if require_value:

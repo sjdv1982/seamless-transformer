@@ -3,15 +3,26 @@
 from typing import Any, Dict, List, Tuple
 from contextlib import contextmanager
 import os
+import shutil
 import threading
 
 from seamless import Buffer, Checksum
 from .cached_compile import exec_code
+from .remote_job import (
+    RemoteJobWritten,
+    encode_remote_job_written,
+    get_write_remote_job,
+)
 from .injector import transformer_injector as injector
 from .module_builder import build_all_modules
 from .transformation_namespace import build_transformation_namespace_sync
-from .transformation_utils import is_deep_celltype, pack_deep_structure
-from .execute_bash import execute_bash
+from .transformation_utils import (
+    is_deep_celltype,
+    merge_transformation_meta,
+    pack_deep_structure,
+    resolve_env_checksum,
+)
+from .execute_bash import execute_bash, write_bash_job
 
 PACK_DEEP_RESULTS = True
 
@@ -67,15 +78,11 @@ def _inject_main_globals(module_workspace, namespace):
 def run_transformation_dict(
     transformation_dict: Dict[str, Any],
     tf_checksum: Checksum,
-    tf_dunder,
-    scratch: bool,
+    tf_dunder: Dict[str, Any] | None = None,
+    scratch: bool = False,
     require_value: bool = False,
-) -> Checksum:
+) -> Checksum | str:
     """Execute a transformation dict.
-
-    Ported from seamless.workflow.core.direct.run.run_transformation_dict.
-    Many responsibilities (metadata, module compilation)
-    are still pending and therefore commented out for now.
 
     tf_checksum is the checksum of the transformation dict
     """
@@ -107,10 +114,12 @@ def run_transformation_dict(
 
     transformation: Dict[str, Any] = {}
     transformation.update(transformation_dict)
-    meta = transformation.get("__meta__")
+    meta = merge_transformation_meta(transformation, tf_dunder)
+    if meta:
+        transformation["__meta__"] = meta
     driver_active = bool(meta.get("driver")) if isinstance(meta, dict) else False
 
-    env_checksum0 = transformation.get("__env__")
+    env_checksum0 = resolve_env_checksum(transformation, tf_dunder)
     env_dict = {}
     if env_checksum0 is not None:
         env_buffer = Checksum(env_checksum0).resolve()
@@ -171,6 +180,17 @@ def run_transformation_dict(
         namespace["OUTPUTPIN"] = output_celltype
 
     if language == "bash":
+        remote_job_dir = get_write_remote_job(meta)
+        if remote_job_dir is not None:
+            job_directory = _write_remote_bash_job(
+                remote_job_dir,
+                code,
+                sorted(namespace.get("PINS", {}).keys()),
+                env_dict.get("conda_environment", ""),
+                namespace.get("PINS", {}),
+                namespace.get("FILESYSTEM", {}),
+            )
+            return encode_remote_job_written(job_directory)
         namespace["execute_bash"] = execute_bash
         namespace["bashcode"] = code
         pins = namespace.get("PINS", {})
@@ -213,6 +233,40 @@ def run_transformation_dict(
             result_buffer.tempref(scratch=True)
 
     return result_checksum
+
+
+def _write_remote_bash_job(
+    remote_job_dir: str,
+    bashcode: str,
+    pins_: List[str],
+    conda_environment: str,
+    pins: Dict[str, Any],
+    filesystem: Dict[str, Any],
+) -> str:
+    """Materialize a bash transformation job and stop before execution."""
+
+    job_directory = os.path.abspath(remote_job_dir)
+    old_cwd = os.getcwd()
+    os.makedirs(job_directory)
+    try:
+        os.chdir(job_directory)
+        write_bash_job(
+            bashcode,
+            pins_,
+            conda_environment,
+            pins,
+            filesystem,
+        )
+    except Exception:
+        os.chdir(old_cwd)
+        shutil.rmtree(job_directory, ignore_errors=True)
+        raise
+    finally:
+        try:
+            os.chdir(old_cwd)
+        except Exception:
+            pass
+    return job_directory
 
 
 def get_transformation_inputs_output(
@@ -263,4 +317,5 @@ __all__ = [
     "run_transformation_dict",
     "get_transformation_inputs_output",
     "is_driver_context",
+    "RemoteJobWritten",
 ]

@@ -40,6 +40,7 @@ from seamless.caching.buffer_cache import get_buffer_cache
 
 from .process import ChildChannel, ProcessManager, ConnectionClosed
 from .process.manager import ProcessError
+from .remote_job import parse_remote_job_written
 from .run import run_transformation_dict
 
 _DASK_AVAILABLE_ENV = "SEAMLESS_DASK_AVAILABLE"
@@ -640,6 +641,8 @@ def _execute_transformation_impl(
             result = run_transformation_dict(
                 transformation_dict, tf_checksum, tf_dunder, scratch
             )
+            if parse_remote_job_written(result) is not None:
+                return result
             result_checksum = Checksum(result)
             result_checksum.tempref()
             return result_checksum
@@ -2241,6 +2244,8 @@ async def forward_to_parent(
                     return await loop.run_in_executor(
                         None, _execute_transformation, payload
                     )
+                if parse_remote_job_written(result) is not None:
+                    return result
                 if result == "cancelled":
                     raise RuntimeError("Delegated transformation cancelled")
                 if result == "unknown":
@@ -2258,6 +2263,8 @@ async def forward_to_parent(
             result_hex = response.get("result")
             if result_hex is None:
                 raise RuntimeError("Delegated transformation returned no result")
+            if parse_remote_job_written(result_hex) is not None:
+                return result_hex
             try:
                 return Checksum(result_hex)
             except Exception as exc:
@@ -2273,6 +2280,8 @@ async def forward_to_parent(
         if result == _DELEGATION_REFUSED:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, _execute_transformation, payload)
+        if parse_remote_job_written(result) is not None:
+            return result
         # any other string is an error/traceback
         raise RuntimeError(result)
     if not isinstance(result, (Checksum, bytes, bytearray)):
