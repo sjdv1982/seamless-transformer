@@ -1839,6 +1839,8 @@ class _WorkerManager:
                             return exc
                         if result_checksum_hex is None:
                             return "Result checksum unavailable"
+                        if parse_remote_job_written(result_checksum_hex) is not None:
+                            return result_checksum_hex
                         return Checksum(result_checksum_hex)
                     finally:
                         if futures is not None:
