@@ -21,47 +21,30 @@ def _run_command(args, *, cwd: Path) -> subprocess.CompletedProcess[str]:
     )
     return result
 
-
-def _extract_checksum(result: subprocess.CompletedProcess[str]) -> str:
-    text = "\n".join([result.stdout, result.stderr])
-    matches = _CHECKSUM_RE.findall(text)
-    if not matches:
-        raise AssertionError(text)
-    return matches[-1]
-
-
 def test_write_remote_job_roundtrip(tmp_path):
     remote_job_dir = tmp_path / "remote-job"
     command = "paste data/b.txt data/a.txt | awk 'NF == 2 && $1 > 10{print $2}'"
+    prepare_args = [
+        "seamless-run",
+        "-q",
+        "--stage",
+        "remote-write-job",
+        "--dry",
+        "--upload",
+        "--write-remote-job",
+        str(remote_job_dir),
+        "-c",
+        command,
+    ]
 
     prepare = _run_command(
-        [
-            "seamless-run",
-            "-q",
-            "--stage",
-            "remote-write-job",
-            "--dry",
-            "--upload",
-            "--write-remote-job",
-            str(remote_job_dir),
-            "-c",
-            command,
-        ],
+        prepare_args,
         cwd=CMD_DIR,
     )
     assert prepare.returncode == 0, prepare.stderr or prepare.stdout
-    tf_checksum = _extract_checksum(prepare)
-
-    execute = _run_command(
-        [
-            "seamless-run-transformation",
-            "--stage",
-            "remote-write-job",
-            tf_checksum,
-        ],
-        cwd=CMD_DIR,
-    )
-    assert execute.returncode == 0, execute.stderr or execute.stdout
+    output_text = "\n".join([prepare.stdout, prepare.stderr])
+    assert "Transformation submitted to remote server" in output_text
+    assert not _CHECKSUM_RE.search(output_text), output_text
 
     try:
         assert remote_job_dir.is_dir()
@@ -76,16 +59,8 @@ def test_write_remote_job_roundtrip(tmp_path):
         assert (remote_job_dir / "RESULT").read_text() == "pears\npineapples\n"
 
         shutil.rmtree(remote_job_dir)
-        execute_again = _run_command(
-            [
-                "seamless-run-transformation",
-                "--stage",
-                "remote-write-job",
-                tf_checksum,
-            ],
-            cwd=CMD_DIR,
-        )
-        assert execute_again.returncode == 0, execute_again.stderr or execute_again.stdout
+        execute = _run_command(prepare_args, cwd=CMD_DIR)
+        assert execute.returncode == 0, execute.stderr or execute.stdout
         assert remote_job_dir.is_dir()
     finally:
         shutil.rmtree(remote_job_dir, ignore_errors=True)

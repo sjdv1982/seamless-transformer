@@ -43,11 +43,16 @@ from seamless_transformer.cmd.get_results import (
     get_result_buffer,
     maintain_futures,
 )
-from seamless_transformer.remote_job import REMOTE_JOB_META_KEY
+from seamless_transformer.remote_job import REMOTE_JOB_META_KEY, RemoteJobWritten
 
 ### from seamless.Environment import Environment
 from seamless.checksum.json_ import json_dumps_bytes
-from seamless_transformer.transformation_utils import extract_job_dunder, tf_get_buffer
+from seamless_transformer.transformation_cache import run_sync
+from seamless_transformer.transformation_utils import (
+    extract_job_dunder,
+    extract_tf_dunder,
+    tf_get_buffer,
+)
 
 try:
     from seamless_config import get_seamless_cache
@@ -1096,6 +1101,30 @@ def _main(argv: list[str] | None = None) -> int:
                         env_buffer = Checksum(env_checksum).resolve()
                     with open(os.path.join(args.write_job, "env.json"), "wb") as _f:
                         file_write(_f, env_buffer)
+
+        if args.write_remote_job:
+            print("Transformation submitted to remote server")
+            if args.upload:
+                transformation_buffer = Checksum(transformation_checksum).resolve()
+                assert isinstance(transformation_buffer, Buffer)
+                transformation_buffer.incref()
+            tf_dunder = extract_tf_dunder(transformation_dict)
+            try:
+                run_sync(
+                    transformation_dict,
+                    tf_checksum=transformation_checksum,
+                    tf_dunder=tf_dunder,
+                    scratch=False,
+                    require_value=False,
+                )
+            except RemoteJobWritten:
+                return 0
+            except Exception:
+                traceback.print_exc(limit=0)
+                return 1
+            err(
+                "Remote job write requested but the transformation returned a result checksum"
+            )
 
         if args.upload or args.write_job:
             print(transformation_checksum)
