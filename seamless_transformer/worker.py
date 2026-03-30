@@ -335,25 +335,41 @@ class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
     """ThreadPoolExecutor that creates daemon threads so exit is not blocked."""
 
     def _adjust_thread_count(self) -> None:  # type: ignore[override]
-        if len(self._threads) < self._max_workers:
-            thread_name = f"{self._thread_name_prefix}_{len(self._threads)}"
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+        if len(self._threads) >= self._max_workers:
+            return
 
-            def weakref_cb(_, q=self._work_queue):
-                q.put(None)
+        thread_name = "%s_%d" % (self._thread_name_prefix or self, len(self._threads))
 
-            t = threading.Thread(
-                name=thread_name,
-                target=_cf_worker,
-                args=(
-                    weakref.ref(self, weakref_cb),
-                    self._work_queue,
-                    self._initializer,
-                    self._initargs,
-                ),
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        # ThreadPoolExecutor's private worker bootstrap changed in Python 3.14:
+        # worker threads now receive a WorkerContext instead of initializer/initargs.
+        create_worker_context = getattr(self, "_create_worker_context", None)
+        if callable(create_worker_context):
+            worker_args = (
+                weakref.ref(self, weakref_cb),
+                create_worker_context(),
+                self._work_queue,
             )
-            t.daemon = True
-            t.start()
-            self._threads.add(t)
+        else:
+            worker_args = (
+                weakref.ref(self, weakref_cb),
+                self._work_queue,
+                getattr(self, "_initializer", None),
+                getattr(self, "_initargs", ()),
+            )
+
+        t = threading.Thread(
+            name=thread_name,
+            target=_cf_worker,
+            args=worker_args,
+        )
+        t.daemon = True
+        t.start()
+        self._threads.add(t)
 
 
 _DASK_DELEGATE_MAX_WORKERS = min(64, (os.cpu_count() or 1) * 4)

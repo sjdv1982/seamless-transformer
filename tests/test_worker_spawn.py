@@ -3,6 +3,7 @@ import os
 import pytest
 
 from seamless.transformer import direct, delayed, has_spawned, spawn
+from seamless_transformer.worker import _DaemonThreadPoolExecutor
 
 
 @pytest.fixture(scope="session")
@@ -54,3 +55,14 @@ def test_nested_transformations_round_trip_to_parent(spawned_workers):
 def test_spawn_is_singleton(spawned_workers):
     with pytest.raises(RuntimeError):
         spawn(1)
+
+
+def test_daemon_thread_pool_executor_executes_tasks():
+    executor = _DaemonThreadPoolExecutor(max_workers=1, thread_name_prefix="compat")
+    try:
+        future = executor.submit(lambda: 42)
+        assert future.result(timeout=1) == 42
+        threads = list(executor._threads)
+        assert threads and all(thread.daemon for thread in threads)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
