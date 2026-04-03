@@ -401,7 +401,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--write-remote-job",
         dest="write_remote_job",
-        help="Requires --dry. Store the remote job directory in transformation metadata and stop remote execution after materializing that directory",
+        help="Requires --dry. Implies --upload. Store the remote job directory in transformation metadata and stop remote execution after materializing that directory",
     )
 
     parser.add_argument(
@@ -421,6 +421,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", nargs=argparse.REMAINDER)
 
     args = parser.parse_args()
+    remote_job_write = bool(args.write_remote_job)
 
     primary_index = args.primary - 1  # convert to 0-indexed
 
@@ -437,6 +438,8 @@ def _main(argv: list[str] | None = None) -> int:
     if args.write_job:
         if os.path.exists(args.write_job):
             err(f"Output job directory '{args.write_job}' already exists")
+    if remote_job_write:
+        args.upload = True
     command = args.command
 
     verbosity = min(args.verbosity, 3)
@@ -888,13 +891,13 @@ def _main(argv: list[str] | None = None) -> int:
     )
 
     include_dask = True
-    if args.dry_run or args.qsubmit or local_mode:
+    if (args.dry_run and not remote_job_write) or args.qsubmit or local_mode:
         include_dask = False
     try:
         set_workdir(os.getcwd())
         if not set_remote_clients_from_env(include_dask=include_dask):
             load_config_files()
-            if args.dry_run or args.qsubmit:
+            if (args.dry_run and not remote_job_write) or args.qsubmit:
                 import seamless_remote.database_remote
 
                 seamless_remote.database_remote.DISABLED = True
@@ -906,6 +909,9 @@ def _main(argv: list[str] | None = None) -> int:
                 if local_mode:
                     if get_execution() == "remote":
                         select_execution("process")
+                if args.upload or remote_job_write:
+                    if get_selected_cluster() is None:
+                        err("--upload or --write-remote-job require a cluster")
 
             change_stage()
         # /CONFIG
