@@ -245,9 +245,19 @@ def _write_remote_bash_job(
 ) -> str:
     """Materialize a bash transformation job and stop before execution."""
 
-    job_directory = os.path.abspath(remote_job_dir)
+    job_directory = os.path.abspath(os.path.expanduser(remote_job_dir))
     old_cwd = os.getcwd()
-    os.makedirs(job_directory)
+    try:
+        os.makedirs(job_directory)
+    except PermissionError as exc:
+        raise PermissionError(
+            "Cannot create remote job directory "
+            f"'{job_directory}': {exc}. "
+            "The path is interpreted on the execution host that materializes the "
+            "job directory, typically the remote jobserver host; choose a path "
+            "that is writable there, for example ~/..., /tmp/..., or your "
+            "cluster scratch directory."
+        ) from exc
     try:
         os.chdir(job_directory)
         write_bash_job(
