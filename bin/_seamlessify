@@ -57,6 +57,12 @@ if len(words) == 1:
         print(line)
         exit(0)
 
+for n, word in enumerate(words):
+    if word.endswith(".CHECKSUM"):
+        words[n] = word[: -len(".CHECKSUM")]
+    elif word.endswith(".INDEX"):
+        words[n] = word[: -len(".INDEX")]
+
 
 for n in range(len(words) - 1, 1, -1):
     sep = words[n].strip()

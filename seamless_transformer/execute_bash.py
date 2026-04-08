@@ -19,10 +19,10 @@ from seamless.util.mount_directory import write_to_directory
 
 def _write_file(pinname, data, filemode):
     if pinname.startswith("/"):
-        raise ValueError("Pin {}: Absolute path is not allowed")
+        raise ValueError(f"Pin {pinname}: Absolute path is not allowed")
     path_elements = pinname.split("/")
     if ".." in path_elements:
-        raise ValueError("Pin {}: .. is not allowed")
+        raise ValueError(f"Pin {pinname}: .. is not allowed")
     if len(path_elements) > 1:
         parent_dir = os.path.dirname(pinname)
         os.makedirs(parent_dir, exist_ok=True)

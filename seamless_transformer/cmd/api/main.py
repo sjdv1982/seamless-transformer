@@ -96,10 +96,10 @@ def _load_input_file(path: str) -> list[str]:
     pathdir = os.path.dirname(path)
     for line in lines:
         line = line.strip()
-        if line.startswith("/"):
+        if pathlib.Path(line).is_absolute():
             result.append(line)
         else:
-            result.append(os.path.normpath(os.path.join(pathdir, line)))
+            result.append(os.path.join(pathdir, line))
     return result
 
 
@@ -254,6 +254,7 @@ def _main(argv: list[str] | None = None) -> int:
 
     Lines may be empty; empty lines are ignored.
     """,
+        action="append",
         dest="input_files",
     )
     parser.add_argument(
@@ -610,7 +611,8 @@ def _main(argv: list[str] | None = None) -> int:
     if args.extra_inputs:
         extra_inputs.extend(args.extra_inputs)
     if args.input_files:
-        extra_inputs.extend(_load_input_file(args.input_files))
+        for input_file in args.input_files:
+            extra_inputs.extend(_load_input_file(input_file))
 
     argtypes_extra_inputs = {}
     if extra_inputs:

@@ -14,6 +14,10 @@ from .message import message as msg, message_and_exit as err
 from .file_load import read_checksum_file
 
 
+def _has_explicit_sidecar_suffix(arg: str) -> bool:
+    return arg.endswith(".CHECKSUM") or arg.endswith(".INDEX")
+
+
 def fill_checksum_arguments(file_args: list, order: list[str]):
     for n, file_arg in enumerate(file_args.copy()):
         if isinstance(file_arg, str):
@@ -22,6 +26,8 @@ def fill_checksum_arguments(file_args: list, order: list[str]):
             newf = file_arg
 
         arg = newf["mapping"]
+        if _has_explicit_sidecar_suffix(arg):
+            continue
         change = False
         if arg.endswith(".CHECKSUM"):
             arg0 = os.path.splitext(arg)[0]
@@ -97,12 +103,6 @@ def guess_arguments_with_custom_error_messages(
 
     result = {"@order": args}
     for argindex0, arg in enumerate(args.copy()):
-        if arg.endswith(".CHECKSUM") or arg.endswith(".INDEX"):
-            arg2 = os.path.splitext(arg)[0]
-            msg(3, "Argument #{} '{}' => '{}'".format(argindex, arg, arg2))
-            arg = arg2
-            args[argindex0] = arg
-        arg2 = arg
         argindex = argindex0 + 1
         path = Path(arg)
         future_path = Path(arg + ".FUTURE")
@@ -245,6 +245,9 @@ def guess_arguments(
     from argument.CHECKSUM. In that case, if argument.INDEX exists as well,
     (regardless of its contents). the argument is considered as a directory,
     else as a file.
+
+    If an argument explicitly ends in .CHECKSUM or .INDEX, it is treated as a
+    literal file path and is not dereferenced to the base path.
 
     Input:
     - args: list of arguments

@@ -56,12 +56,15 @@ def test_parallel_transformation_list_dask():
     nonce = time.time_ns()
 
     @delayed
-    def func(a, nonce):
+    def func(a, delay, nonce):
+        import time
+
+        time.sleep(delay)
         return nonce + a + 5
 
     tflist = TransformationList(
-        [func(i, nonce) for i in range(18)],
-        show_progress=True,
+        [func(i, 0, nonce) for i in range(18)],
+        show_progress=False,
     )
     start = time.perf_counter()
     for i, tf in enumerate(parallel(tflist)):
@@ -72,7 +75,19 @@ def test_parallel_transformation_list_dask():
     assert tflist._finished == 18
     assert tflist._errors == 0
     assert tflist._cancelled == 0
+    assert tflist[7].value == nonce + 12
+
+    nonce = time.time_ns()
+    tflist = TransformationList(
+        [func(i, DELAY, nonce) for i in range(18)],
+        show_progress=True,
+    )
+    for i, tf in enumerate(parallel(tflist)):
+        assert tf.value == nonce + i + 5
+    assert tflist._finished == 18
+    assert tflist._errors == 0
+    assert tflist._cancelled == 0
+    assert tflist[7].value == nonce + 12
     assert tflist._pbar is not None
     assert tflist._pbar.n == 18
     assert tflist._pbar.total == 18
-    assert tflist[7].value == nonce + 12

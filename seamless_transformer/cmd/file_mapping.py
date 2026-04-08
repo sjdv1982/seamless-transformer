@@ -123,7 +123,7 @@ or:
                                 argdescr, relpath
                             ),
                         )
-                    new_path = relpath
+                    new_path = os.path.normpath(relpath)
                     new_entry = {"type": argtype, "mapping": fullpath}
 
                 elif mapping_mode == "strip":
