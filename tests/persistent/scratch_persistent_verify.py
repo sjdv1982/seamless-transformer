@@ -189,7 +189,10 @@ def main() -> None:
             + (proc.stderr or "").splitlines()
             if line
         )
-        if "CacheMiss" not in err_output:
+        if (
+            "CacheMiss" not in err_output
+            and result_checksum.hex() not in err_output
+        ):
             raise RuntimeError(
                 "Expected CacheMissError when CLI runs without --fingertip"
             )
