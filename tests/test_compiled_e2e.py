@@ -56,6 +56,22 @@ extern "C" int transform(int32_t a, int32_t b, int32_t *result) {
     assert tf(a=5, b=6) == 11
 
 
+@pytest.mark.skipif(not shutil.which("rustc"), reason="rustc required")
+def test_rust_scalar_archive_mode():
+    tf = DirectCompiledTransformer("rust")
+    tf.schema = ADD_SCHEMA
+    tf.code = """\
+#[no_mangle]
+pub unsafe extern "C" fn transform(a: i32, b: i32, result: *mut i32) -> i32 {
+    unsafe {
+        *result = a + b;
+    }
+    0
+}
+"""
+    assert tf(a=6, b=7) == 13
+
+
 def test_delayed_compiled_transformer():
     tf = CompiledTransformer("c")
     tf.schema = ADD_SCHEMA
