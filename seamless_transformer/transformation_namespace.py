@@ -9,7 +9,11 @@ from typing import Any, Dict, Tuple
 from seamless import CacheMissError, Checksum
 
 from .code_manager import get_code_manager
-from .transformation_utils import unpack_deep_structure, is_deep_celltype
+from .transformation_utils import (
+    TRANSFORMATION_EXECUTION_DUNDER_KEYS,
+    unpack_deep_structure,
+    is_deep_celltype,
+)
 
 
 def _buffer_path_candidates(directory: str, checksum_hex: str) -> tuple[str, str]:
@@ -113,6 +117,8 @@ def build_transformation_namespace_sync(
             "__meta__",
             "__format__",
         ):
+            continue
+        if pinname in TRANSFORMATION_EXECUTION_DUNDER_KEYS:
             continue
         if pinname in (
             "__language__",

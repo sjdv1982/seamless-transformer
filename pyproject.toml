@@ -16,6 +16,10 @@ dependencies = [
     "tqdm",
     "seamless-core",
 ]
+
+[project.optional-dependencies]
+compiled = ["cffi", "numpy", "seamless-signature"]
+
 keywords = ["seamless", "transformer", "computation", "checksum", "reproducible"]
 classifiers = [
     "Development Status :: 3 - Alpha",

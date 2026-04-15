@@ -45,7 +45,7 @@ from seamless_transformer.cmd.get_results import (
 )
 from seamless_transformer.remote_job import REMOTE_JOB_META_KEY, RemoteJobWritten
 
-### from seamless.Environment import Environment
+from seamless_transformer.environment import Environment
 from seamless.checksum.json_ import json_dumps_bytes
 from seamless_transformer.transformation_cache import run_sync
 from seamless_transformer.transformation_utils import (
@@ -853,8 +853,6 @@ def _main(argv: list[str] | None = None) -> int:
         msg(1, f"Identify result targets: {result_targets}")
 
     ################################################################
-    """
-    ### TODO
     env = Environment()
 
     docker_image = args.docker_image
@@ -872,8 +870,6 @@ def _main(argv: list[str] | None = None) -> int:
     if conda_environment is not None:
         msg(1, f'Set conda environment to "{conda_environment}"')
         env.set_conda_env(conda_environment)
-    ### /TODO
-    """
 
     # CONFIG
     """    
@@ -1031,16 +1027,7 @@ def _main(argv: list[str] | None = None) -> int:
 
     ################################################################
 
-    conda_environment = args.conda_environment
-    if conda_environment is None:
-        conda_environment = interface_data.get("environment", {}).get(
-            "conda_environment"
-        )
-
-    environment = {}
-    if conda_environment is not None:
-        msg(1, f'Set conda environment to "{conda_environment}"')
-        environment["conda_environment"] = conda_environment
+    environment = env._to_lowlevel() or {}
 
     transformation_checksum, transformation_dict = prepare_bash_transformation(
         commandstring,

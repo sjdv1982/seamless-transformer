@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import os
 import shutil
 import threading
+import yaml
 
 from seamless import Buffer, Checksum
 from .cached_compile import exec_code
@@ -17,6 +18,7 @@ from .injector import transformer_injector as injector
 from .module_builder import build_all_modules
 from .transformation_namespace import build_transformation_namespace_sync
 from .transformation_utils import (
+    TRANSFORMATION_EXECUTION_DUNDER_KEYS,
     is_deep_celltype,
     merge_transformation_meta,
     pack_deep_structure,
@@ -202,6 +204,33 @@ def run_transformation_dict(
         )
         inputs = []
 
+    if _is_compiled_transformation(transformation, tf_dunder):
+        result = call_compiled_transform(
+            transformation,
+            tf_dunder or {},
+            code,
+            namespace,
+            output_celltype,
+            meta,
+        )
+        if result is None:
+            raise RuntimeError("Result is empty")
+        if is_deep_celltype(output_celltype):
+            if not PACK_DEEP_RESULTS:
+                raise NotImplementedError(
+                    "Packing deep transformation results is not supported yet"
+                )
+            result = pack_deep_structure(result, output_celltype)
+        result_buffer = Buffer(result, output_celltype)
+        result_checksum = result_buffer.get_checksum()
+        if not scratch:
+            if len(result_buffer):
+                result_buffer.tempref()
+        elif require_value:
+            if len(result_buffer):
+                result_buffer.tempref(scratch=True)
+        return result_checksum
+
     result = _execute(
         module_workspace,
         code,
@@ -296,6 +325,8 @@ def get_transformation_inputs_output(
             "__format__",
         ):
             continue
+        if pinname in TRANSFORMATION_EXECUTION_DUNDER_KEYS:
+            continue
         if pinname in (
             "__language__",
             "__output__",
@@ -304,6 +335,8 @@ def get_transformation_inputs_output(
         ):
             continue
         if pinname == "code":
+            continue
+        if pinname == "objects":
             continue
         celltype, subcelltype, _ = transformation[pinname]
         if (celltype, subcelltype) == ("plain", "module"):
@@ -323,9 +356,333 @@ def get_transformation_inputs_output(
     return inputs, outputname, output_celltype, output_subcelltype
 
 
+def _is_compiled_transformation(transformation, tf_dunder):
+    if transformation.get("__compiled__"):
+        return True
+    return isinstance(tf_dunder, dict) and bool(tf_dunder.get("__compiled__"))
+
+
+def _get_execution_dunder(transformation, tf_dunder, key):
+    value = transformation.get(key)
+    if value is None and isinstance(tf_dunder, dict):
+        value = tf_dunder.get(key)
+    return value
+
+
+def _resolve_dunder_value(transformation, tf_dunder, key, celltype):
+    checksum_hex = _get_execution_dunder(transformation, tf_dunder, key)
+    if checksum_hex is None:
+        raise RuntimeError(f"Compiled transformation is missing {key}")
+    buffer = Checksum(checksum_hex).resolve()
+    if buffer is None:
+        raise RuntimeError(f"Cannot resolve compiled transformation {key}: {checksum_hex}")
+    return buffer.get_value(celltype)
+
+
+def _numpy_dtype(dtype_name: str):
+    try:
+        import numpy as np
+    except ImportError:
+        raise ImportError(
+            "numpy is required for compiled transformers. Install it with: pip install numpy"
+        ) from None
+
+    mapping = {
+        "int8": np.dtype("int8"),
+        "int16": np.dtype("int16"),
+        "int32": np.dtype("int32"),
+        "int64": np.dtype("int64"),
+        "uint8": np.dtype("uint8"),
+        "uint16": np.dtype("uint16"),
+        "uint32": np.dtype("uint32"),
+        "uint64": np.dtype("uint64"),
+        "float32": np.dtype("float32"),
+        "float64": np.dtype("float64"),
+        "bool": np.dtype("bool"),
+        "char": np.dtype("S1"),
+        "complex64": np.dtype("complex64"),
+        "complex128": np.dtype("complex128"),
+    }
+    return mapping[dtype_name]
+
+
+def _is_native_dtype(dtype) -> bool:
+    return dtype.byteorder in ("=", "|")
+
+
+def _require_native_dtype(dtype, name: str):
+    if not _is_native_dtype(dtype):
+        raise TypeError(f"{name} must have native byte order")
+
+
+def _shape_for_parameter(parameter, resolved_wildcards, output_maxima=None):
+    if parameter.shape is None:
+        return ()
+    output_maxima = output_maxima or {}
+    shape = []
+    for dim in parameter.shape:
+        if isinstance(dim, int):
+            shape.append(dim)
+        elif dim in resolved_wildcards:
+            shape.append(resolved_wildcards[dim])
+        elif dim in output_maxima:
+            shape.append(output_maxima[dim])
+        else:
+            raise ValueError(f"Wildcard {dim!r} is unresolved")
+    return tuple(shape)
+
+
+def _resolve_input_wildcards(sig, namespace):
+    resolved = {}
+    for parameter in sig.inputs:
+        if parameter.shape is None:
+            continue
+        value = namespace[parameter.name]
+        shape = getattr(value, "shape", None)
+        if shape is None:
+            raise TypeError(f"Input {parameter.name!r} must be a numpy array")
+        if len(shape) != len(parameter.shape):
+            raise ValueError(
+                f"Input {parameter.name!r} has rank {len(shape)}, expected {len(parameter.shape)}"
+            )
+        for index, dim in enumerate(parameter.shape):
+            actual = int(shape[index])
+            if isinstance(dim, int):
+                if actual != dim:
+                    raise ValueError(
+                        f"Input {parameter.name!r} dimension {index} is {actual}, expected {dim}"
+                    )
+            else:
+                previous = resolved.get(dim)
+                if previous is None:
+                    resolved[dim] = actual
+                elif previous != actual:
+                    raise ValueError(
+                        f"Wildcard {dim!r} has inconsistent sizes: {previous} and {actual}"
+                    )
+    return resolved
+
+
+def _coerce_scalar_input(value, parameter):
+    try:
+        import numpy as np
+    except ImportError:
+        raise ImportError(
+            "numpy is required for compiled transformers. Install it with: pip install numpy"
+        ) from None
+
+    expected = _numpy_dtype(parameter.dtype.name)
+    if isinstance(value, np.generic):
+        if value.dtype != expected:
+            raise TypeError(
+                f"Input {parameter.name!r} dtype is {value.dtype}, expected {expected}"
+            )
+        _require_native_dtype(value.dtype, parameter.name)
+        return value.item()
+    return value
+
+
+def _coerce_array_input(ffi, value, parameter):
+    try:
+        import numpy as np
+    except ImportError:
+        raise ImportError(
+            "numpy is required for compiled transformers. Install it with: pip install numpy"
+        ) from None
+
+    expected = _numpy_dtype(parameter.dtype.name)
+    array = np.asarray(value)
+    if array.dtype != expected:
+        raise TypeError(
+            f"Input {parameter.name!r} dtype is {array.dtype}, expected {expected}"
+        )
+    _require_native_dtype(array.dtype, parameter.name)
+    array = np.require(array, dtype=expected, requirements=["C", "ALIGNED"])
+    if not array.flags.aligned:
+        raise TypeError(f"Input {parameter.name!r} is not aligned")
+    ctype = _array_ctype(parameter)
+    return array, ffi.from_buffer(ctype, array)
+
+
+def _array_ctype(parameter):
+    from seamless_signature.c_header import SCALAR_C_TYPES
+
+    if parameter.element_shape:
+        base = parameter.dtype.name
+        suffix = "x".join(str(dim) for dim in parameter.element_shape)
+        return f"{base}_{suffix}[]"
+    return f"{SCALAR_C_TYPES[parameter.dtype.name]}[]"
+
+
+def _output_scalar_pointer(ffi, parameter):
+    from seamless_signature.c_header import SCALAR_C_TYPES
+
+    return ffi.new(f"{SCALAR_C_TYPES[parameter.dtype.name]} *")
+
+
+def _allocate_output_array(ffi, parameter, shape):
+    try:
+        import numpy as np
+    except ImportError:
+        raise ImportError(
+            "numpy is required for compiled transformers. Install it with: pip install numpy"
+        ) from None
+
+    expected = _numpy_dtype(parameter.dtype.name)
+    array = np.empty(shape, dtype=expected, order="C")
+    if not array.flags.aligned:
+        raise TypeError(f"Output {parameter.name!r} allocation is not aligned")
+    return array, ffi.from_buffer(_array_ctype(parameter), array)
+
+
+def _trim_output_array(parameter, array, output_sizes):
+    if not output_sizes or parameter.shape is None:
+        return array
+    slices = []
+    changed = False
+    for dim in parameter.shape:
+        if isinstance(dim, str) and dim in output_sizes:
+            slices.append(slice(0, output_sizes[dim]))
+            changed = True
+        else:
+            slices.append(slice(None))
+    if not changed:
+        return array
+    return array[tuple(slices)]
+
+
+def _module_definition_from_payload(language, code, header, objects, compilation):
+    main_compilation = {}
+    object_compilations = {}
+    if isinstance(compilation, dict):
+        main_compilation = compilation.get("main") or {}
+        object_compilations = compilation.get("objects") or {}
+    module_definition = {
+        "type": "compiled",
+        "target": main_compilation.get("target", "profile"),
+        "link_options": main_compilation.get("link_options", []),
+        "public_header": {"language": "c", "code": header},
+        "objects": {
+            "main": {
+                "language": language,
+                "code": code,
+                "options": main_compilation.get("options"),
+                "debug_options": main_compilation.get("debug_options"),
+            }
+        },
+    }
+    for name, obj in (objects or {}).items():
+        override = object_compilations.get(name, {})
+        module_definition["objects"][name] = {
+            "language": obj["language"],
+            "code": obj["code"],
+            "options": override.get("options"),
+            "debug_options": override.get("debug_options"),
+        }
+    return module_definition
+
+
+def call_compiled_transform(
+    transformation: Dict[str, Any],
+    tf_dunder: Dict[str, Any],
+    code: str,
+    namespace: Dict[str, Any],
+    output_celltype: str,
+    meta: Dict[str, Any],
+):
+    """Build and call a compiled transformer through CFFI."""
+
+    from seamless_signature import Signature
+    from seamless_transformer.compiler import build_compiled_module
+
+    schema_text = _resolve_dunder_value(transformation, tf_dunder, "__schema__", "text")
+    header = _resolve_dunder_value(transformation, tf_dunder, "__header__", "text")
+    compilation = _resolve_dunder_value(
+        transformation, tf_dunder, "__compilation__", "plain"
+    )
+    sig = Signature.from_dict(yaml.safe_load(schema_text))
+    objects = namespace.get("objects", {})
+    language = transformation.get("__language__")
+    module_definition = _module_definition_from_payload(
+        language, code, header, objects, compilation
+    )
+    module = build_compiled_module(module_definition)
+    ffi = module.ffi
+    lib = module.lib
+
+    resolved_wildcards = _resolve_input_wildcards(sig, namespace)
+    metavars = {}
+    if isinstance(meta, dict):
+        metavars = dict(meta.get("metavars") or {})
+    output_maxima = {}
+    for wildcard in sig.output_wildcards:
+        key = f"max{wildcard}"
+        if key not in metavars:
+            raise ValueError(f"Missing compiled transformer metavar {key!r}")
+        output_maxima[wildcard] = int(metavars[key])
+
+    keepalive = []
+    call_args = []
+    call_args.extend(int(resolved_wildcards[name]) for name in sig.input_wildcards)
+    call_args.extend(int(output_maxima[name]) for name in sig.output_wildcards)
+
+    for parameter in sig.inputs:
+        value = namespace[parameter.name]
+        if parameter.shape is None:
+            call_args.append(_coerce_scalar_input(value, parameter))
+        else:
+            array, cdata = _coerce_array_input(ffi, value, parameter)
+            keepalive.append(array)
+            call_args.append(cdata)
+
+    output_size_ptrs = {}
+    for wildcard in sig.output_wildcards:
+        ptr = ffi.new("unsigned int *")
+        output_size_ptrs[wildcard] = ptr
+        call_args.append(ptr)
+
+    output_values = {}
+    for parameter in sig.outputs:
+        if parameter.shape is None:
+            ptr = _output_scalar_pointer(ffi, parameter)
+            output_values[parameter.name] = ("scalar", ptr, parameter)
+            call_args.append(ptr)
+        else:
+            shape = _shape_for_parameter(parameter, resolved_wildcards, output_maxima)
+            array, cdata = _allocate_output_array(ffi, parameter, shape)
+            keepalive.append(array)
+            output_values[parameter.name] = ("array", array, parameter)
+            call_args.append(cdata)
+
+    status = lib.transform(*call_args)
+    if status != 0:
+        raise RuntimeError(f"Compiled transform returned non-zero status {status}")
+
+    output_sizes = {
+        wildcard: int(ptr[0]) for wildcard, ptr in output_size_ptrs.items()
+    }
+    result = {}
+    for name, (kind, value, parameter) in output_values.items():
+        if kind == "scalar":
+            item = value[0]
+            try:
+                item = item.item()
+            except AttributeError:
+                pass
+            result[name] = item
+        else:
+            result[name] = _trim_output_array(parameter, value, output_sizes)
+    if len(sig.outputs) == 1:
+        return result[sig.outputs[0].name]
+    if output_celltype not in ("mixed", "deepcell"):
+        raise TypeError("multi-output compiled transformers require 'mixed' or 'deepcell'")
+    return result
+
+
 __all__ = [
     "run_transformation_dict",
     "get_transformation_inputs_output",
     "is_driver_context",
     "RemoteJobWritten",
+    "call_compiled_transform",
 ]

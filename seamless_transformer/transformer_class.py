@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from types import FunctionType
+from types import FunctionType, ModuleType
 import inspect
 from copy import deepcopy
 from functools import update_wrapper
 from typing import Callable, Generic, Optional, ParamSpec, TypeVar, cast, overload
 
 from seamless import Buffer, ensure_open
+
+from .environment import Environment
 from .pretransformation import direct_transformer_to_pretransformation
 from .transformation_class import Transformation, transformation_from_pretransformation
 
@@ -35,11 +37,11 @@ def direct(
     """Execute immediately, returning the result value."""
 
     if isinstance(func, Transformer):
-        assert language is None
         result = DirectTransformer.__new__(DirectTransformer)
         for k, v in func.__dict__.items():
             setattr(result, k, deepcopy(v))
-        result.language = language
+        if language is not None:
+            result.language = language
     else:
         if language is None:
             language = "python"
@@ -61,11 +63,11 @@ def delayed(
     """Return a Transformation object that can be executed later."""
 
     if isinstance(func, Transformer):
-        assert language is None
         result = Transformer.__new__(Transformer)
         for k, v in func.__dict__.items():
             setattr(result, k, v)
-        result.language = language
+        if language is not None:
+            result.language = language
     else:
         if language is None:
             language = "python"
@@ -81,11 +83,222 @@ def delayed(
     return result
 
 
-class Transformer(Generic[P, R]):
-    """Transformer.
-    Transformers can be called as normal functions, but
-    the source code of the function and the arguments are converted
-    into a Seamless Transformation that is returned."""
+class TransformerCore(Generic[P, R]):
+    """Shared transformer state and call assembly."""
+
+    def _init_core(
+        self,
+        *,
+        language: str,
+        scratch: bool,
+        direct_print: bool,
+        local: bool,
+    ) -> None:
+        self._language = language
+        self._args = {}
+        self._modules = {}
+        self._globals = {}
+        self._celltypes = {}
+        self._environment = Environment()
+        self._meta = {"transformer_path": ["tf", "tf"], "local": local}
+        self.scratch = scratch
+        self.direct_print = direct_print
+
+    def _get_signature(self):
+        return None
+
+    def _get_codebuf(self):
+        raise NotImplementedError
+
+    @property
+    def language(self):
+        return self._language
+
+    @language.setter
+    def language(self, lang):
+        if lang is None:
+            lang = "python"
+        self._language = lang
+
+    @property
+    def celltypes(self):
+        """The celltypes."""
+
+        return CelltypesWrapper(
+            self._celltypes, self._args, fixed=self._get_signature() is not None
+        )
+
+    @property
+    def args(self):
+        """Pre-bound transformer arguments."""
+
+        return ArgsWrapper(
+            self._args, self._celltypes, fixed=self._get_signature() is not None
+        )
+
+    @property
+    def modules(self):
+        """Imported Python modules."""
+
+        return ModulesWrapper(self._modules)
+
+    @property
+    def globals(self):
+        """Global symbols injected via modules.main."""
+
+        return GlobalsWrapper(self._globals)
+
+    @property
+    def environment(self) -> Environment:
+        """Execution environment for this transformer."""
+
+        return self._environment
+
+    def _bind_arguments(self, *args, **kwargs):
+        all_args = self._args.copy()
+        signature = self._get_signature()
+        if signature is not None:
+            all_args.update(signature.bind_partial(*args, **kwargs).arguments)
+            return signature.bind(**all_args).arguments
+        if len(args) > 0:
+            raise TypeError("No function signature: positional arguments not supported")
+        all_args.update(kwargs)
+        for argname in self._celltypes:
+            if argname == "result":
+                continue
+            if argname not in all_args:
+                raise TypeError(f"Missing argument: '{argname}'")
+        return all_args
+
+    def __call__(self, *args, **kwargs) -> Transformation[R]:
+        """Build a delayed Transformation from the current transformer state."""
+
+        ensure_open("transformer call")
+        arguments = self._bind_arguments(*args, **kwargs)
+        deps = {
+            argname: arg
+            for argname, arg in arguments.items()
+            if isinstance(arg, Transformation)
+        }
+        env = self._environment._to_lowlevel()
+
+        meta = deepcopy(self._meta)
+        modules = {}
+        from .module_builder import (
+            build_globals_module_definition,
+            get_module_definition,
+            merge_module_definitions,
+        )
+
+        for module_name, module in self._modules.items():
+            if isinstance(module, dict):
+                module_definition = module
+            else:
+                module_definition = get_module_definition(module)
+            modules[module_name] = module_definition
+
+        if self._globals:
+            globals_def = build_globals_module_definition(self._globals)
+            if "main" in modules:
+                modules["main"] = merge_module_definitions(modules["main"], globals_def)
+            else:
+                modules["main"] = globals_def
+
+        pre_transformation = direct_transformer_to_pretransformation(
+            self._get_codebuf(),
+            meta,
+            self._celltypes,
+            modules,
+            arguments,
+            env,
+            language=self.language,
+        )
+        return cast(
+            Transformation[R],
+            transformation_from_pretransformation(
+                pre_transformation,
+                upstream_dependencies=deps,
+                meta=meta,
+                scratch=self.scratch,
+                tf_dunder={},
+            ),
+        )
+
+    @property
+    def meta(self):
+        """Transformation metadata."""
+
+        return self._meta
+
+    @meta.setter
+    def meta(self, meta: dict):
+        self._meta.update(meta)
+        for k in list(self._meta.keys()):
+            if self._meta[k] is None and k != "local":
+                self._meta.pop(k)
+
+    @property
+    def scratch(self) -> bool:
+        """If True, the transformation result buffer will not be saved."""
+
+        return self._scratch
+
+    @scratch.setter
+    def scratch(self, value: bool):
+        self._scratch = value
+
+    @property
+    def allow_input_fingertip(self) -> bool:
+        """If True, inputs may be fingertipped when resolving their buffers."""
+
+        return bool(self._meta.get("allow_input_fingertip", False))
+
+    @allow_input_fingertip.setter
+    def allow_input_fingertip(self, value: bool):
+        if not isinstance(value, bool):
+            raise TypeError(type(value))
+        if value:
+            self.meta = {"allow_input_fingertip": True}
+        else:
+            self._meta.pop("allow_input_fingertip", None)
+
+    @property
+    def direct_print(self):
+        """Print stdout/stderr directly instead of only storing logs."""
+
+        return self._meta.get("__direct_print__", False)
+
+    @direct_print.setter
+    def direct_print(self, value):
+        if not isinstance(value, bool) and value is not None:
+            raise TypeError(type(value))
+        self.meta = {"__direct_print__": value}
+
+    @property
+    def driver(self) -> bool:
+        """Marks the transformer as a driver script."""
+
+        return self._meta.get("driver", False)
+
+    @driver.setter
+    def driver(self, value):
+        if not isinstance(value, bool) and value is not None:
+            raise TypeError(type(value))
+        self.meta = {"driver": value}
+
+    @property
+    def local(self) -> bool | None:
+        """Local execution preference."""
+
+        return self.meta.get("local")
+
+    @local.setter
+    def local(self, value: bool | None):
+        self.meta["local"] = value
+
+
+class PythonMixin(Generic[P, R]):
+    """Python and text-source behavior for ordinary transformers."""
 
     def __init__(
         self,
@@ -96,60 +309,13 @@ class Transformer(Generic[P, R]):
         direct_print: bool,
         local: bool,
     ):
-        """Transformer.
-        Transformers can be called as normal functions, but
-        the source code of the function and the arguments are converted
-        into a Seamless Transformation that is returned.types
-
-            Parameters:
-
-            - local. If True, transformations are executed in the local
-                        Seamless instance.
-                    If False (default), they are executed remotely if possible.
-
-            - scratch.
-                    If True, only the checksum is preserved. This is for cases where
-                      the result is bulky, but can be recomputed easily
-                    If False (default), the buffers are preserved, so that the value
-                      can be accessed if needed.
-
-
-            - direct_print: If True, it is attempted to print stdout and stderr
-                    while the transformation runs.
-
-            Attributes:
-
-            - meta. Accesses all meta-information (including local)
-
-            - driver. If True, marks the transformer as a driver script so
-                    its transformations bypass Dask throttling.
-
-            - celltypes. Returns a wrapper where you can set the celltypes
-                    of the individual transformer args.
-                The syntax is: Transformer.celltypes.a = "text"
-                (or Transformer.celltypes["a"] = "text")
-                for arg "a".
-
-            - modules: Returns a wrapper where you can define Python modules
-                to be imported into the transformation
-
-            - environment  ...
-
-        """
-        self._language = language
-        self._args = {}
-        self._modules = {}
-        self._globals = {}
-        self._celltypes = {}
+        self._init_core(
+            language=language,
+            scratch=scratch,
+            direct_print=direct_print,
+            local=local,
+        )
         self._set_code(code)
-        """
-        STUB
-        self._environment = Environment(self)
-        self._environment_state = None
-        """
-        self._meta = {"transformer_path": ["tf", "tf"], "local": local}
-        self.scratch = scratch
-        self.direct_print = direct_print
         if callable(code):
             update_wrapper(self, code)
 
@@ -169,6 +335,12 @@ class Transformer(Generic[P, R]):
             assert isinstance(code, str)
             self._codebuf = Buffer(code, "text")
         self._signature = signature
+
+    def _get_signature(self):
+        return self._signature
+
+    def _get_codebuf(self):
+        return self._codebuf
 
     @property
     def code(self):
@@ -190,201 +362,15 @@ class Transformer(Generic[P, R]):
         if lang != "python":
             self._signature = None
 
-    @property
-    def celltypes(self):
-        """The celltypes"""
-        return CelltypesWrapper(
-            self._celltypes, self._args, fixed=self._signature is not None
-        )
 
-    @property
-    def args(self):
-        """The arguments"""
-        return ArgsWrapper(
-            self._args, self._celltypes, fixed=self._signature is not None
-        )
-
-    @property
-    def modules(self):
-        """The imported modules"""
-        return ModulesWrapper(self._modules)
-
-    @property
-    def globals(self):
-        """Global symbols injected via modules.main."""
-        return GlobalsWrapper(self._globals)
-
-    '''
-    STUB
-    @property
-    def environment(self) -> "Environment":
-        """Computing environment to execute transformations in"""
-        return self._environment
-    /STUB
-    '''
-
-    def __call__(self, *args, **kwargs) -> Transformation[R]:
-        """
-        from seamless.workflow.core.direct.module import get_module_definition
-        """
-
-        ensure_open("transformer call")
-        all_args = self._args.copy()
-        if self._signature is not None:
-            all_args.update(self._signature.bind_partial(*args, **kwargs).arguments)
-            arguments = self._signature.bind(**all_args).arguments
-        else:
-            if len(args) > 0:
-                raise TypeError(
-                    "No function signature: positional arguments not supported"
-                )
-            all_args.update(kwargs)
-            for argname in self._celltypes:
-                if argname == "result":
-                    continue
-                if argname not in all_args:
-                    raise TypeError(f"Missing argument: '{argname}'")
-            arguments = all_args
-        deps = {
-            argname: arg
-            for argname, arg in arguments.items()
-            if isinstance(arg, Transformation)
-        }
-        env = None  # environment handling not ported
-
-        meta = deepcopy(self._meta)
-        modules = {}
-        from .module_builder import (
-            build_globals_module_definition,
-            get_module_definition,
-            merge_module_definitions,
-        )
-        """
-        STUB
-        for module_name, module in self._modules.items():
-            if isinstance(module, dict):
-                module_definition = module
-            else:
-                module_definition = get_module_definition(module)
-            modules[module_name] = module_definition
-        /STUB
-        """
-        for module_name, module in self._modules.items():
-            if isinstance(module, dict):
-                module_definition = module
-            else:
-                module_definition = get_module_definition(module)
-            modules[module_name] = module_definition
-
-        if self._globals:
-            globals_def = build_globals_module_definition(self._globals)
-            if "main" in modules:
-                modules["main"] = merge_module_definitions(modules["main"], globals_def)
-            else:
-                modules["main"] = globals_def
-
-        pre_transformation = direct_transformer_to_pretransformation(
-            self._codebuf,
-            meta,
-            self._celltypes,
-            modules,
-            arguments,
-            env,
-            language=self.language,
-        )
-        tf_dunder = {}
-        return cast(
-            Transformation[R],
-            transformation_from_pretransformation(
-                pre_transformation,
-                upstream_dependencies=deps,
-                meta=meta,
-                scratch=self.scratch,
-                tf_dunder=tf_dunder,
-            ),
-        )
-
-    @property
-    def meta(self):
-        """Transformation metadata"""
-        return self._meta
-
-    @meta.setter
-    def meta(self, meta: dict):
-        self._meta.update(meta)
-        for k in list(self._meta.keys()):
-            if self._meta[k] is None and k != "local":
-                self._meta.pop(k)
-
-    @property
-    def scratch(self) -> bool:
-        """If True, the transformation result buffer will not be saved."""
-        return self._scratch
-
-    @scratch.setter
-    def scratch(self, value: bool):
-        self._scratch = value
-
-    @property
-    def allow_input_fingertip(self) -> bool:
-        """If True, inputs may be fingertipped when resolving their buffers."""
-        return bool(self._meta.get("allow_input_fingertip", False))
-
-    @allow_input_fingertip.setter
-    def allow_input_fingertip(self, value: bool):
-        if not isinstance(value, bool):
-            raise TypeError(type(value))
-        if value:
-            self.meta = {"allow_input_fingertip": True}
-        else:
-            if "allow_input_fingertip" in self._meta:
-                self._meta.pop("allow_input_fingertip", None)
-
-    @property
-    def direct_print(self):
-        """Causes the transformer to directly print any messages,
-        instead of buffering them and storing them in Transformer.logs.
-        If this value is None, direct print is True if debugging is enabled."""
-        return self._meta.get("__direct_print__", False)
-
-    @direct_print.setter
-    def direct_print(self, value):
-        if not isinstance(value, bool) and value is not None:
-            raise TypeError(type(value))
-        self.meta = {"__direct_print__": value}
-
-    @property
-    def driver(self) -> bool:
-        """Marks the transformer as a driver script (bypasses Dask throttling)."""
-        return self._meta.get("driver", False)
-
-    @driver.setter
-    def driver(self, value):
-        if not isinstance(value, bool) and value is not None:
-            raise TypeError(type(value))
-        self.meta = {"driver": value}
-
-    @property
-    def local(self) -> bool | None:
-        """Local execution.
-        If True, transformations are executed in the local Seamless instance.
-        If False, they are delegated to an assistant.
-        If None (default),
-        an assistant is tried first and local execution is a fallback."""
-        return self.meta.get("local")
-
-    @local.setter
-    def local(self, value: bool | None):
-        self.meta["local"] = value
+class Transformer(PythonMixin[P, R], TransformerCore[P, R]):
+    """Ordinary Python/bash transformer."""
 
 
 class DirectTransformer(Transformer[P, R]):
-    """Transformer that can be called and gives an immediate result"""
+    """Transformer that computes immediately."""
 
     def __call__(self, *args, **kwargs) -> R:
-        """
-        from seamless.workflow.core.direct.module import get_module_definition
-        """
         tf = super().__call__(*args, **kwargs)
         tf._compute(api_origin="call")
         return tf.run()
@@ -432,7 +418,7 @@ class CelltypesWrapper:
             raise TypeError(value, all_celltypes)
         old_arg = self._args.get(key)
         if old_arg is not None:
-            pass  # TODO: verify compatibility with new celltype, but only inside a workflow
+            pass
         self._celltypes[key] = value
 
     def __delattr__(self, attr: str) -> None:
@@ -458,7 +444,7 @@ class CelltypesWrapper:
 
 
 class ArgsWrapper:
-    """Wrapper around an imperative transformer's celltypes."""
+    """Wrapper around an imperative transformer's arguments."""
 
     def __init__(self, args, celltypes, fixed):
         self._args = args
@@ -477,8 +463,6 @@ class ArgsWrapper:
         return self.__setitem__(attr, value)
 
     def __setitem__(self, key, value):
-        from seamless.checksum.celltypes import celltypes
-
         if key == "result":
             raise AttributeError(key)
         if key not in self._celltypes:
@@ -487,9 +471,6 @@ class ArgsWrapper:
             self._celltypes[key] = "mixed"
             if "result" not in self._celltypes:
                 self._celltypes["result"] = "mixed"
-
-        celltype = self._celltypes[key]
-        # TODO: verify compatibility with celltype, but only inside a workflow
         self._args[key] = value
 
     def __delattr__(self, attr: str) -> None:
@@ -524,31 +505,11 @@ class ModulesWrapper:
         return self._modules[attr]
 
     def __setattr__(self, attr, value):
-        from types import ModuleType
-
-        """
-        STUB
-        from seamless.workflow.highlevel.Module import Module
-        /STUB
-        """
-
         if attr.startswith("_"):
             return super().__setattr__(attr, value)
-        """
-        STUB
-        if isinstance(value, Module):
-            module_definition = value.module_definition
-            if module_definition is None:
-                raise RuntimeError("Seamless Module has not been translated yet")
-            self._modules[attr] = module_definition
-        /STUB
-        """
-        if 0:
-            pass
-        else:
-            if not isinstance(value, (ModuleType, dict)):
-                raise TypeError(type(value))
-            self._modules[attr] = value
+        if not isinstance(value, (ModuleType, dict)):
+            raise TypeError(type(value))
+        self._modules[attr] = value
 
     def __dir__(self):
         return sorted(self._modules.keys())
@@ -596,3 +557,17 @@ class GlobalsWrapper:
 
     def __repr__(self):
         return str(self)
+
+
+__all__ = [
+    "direct",
+    "delayed",
+    "TransformerCore",
+    "PythonMixin",
+    "Transformer",
+    "DirectTransformer",
+    "CelltypesWrapper",
+    "ArgsWrapper",
+    "ModulesWrapper",
+    "GlobalsWrapper",
+]

@@ -18,6 +18,10 @@ NON_CHECKSUM_ITEMS = (
     "__format__",
     "__code_text__",
     "__code_checksum__",
+    "__compiled__",
+    "__compilation__",
+    "__schema__",
+    "__header__",
 )
 
 
@@ -337,7 +341,58 @@ def direct_transformer_to_pretransformation(
     return PreTransformation(pretransformation_dict, code_manager=code_manager)
 
 
+def _buffer_checksum_hex(value, celltype: str) -> str:
+    buffer = Buffer(value, celltype)
+    checksum = buffer.get_checksum()
+    buffer.tempref()
+    return checksum.hex()
+
+
+def compiled_transformer_to_pretransformation(
+    *,
+    code: str,
+    schema_text: str,
+    header: str,
+    compilation: dict,
+    objects: dict,
+    meta: dict,
+    celltypes: dict,
+    arguments: dict,
+    env,
+    language: str,
+    code_manager: Optional[CodeManager] = None,
+) -> PreTransformation:
+    """Create a PreTransformation for a compiled transformer call."""
+
+    result_celltype = celltypes.get("result", "mixed")
+    if result_celltype not in ("mixed", "deepcell"):
+        raise TypeError("compiled transformer result celltype must be 'mixed' or 'deepcell'")
+
+    pretransformation_dict: Dict[str, Any] = {
+        "__output__": ("result", result_celltype, None),
+        "__language__": language,
+        "__compiled__": True,
+        "__schema__": _buffer_checksum_hex(schema_text, "text"),
+        "__header__": _buffer_checksum_hex(header, "text"),
+        "__compilation__": _buffer_checksum_hex(compilation, "plain"),
+        "code": ("text", "transformer", code),
+        "objects": ("plain", "compiled-objects", objects),
+    }
+
+    if env is not None:
+        pretransformation_dict["__env__"] = _buffer_checksum_hex(env, "plain")
+
+    if meta:
+        pretransformation_dict["__meta__"] = deepcopy(meta)
+
+    for pinname, value in arguments.items():
+        pretransformation_dict[pinname] = ("mixed", None, value)
+
+    return PreTransformation(pretransformation_dict, code_manager=code_manager)
+
+
 __all__ = [
     "PreTransformation",
     "direct_transformer_to_pretransformation",
+    "compiled_transformer_to_pretransformation",
 ]

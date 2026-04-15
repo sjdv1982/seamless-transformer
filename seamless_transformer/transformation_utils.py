@@ -11,6 +11,12 @@ from seamless import Buffer, Checksum
 DEEP_CELLTYPES = ("deepcell", "deepfolder")
 TRANSFORMATION_CORE_KEYS = {"__language__", "__output__", "__as__", "__format__"}
 TRANSFORMATION_LOCAL_DUNDER_KEYS = {"__meta__", "__env__"}
+TRANSFORMATION_EXECUTION_DUNDER_KEYS = {
+    "__compiled__",
+    "__compilation__",
+    "__schema__",
+    "__header__",
+}
 
 
 def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
@@ -24,6 +30,8 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
             continue
         if key in TRANSFORMATION_LOCAL_DUNDER_KEYS:
             result[key] = value
+            continue
+        if key in TRANSFORMATION_EXECUTION_DUNDER_KEYS:
             continue
         if key in (
             "__compilers__",
@@ -167,4 +175,5 @@ __all__ = [
     "is_deep_celltype",
     "unpack_deep_structure",
     "pack_deep_structure",
+    "TRANSFORMATION_EXECUTION_DUNDER_KEYS",
 ]

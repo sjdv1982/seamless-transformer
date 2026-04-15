@@ -1,5 +1,11 @@
 from .transformer_class import direct, delayed
 from .transformation_class import Transformation
+from .environment import Environment
+from .compiled_transformer import (
+    CompiledObject,
+    CompiledTransformer,
+    DirectCompiledTransformer,
+)
 from .multi import parallel, parallel_async, TransformationIterableBase, TransformationList
 from .worker import spawn, has_spawned
 import threading
@@ -17,6 +23,10 @@ __all__ = [
     "direct",
     "delayed",
     "Transformation",
+    "Environment",
+    "CompiledObject",
+    "CompiledTransformer",
+    "DirectCompiledTransformer",
     "parallel",
     "parallel_async",
     "TransformationIterableBase",
