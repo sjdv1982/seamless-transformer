@@ -126,6 +126,80 @@ int transform(unsigned int N, unsigned int maxK, const int32_t *arr, unsigned in
     )
 
 
+def test_structured_scalar_input_output():
+    tf = DirectCompiledTransformer("c")
+    tf.schema = """\
+inputs:
+  - name: item
+    dtype:
+      fields:
+        - {name: x, dtype: int32}
+        - {name: y, dtype: float64}
+outputs:
+  - name: result
+    dtype:
+      fields:
+        - {name: x, dtype: int32}
+        - {name: y, dtype: float64}
+"""
+    tf.code = """\
+#include "public.h"
+int transform(ItemStruct item, ResultStruct *result) {
+    result->x = item.x + 1;
+    result->y = item.y * 2.0;
+    return 0;
+}
+"""
+    dtype = np.dtype([("x", "int32"), ("y", "float64")], align=True)
+    result = tf(item=np.array((4, 1.5), dtype=dtype)[()])
+    assert result.dtype == dtype
+    assert result["x"] == 5
+    assert result["y"] == 3.0
+
+
+def test_structured_array_with_fixed_field_shape():
+    tf = DirectCompiledTransformer("c")
+    tf.schema = """\
+inputs:
+  - name: points
+    dtype:
+      fields:
+        - {name: xy, dtype: float64, shape: [2]}
+        - {name: label, dtype: int32}
+    shape: [N]
+outputs:
+  - name: shifted
+    dtype:
+      fields:
+        - {name: xy, dtype: float64, shape: [2]}
+        - {name: label, dtype: int32}
+    shape: [N]
+"""
+    tf.code = """\
+#include "public.h"
+int transform(unsigned int N, const PointsStruct *points, ShiftedStruct *shifted) {
+    for (unsigned int i = 0; i < N; i++) {
+        shifted[i].xy[0] = points[i].xy[0] + 10.0;
+        shifted[i].xy[1] = points[i].xy[1] - 1.0;
+        shifted[i].label = points[i].label + 100;
+    }
+    return 0;
+}
+"""
+    dtype = np.dtype([("xy", "float64", (2,)), ("label", "int32")], align=True)
+    points = np.zeros(3, dtype=dtype)
+    points["xy"] = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+    points["label"] = [7, 8, 9]
+
+    result = tf(points=points)
+    assert result.dtype == dtype
+    np.testing.assert_allclose(
+        result["xy"],
+        np.array([[11.0, 1.0], [13.0, 3.0], [15.0, 5.0]]),
+    )
+    np.testing.assert_array_equal(result["label"], np.array([107, 108, 109]))
+
+
 def test_multi_output_mixed_and_deepcell():
     schema = """\
 inputs:

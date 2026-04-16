@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Tuple
 from contextlib import contextmanager
 import os
+import re
 import shutil
 import threading
 import yaml
@@ -379,7 +380,7 @@ def _resolve_dunder_value(transformation, tf_dunder, key, celltype):
     return buffer.get_value(celltype)
 
 
-def _numpy_dtype(dtype_name: str):
+def _numpy_dtype(dtype_spec):
     try:
         import numpy as np
     except ImportError:
@@ -387,6 +388,17 @@ def _numpy_dtype(dtype_name: str):
             "numpy is required for compiled transformers. Install it with: pip install numpy"
         ) from None
 
+    if hasattr(dtype_spec, "fields"):
+        fields = []
+        for field in dtype_spec.fields:
+            field_dtype = _numpy_dtype(field.dtype)
+            if field.shape:
+                fields.append((field.name, field_dtype, field.shape))
+            else:
+                fields.append((field.name, field_dtype))
+        return np.dtype(fields, align=True)
+
+    dtype_name = dtype_spec.name
     mapping = {
         "int8": np.dtype("int8"),
         "int16": np.dtype("int16"),
@@ -406,13 +418,66 @@ def _numpy_dtype(dtype_name: str):
     return mapping[dtype_name]
 
 
+def _is_struct_dtype(dtype_spec) -> bool:
+    return hasattr(dtype_spec, "fields")
+
+
+def _numpy_dtype_matches(actual, expected) -> bool:
+    if actual == expected:
+        return True
+    if actual.fields is None or expected.fields is None:
+        return False
+    if actual.itemsize != expected.itemsize:
+        return False
+
+    expected_names = set(expected.names or ())
+    for name in actual.names or ():
+        if name in expected_names:
+            continue
+        field_dtype = actual.fields[name][0]
+        if field_dtype.kind != "V" or field_dtype.fields is not None:
+            return False
+
+    for name in expected.names or ():
+        if name not in actual.fields:
+            return False
+        actual_field, actual_offset = actual.fields[name][:2]
+        expected_field, expected_offset = expected.fields[name][:2]
+        if actual_offset != expected_offset:
+            return False
+        actual_base, actual_shape = actual_field.subdtype or (actual_field, ())
+        expected_base, expected_shape = expected_field.subdtype or (expected_field, ())
+        if actual_shape != expected_shape:
+            return False
+        if not _numpy_dtype_matches(actual_base, expected_base):
+            return False
+    return True
+
+
 def _is_native_dtype(dtype) -> bool:
-    return dtype.byteorder in ("=", "|")
+    return dtype.isnative
 
 
 def _require_native_dtype(dtype, name: str):
     if not _is_native_dtype(dtype):
         raise TypeError(f"{name} must have native byte order")
+
+
+def _camel_case(value: str) -> str:
+    return "".join(part.capitalize() for part in re.split(r"_+", value) if part)
+
+
+def _struct_type_name(parameter) -> str:
+    return f"{_camel_case(parameter.name)}Struct"
+
+
+def _copy_struct_array_as_dtype(array, expected):
+    import numpy as np
+
+    source = np.ascontiguousarray(array)
+    target = np.empty(source.shape, dtype=expected, order="C")
+    target.view(np.uint8).reshape(-1)[:] = source.view(np.uint8).reshape(-1)
+    return target
 
 
 def _shape_for_parameter(parameter, resolved_wildcards, output_maxima=None):
@@ -463,7 +528,7 @@ def _resolve_input_wildcards(sig, namespace):
     return resolved
 
 
-def _coerce_scalar_input(value, parameter):
+def _coerce_scalar_input(ffi, value, parameter, keepalive):
     try:
         import numpy as np
     except ImportError:
@@ -471,7 +536,38 @@ def _coerce_scalar_input(value, parameter):
             "numpy is required for compiled transformers. Install it with: pip install numpy"
         ) from None
 
-    expected = _numpy_dtype(parameter.dtype.name)
+    expected = _numpy_dtype(parameter.dtype)
+    if _is_struct_dtype(parameter.dtype):
+        if isinstance(value, np.ndarray):
+            if value.shape != ():
+                raise TypeError(f"Input {parameter.name!r} must be a scalar structured value")
+            if not _numpy_dtype_matches(value.dtype, expected):
+                raise TypeError(
+                    f"Input {parameter.name!r} dtype is {value.dtype}, expected {expected}"
+                )
+            array = value
+        elif isinstance(value, np.void):
+            if not _numpy_dtype_matches(value.dtype, expected):
+                raise TypeError(
+                    f"Input {parameter.name!r} dtype is {value.dtype}, expected {expected}"
+                )
+            array = np.asarray(value)
+        else:
+            raise TypeError(
+                f"Input {parameter.name!r} must be a numpy structured scalar with dtype {expected}"
+            )
+        if not _numpy_dtype_matches(array.dtype, expected):
+            raise TypeError(
+                f"Input {parameter.name!r} dtype is {array.dtype}, expected {expected}"
+            )
+        _require_native_dtype(array.dtype, parameter.name)
+        if array.dtype != expected:
+            array = _copy_struct_array_as_dtype(array, expected)
+        ptr = ffi.new(f"{_struct_type_name(parameter)} *")
+        ffi.memmove(ptr, array.tobytes(), expected.itemsize)
+        keepalive.extend([array, ptr])
+        return ptr[0]
+
     if isinstance(value, np.generic):
         if value.dtype != expected:
             raise TypeError(
@@ -490,14 +586,18 @@ def _coerce_array_input(ffi, value, parameter):
             "numpy is required for compiled transformers. Install it with: pip install numpy"
         ) from None
 
-    expected = _numpy_dtype(parameter.dtype.name)
+    expected = _numpy_dtype(parameter.dtype)
     array = np.asarray(value)
-    if array.dtype != expected:
+    if not _numpy_dtype_matches(array.dtype, expected):
         raise TypeError(
             f"Input {parameter.name!r} dtype is {array.dtype}, expected {expected}"
         )
     _require_native_dtype(array.dtype, parameter.name)
-    array = np.require(array, dtype=expected, requirements=["C", "ALIGNED"])
+    if _is_struct_dtype(parameter.dtype):
+        if not array.flags.c_contiguous or not array.flags.aligned or array.dtype != expected:
+            array = _copy_struct_array_as_dtype(array, expected)
+    else:
+        array = np.require(array, dtype=expected, requirements=["C", "ALIGNED"])
     if not array.flags.aligned:
         raise TypeError(f"Input {parameter.name!r} is not aligned")
     ctype = _array_ctype(parameter)
@@ -507,17 +607,37 @@ def _coerce_array_input(ffi, value, parameter):
 def _array_ctype(parameter):
     from seamless_signature.c_header import SCALAR_C_TYPES
 
-    if parameter.element_shape:
+    if _is_struct_dtype(parameter.dtype):
+        base = _struct_type_name(parameter)
+    else:
         base = parameter.dtype.name
+    if parameter.element_shape:
         suffix = "x".join(str(dim) for dim in parameter.element_shape)
         return f"{base}_{suffix}[]"
+    if _is_struct_dtype(parameter.dtype):
+        return f"{base}[]"
     return f"{SCALAR_C_TYPES[parameter.dtype.name]}[]"
 
 
 def _output_scalar_pointer(ffi, parameter):
     from seamless_signature.c_header import SCALAR_C_TYPES
 
+    if _is_struct_dtype(parameter.dtype):
+        return ffi.new(f"{_struct_type_name(parameter)} *")
     return ffi.new(f"{SCALAR_C_TYPES[parameter.dtype.name]} *")
+
+
+def _struct_scalar_from_pointer(ffi, ptr, parameter):
+    try:
+        import numpy as np
+    except ImportError:
+        raise ImportError(
+            "numpy is required for compiled transformers. Install it with: pip install numpy"
+        ) from None
+
+    expected = _numpy_dtype(parameter.dtype)
+    data = bytes(ffi.buffer(ptr, expected.itemsize))
+    return np.frombuffer(data, dtype=expected, count=1)[0]
 
 
 def _allocate_output_array(ffi, parameter, shape):
@@ -528,7 +648,7 @@ def _allocate_output_array(ffi, parameter, shape):
             "numpy is required for compiled transformers. Install it with: pip install numpy"
         ) from None
 
-    expected = _numpy_dtype(parameter.dtype.name)
+    expected = _numpy_dtype(parameter.dtype)
     array = np.empty(shape, dtype=expected, order="C")
     if not array.flags.aligned:
         raise TypeError(f"Output {parameter.name!r} allocation is not aligned")
@@ -629,7 +749,7 @@ def call_compiled_transform(
     for parameter in sig.inputs:
         value = namespace[parameter.name]
         if parameter.shape is None:
-            call_args.append(_coerce_scalar_input(value, parameter))
+            call_args.append(_coerce_scalar_input(ffi, value, parameter, keepalive))
         else:
             array, cdata = _coerce_array_input(ffi, value, parameter)
             keepalive.append(array)
@@ -664,11 +784,14 @@ def call_compiled_transform(
     result = {}
     for name, (kind, value, parameter) in output_values.items():
         if kind == "scalar":
-            item = value[0]
-            try:
-                item = item.item()
-            except AttributeError:
-                pass
+            if _is_struct_dtype(parameter.dtype):
+                item = _struct_scalar_from_pointer(ffi, value, parameter)
+            else:
+                item = value[0]
+                try:
+                    item = item.item()
+                except AttributeError:
+                    pass
             result[name] = item
         else:
             result[name] = _trim_output_array(parameter, value, output_sizes)

@@ -35,7 +35,7 @@ def _as_plain(value):
     return deepcopy(value)
 
 
-def _expected_numpy_dtype(dtype_name: str):
+def _expected_numpy_dtype(dtype_spec):
     try:
         import numpy as np
     except ImportError:
@@ -44,12 +44,55 @@ def _expected_numpy_dtype(dtype_name: str):
             "Install it with: pip install numpy"
         ) from None
 
+    if hasattr(dtype_spec, "fields"):
+        fields = []
+        for field in dtype_spec.fields:
+            field_dtype = _expected_numpy_dtype(field.dtype)
+            if field.shape:
+                fields.append((field.name, field_dtype, field.shape))
+            else:
+                fields.append((field.name, field_dtype))
+        return np.dtype(fields, align=True)
+
+    dtype_name = dtype_spec.name
     if dtype_name == "char":
         return np.dtype("S1")
     return np.dtype(dtype_name)
 
 
-def _validate_native_numpy_value(name: str, value, dtype_name: str, is_array: bool):
+def _numpy_dtype_matches(actual, expected) -> bool:
+    if actual == expected:
+        return True
+    if actual.fields is None or expected.fields is None:
+        return False
+    if actual.itemsize != expected.itemsize:
+        return False
+
+    expected_names = set(expected.names or ())
+    for name in actual.names or ():
+        if name in expected_names:
+            continue
+        field_dtype = actual.fields[name][0]
+        if field_dtype.kind != "V" or field_dtype.fields is not None:
+            return False
+
+    for name in expected.names or ():
+        if name not in actual.fields:
+            return False
+        actual_field, actual_offset = actual.fields[name][:2]
+        expected_field, expected_offset = expected.fields[name][:2]
+        if actual_offset != expected_offset:
+            return False
+        actual_base, actual_shape = actual_field.subdtype or (actual_field, ())
+        expected_base, expected_shape = expected_field.subdtype or (expected_field, ())
+        if actual_shape != expected_shape:
+            return False
+        if not _numpy_dtype_matches(actual_base, expected_base):
+            return False
+    return True
+
+
+def _validate_native_numpy_value(name: str, value, dtype_spec, is_array: bool):
     try:
         import numpy as np
     except ImportError:
@@ -60,17 +103,32 @@ def _validate_native_numpy_value(name: str, value, dtype_name: str, is_array: bo
             ) from None
         return
 
-    expected = _expected_numpy_dtype(dtype_name)
+    expected = _expected_numpy_dtype(dtype_spec)
     if is_array:
         array = np.asarray(value)
-        if array.dtype != expected:
+        if not _numpy_dtype_matches(array.dtype, expected):
             raise TypeError(f"Input {name!r} dtype is {array.dtype}, expected {expected}")
-        if array.dtype.byteorder not in ("=", "|"):
+        if not array.dtype.isnative:
+            raise TypeError(f"Input {name!r} must have native byte order")
+    elif hasattr(dtype_spec, "fields"):
+        if isinstance(value, np.ndarray):
+            if value.shape != ():
+                raise TypeError(f"Input {name!r} must be a scalar structured value")
+            dtype = value.dtype
+        elif isinstance(value, np.void):
+            dtype = value.dtype
+        else:
+            raise TypeError(
+                f"Input {name!r} must be a numpy structured scalar with dtype {expected}"
+            )
+        if not _numpy_dtype_matches(dtype, expected):
+            raise TypeError(f"Input {name!r} dtype is {dtype}, expected {expected}")
+        if not dtype.isnative:
             raise TypeError(f"Input {name!r} must have native byte order")
     elif isinstance(value, np.generic):
         if value.dtype != expected:
             raise TypeError(f"Input {name!r} dtype is {value.dtype}, expected {expected}")
-        if value.dtype.byteorder not in ("=", "|"):
+        if not value.dtype.isnative:
             raise TypeError(f"Input {name!r} must have native byte order")
 
 
@@ -265,10 +323,7 @@ class CompiledMixin:
             raise TypeError("multi-output compiled transformers require result celltype 'mixed' or 'deepcell'")
 
     def _validate_schema(self, sig):
-        ss = _require_signature_package()
-        for parameter in sig.inputs + sig.outputs:
-            if isinstance(parameter.dtype, ss.StructDType):
-                raise NotImplementedError("Structured dtypes are not supported yet")
+        return None
 
     @property
     def code(self) -> str | None:
@@ -356,7 +411,7 @@ class CompiledMixin:
             _validate_native_numpy_value(
                 parameter.name,
                 arguments[parameter.name],
-                parameter.dtype.name,
+                parameter.dtype,
                 parameter.shape is not None,
             )
         return arguments
@@ -418,8 +473,8 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
 
     **Schema**: a YAML string in the seamless-signature format. Accepts a
     string or a :class:`pathlib.Path`. The schema defines input/output parameter
-    names, dtypes, and shapes. StructDType parameters are not currently
-    supported.
+    names, dtypes, and shapes. Structured dtypes map to aligned NumPy structured
+    dtypes and generated C structs.
 
     **Code**: the compiled source as a string or :class:`pathlib.Path`. The
     source must define a ``transform()`` function matching the schema signature

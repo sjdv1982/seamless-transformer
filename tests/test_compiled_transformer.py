@@ -1,5 +1,6 @@
 import builtins
 
+import numpy as np
 import pytest
 
 from seamless_transformer import CompiledObject, CompiledTransformer
@@ -30,6 +31,22 @@ inputs:
   - {name: values, dtype: int32, shape: [N]}
 outputs:
   - {name: result, dtype: int32, shape: [K]}
+"""
+
+
+STRUCT_SCHEMA = """\
+inputs:
+  - name: item
+    dtype:
+      fields:
+        - {name: x, dtype: int32}
+        - {name: y, dtype: float64}
+outputs:
+  - name: result
+    dtype:
+      fields:
+        - {name: x, dtype: int32}
+        - {name: y, dtype: float64}
 """
 
 
@@ -78,16 +95,21 @@ def test_metavars_rebuild_and_schema_validation():
     with pytest.raises(AttributeError):
         _ = tf.metavars.maxK
 
-    with pytest.raises(NotImplementedError):
-        tf.schema = """\
-inputs:
-  - name: item
-    dtype:
-      fields:
-        - {name: x, dtype: int32}
-outputs:
-  - {name: result, dtype: int32}
-"""
+
+def test_structured_dtype_schema_and_validation():
+    tf = CompiledTransformer("c")
+    tf.schema = STRUCT_SCHEMA
+    tf.code = "int transform(ItemStruct item, ResultStruct *result) { return 0; }"
+    assert "typedef struct" in tf.header
+    assert "ItemStruct item" in tf.header
+    assert "ResultStruct *result" in tf.header
+
+    dtype = np.dtype([("x", "int32"), ("y", "float64")], align=True)
+    assert isinstance(tf(item=np.array((1, 2.0), dtype=dtype)[()]), Transformation)
+
+    packed_dtype = np.dtype([("x", "int32"), ("y", "float64")], align=False)
+    with pytest.raises(TypeError, match="dtype"):
+        tf(item=np.array((1, 2.0), dtype=packed_dtype)[()])
 
 
 def test_multi_output_result_celltypes():
