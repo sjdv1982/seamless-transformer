@@ -46,6 +46,20 @@ Installing `seamless-transformer` provides:
 | `seamless-queue-finish` | Signal the queue server to drain remaining jobs and shut down |
 | `seamless-mode-bind.sh` | Shell script: source it to bind seamless-mode commands and hotkeys into the current shell session |
 
+## Compiled language support
+
+`seamless-transformer` can wrap compiled source code as Seamless transformations. The compiled source defines a `transform()` function whose signature is described by a YAML schema; `seamless-signature` generates the C header, and CFFI builds the Python extension at runtime.
+
+Built-in languages: C, C++, Fortran, Rust. **The set is open** — additional languages can be registered at runtime with `define_compiled_language()`. To add permanent support for a new language, create a file in `seamless_transformer/languages/native/` following the pattern of `rust.py` (a single `define_compiled_language()` call with compiler name, flags, and compilation mode) and submit a pull request.
+
+This requires the `compiled` optional-dependency group:
+
+```bash
+pip install seamless-transformer[compiled]
+```
+
+See `docs/agent/contracts/compiled-transformers.md` for the full behavioral contract.
+
 ## Installation
 
 ```bash

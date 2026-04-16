@@ -383,14 +383,17 @@ class CompiledMixin:
 
     @property
     def args(self):
+        """Pre-bound input arguments, same as for Python transformers."""
         return ArgsWrapper(self._args, self._celltypes, fixed=self._call_signature is not None)
 
     @property
     def modules(self):
+        """Not supported for compiled transformers. Raises NotImplementedError if accessed."""
         raise NotImplementedError("modules are not supported for compiled transformers")
 
     @property
     def globals(self):
+        """Not supported for compiled transformers. Raises NotImplementedError if accessed."""
         raise NotImplementedError("globals are not supported for compiled transformers")
 
     def _get_signature(self):

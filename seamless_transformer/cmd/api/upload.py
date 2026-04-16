@@ -243,10 +243,16 @@ def _main(argv: list[str] | None = None) -> int:
         This is unsafe: modifying the original file later can corrupt the bufferdir.
 
         WARNING: never modify the original file in-place!!!
-        Examples of in-place modification: 
+        Examples of in-place modification:
             - "rsync --in-place",
             - appending to a file using ">>".
         This will lead to checksum corruption!!
+
+        Compressed files (.zst, .gz) are supported: the canonical checksum is computed
+        by decompressing in-memory (no decompressed copy on disk), and the original
+        compressed file is hardlinked directly. This is the recommended approach for
+        large compressed datasets: zero storage overhead, one-time decompression cost
+        for checksumming.
         """,
         action="store_true",
     )
