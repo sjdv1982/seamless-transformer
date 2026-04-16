@@ -7,7 +7,6 @@ from seamless_transformer.transformation_class import Transformation
 
 
 SCALAR_SCHEMA = """\
-function_name: add
 inputs:
   - {name: a, dtype: int32}
   - {name: b, dtype: int32}
@@ -17,7 +16,6 @@ outputs:
 
 
 MULTI_SCHEMA = """\
-function_name: addmul
 inputs:
   - {name: a, dtype: int32}
   - {name: b, dtype: int32}
@@ -28,7 +26,6 @@ outputs:
 
 
 WILDCARD_SCHEMA = """\
-function_name: take_positive
 inputs:
   - {name: values, dtype: int32, shape: [N]}
 outputs:
@@ -83,7 +80,6 @@ def test_metavars_rebuild_and_schema_validation():
 
     with pytest.raises(NotImplementedError):
         tf.schema = """\
-function_name: bad
 inputs:
   - name: item
     dtype:

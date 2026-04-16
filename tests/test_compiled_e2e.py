@@ -16,7 +16,6 @@ pytestmark = pytest.mark.skipif(not shutil.which("gcc"), reason="gcc required")
 
 
 ADD_SCHEMA = """\
-function_name: add
 inputs:
   - {name: a, dtype: int32}
   - {name: b, dtype: int32}
@@ -84,7 +83,6 @@ def test_delayed_compiled_transformer():
 def test_array_input_output_and_non_contiguous_normalization():
     tf = DirectCompiledTransformer("c")
     tf.schema = """\
-function_name: scale
 inputs:
   - {name: arr, dtype: float64, shape: [N]}
   - {name: factor, dtype: float64}
@@ -105,7 +103,6 @@ int transform(unsigned int N, const double *arr, double factor, double *result) 
 def test_output_only_wildcard_slicing():
     tf = DirectCompiledTransformer("c")
     tf.schema = """\
-function_name: positives
 inputs:
   - {name: arr, dtype: int32, shape: [N]}
 outputs:
@@ -131,7 +128,6 @@ int transform(unsigned int N, unsigned int maxK, const int32_t *arr, unsigned in
 
 def test_multi_output_mixed_and_deepcell():
     schema = """\
-function_name: addmul
 inputs:
   - {name: a, dtype: int32}
   - {name: b, dtype: int32}
@@ -196,7 +192,6 @@ end subroutine
 def test_non_native_endian_array_rejected():
     tf = DirectCompiledTransformer("c")
     tf.schema = """\
-function_name: copy_first
 inputs:
   - {name: arr, dtype: int32, shape: [N]}
 outputs:
