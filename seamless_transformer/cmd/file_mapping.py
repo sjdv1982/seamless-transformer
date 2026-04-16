@@ -6,6 +6,7 @@ from pathlib import Path
 
 from seamless import Checksum
 
+from ..compression_utils import strip_compression_suffix
 from .message import message as msg
 
 
@@ -144,7 +145,9 @@ or:
                 else:  # extension
                     if argtype == "file":
                         path2 = f"file{nfiles}"
-                        extension = os.path.splitext(path)[1]
+                        base, compression_suffix = strip_compression_suffix(path)
+                        semantic_ext = os.path.splitext(base)[1]
+                        extension = semantic_ext + (compression_suffix or "")
                         if len(extension):
                             path2 += extension
                     else:

@@ -16,6 +16,12 @@ from seamless import Buffer, Checksum
 from seamless.util.mixed.get_form import get_form
 from seamless.util.mount_directory import write_to_directory
 
+from .compression_utils import (
+    compress_bytes,
+    decompress_bytes,
+    strip_compression_suffix,
+)
+
 
 def _write_file(pinname, data, filemode):
     if pinname.startswith("/"):
@@ -79,15 +85,34 @@ def write_bash_job(
                 pin_parent = os.path.dirname(pin)
                 if len(pin_parent):
                     os.makedirs(pin_parent, exist_ok=True)
-                os.symlink(v, pin)
+                _pin_base, pin_suffix = strip_compression_suffix(pin)
+                _found_base, found_suffix = strip_compression_suffix(v)
+                if found_suffix == pin_suffix:
+                    os.symlink(v, pin)
+                else:
+                    with open(v, "rb") as handle:
+                        data = handle.read()
+                    if found_suffix is not None:
+                        data = decompress_bytes(data, found_suffix)
+                    if pin_suffix is not None:
+                        data = compress_bytes(data, pin_suffix)
+                    _write_file(pin, data, "bw")
                 continue
             elif FILESYSTEM[pin]["mode"] == "directory":
                 fs_entry = FILESYSTEM[pin]
                 deep = fs_entry.get("hash_pattern") == {"*": "##"}
                 if not deep:
                     deep = _looks_like_deep_folder(v)
-                write_to_directory(pin, v, cleanup=False, deep=deep, text_only=False)
-                env[pin] = pin
+                directory_pin, compression_suffix = strip_compression_suffix(pin)
+                write_to_directory(
+                    directory_pin,
+                    v,
+                    cleanup=False,
+                    deep=deep,
+                    text_only=False,
+                    compression_suffix=compression_suffix,
+                )
+                env[pin] = directory_pin
                 continue
         storage, form = get_form(v)
         if storage.startswith("mixed"):
@@ -120,10 +145,14 @@ trap 'jobs -p | xargs -r kill' EXIT
         conda_root = os.environ.get("CONDA_ROOT")
         if not conda_root:
             try:
-                conda_root = subprocess.check_output(
-                    ["conda", "info", "--base"],
-                    stderr=subprocess.DEVNULL,
-                ).decode().strip()
+                conda_root = (
+                    subprocess.check_output(
+                        ["conda", "info", "--base"],
+                        stderr=subprocess.DEVNULL,
+                    )
+                    .decode()
+                    .strip()
+                )
             except Exception:
                 pass
         if not conda_root:

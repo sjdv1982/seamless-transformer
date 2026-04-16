@@ -10,7 +10,14 @@ from typing import Literal
 
 from seamless import Checksum, CacheMissError
 from seamless.caching.buffer_cache import get_buffer_cache
+from seamless.checksum.calculate_checksum import calculate_checksum
 from seamless.checksum.calculate_checksum import calculate_file_checksum
+from ..compression_utils import (
+    COMPRESSION_SUFFIXES,
+    compress_bytes,
+    decompress_bytes,
+    strip_compression_suffix,
+)
 
 from .exceptions import SeamlessSystemExit
 from .confirm import confirm_yna
@@ -49,30 +56,106 @@ def exists_file(filename, download_checksum):
         return False
 
     try:
-        current_checksum = calculate_file_checksum(filename)
+        _filename_base, compression_suffix = strip_compression_suffix(filename)
+        if compression_suffix is None:
+            current_checksum = calculate_file_checksum(filename)
+        else:
+            with open(filename, "rb") as f:
+                buffer = f.read()
+            buffer = decompress_bytes(buffer, compression_suffix)
+            current_checksum = calculate_checksum(buffer)
     except Exception:
         return False
 
     return current_checksum == download_checksum.hex()
 
 
-def _buffer_source_path(source_directory: str, checksum_hex: str) -> str | None:
-    path = _resolve_destination_path(
-        source_directory, checksum_hex, create_dirs=False
+def _buffer_source_candidates(
+    source_directory: str,
+    checksum_hex: str,
+    preferred_suffix: str | None = None,
+) -> list[tuple[str, str | None]]:
+    candidates = []
+    if preferred_suffix is not None:
+        candidates.append(
+            (
+                _resolve_destination_path(
+                    source_directory,
+                    checksum_hex,
+                    create_dirs=False,
+                    compression_suffix=preferred_suffix,
+                ),
+                preferred_suffix,
+            )
+        )
+    candidates.append(
+        (
+            _resolve_destination_path(
+                source_directory, checksum_hex, create_dirs=False
+            ),
+            None,
+        )
     )
-    if os.path.lexists(path):
-        return path
-    return None
+    for compression_suffix in COMPRESSION_SUFFIXES:
+        if compression_suffix == preferred_suffix:
+            continue
+        candidates.append(
+            (
+                _resolve_destination_path(
+                    source_directory,
+                    checksum_hex,
+                    create_dirs=False,
+                    compression_suffix=compression_suffix,
+                ),
+                compression_suffix,
+            )
+        )
+    return candidates
+
+
+def _buffer_source_path(
+    source_directory: str, checksum_hex: str, preferred_suffix: str | None = None
+) -> tuple[str | None, str | None]:
+    for path, compression_suffix in _buffer_source_candidates(
+        source_directory, checksum_hex, preferred_suffix
+    ):
+        if os.path.lexists(path):
+            return path, compression_suffix
+    return None, None
 
 
 def _get_buffer_length_direct(source_directory: str, checksum_hex: str) -> int | None:
-    path = _buffer_source_path(source_directory, checksum_hex)
+    path, compression_suffix = _buffer_source_path(source_directory, checksum_hex)
     if path is None:
         return None
     try:
-        return os.path.getsize(path)
+        if compression_suffix is None:
+            return os.path.getsize(path)
+        base_path = _resolve_destination_path(
+            source_directory, checksum_hex, create_dirs=False
+        )
+        try:
+            with open(base_path + ".BUFFERLENGTH", "r", encoding="utf-8") as f:
+                return int(f.read().strip())
+        except Exception:
+            with open(path, "rb") as f:
+                buffer = f.read()
+            return len(decompress_bytes(buffer, compression_suffix))
     except Exception:
         return None
+
+
+def _transform_storage_bytes(
+    buffer: bytes,
+    *,
+    source_suffix: str | None,
+    target_suffix: str | None,
+) -> bytes:
+    if source_suffix is not None:
+        buffer = decompress_bytes(buffer, source_suffix)
+    if target_suffix is not None:
+        buffer = compress_bytes(buffer, target_suffix)
+    return buffer
 
 
 def _remove_path(path: str) -> None:
@@ -212,7 +295,10 @@ def _download_file_direct(
         filename, checksum_hex, existing_entry_policy=existing_entry_policy
     ):
         return
-    source_path = _buffer_source_path(source_directory, checksum_hex)
+    _filename_base, output_suffix = strip_compression_suffix(filename)
+    source_path, source_suffix = _buffer_source_path(
+        source_directory, checksum_hex, output_suffix
+    )
     if source_path is None:
         with stdout_lock:
             msg(
@@ -222,14 +308,22 @@ def _download_file_direct(
         return
     os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
     try:
-        if transfer_mode == "copy":
+        if transfer_mode == "copy" and source_suffix == output_suffix:
             shutil.copyfile(source_path, filename)
-        elif transfer_mode == "hardlink":
+        elif transfer_mode == "hardlink" and source_suffix == output_suffix:
             os.link(source_path, filename)
-        elif transfer_mode == "symlink":
+        elif transfer_mode == "symlink" and source_suffix == output_suffix:
             os.symlink(os.path.abspath(source_path), filename)
         else:
-            raise ValueError(transfer_mode)
+            with open(source_path, "rb") as f:
+                buffer = f.read()
+            buffer = _transform_storage_bytes(
+                buffer,
+                source_suffix=source_suffix,
+                target_suffix=output_suffix,
+            )
+            with open(filename, "wb") as f:
+                f.write(buffer)
     except Exception:
         with stdout_lock:
             msg(0, f"Cannot download file '{filename}'")
@@ -284,10 +378,19 @@ def download(
     source_directory: str | None = None,
     transfer_mode: TransferMode = "copy",
     existing_entry_policy: DestinationEntryPolicy = "skip",
+    skip_targets: set[str] | None = None,
 ):
     checksum_dict_original = checksum_dict
     checksum_dict = checksum_dict.copy()
     skipped_targets = []
+    if skip_targets is None:
+        skip_targets = set()
+    for target in list(skip_targets):
+        if target in checksum_dict:
+            skipped_targets.append(target)
+            checksum_dict.pop(target)
+            if target in files:
+                files.remove(target)
     for target, checksum in list(checksum_dict.items()):
         try:
             skip = _handle_existing_target(
@@ -362,7 +465,8 @@ def download(
         except Exception:
             return
         try:
-            with open(filename + ".CHECKSUM", "w") as f:
+            filename_base, _compression_suffix = strip_compression_suffix(filename)
+            with open(filename_base + ".CHECKSUM", "w") as f:
                 f.write(file_checksum.hex() + "\n")
         except Exception:
             msg(0, f"Cannot write checksum to file '{filename}.CHECKSUM'")

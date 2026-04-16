@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 from types import SimpleNamespace
+import gzip
 
 import pytest
+import zstandard
 
 import seamless_config.cluster as cluster_mod
 import seamless_config.extern_clients as extern_clients
@@ -63,9 +65,7 @@ def test_download_manual_destination_bypasses_seamless_config(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize("flag", ["--project", "--stage"])
-def test_download_manual_destination_rejects_config_flags(
-    monkeypatch, tmp_path, flag
-):
+def test_download_manual_destination_rejects_config_flags(monkeypatch, tmp_path, flag):
     source_directory = tmp_path / "buffers"
     source_directory.mkdir()
     target = tmp_path / "result.txt"
@@ -156,18 +156,105 @@ def test_direct_download_file_modes(tmp_path, transfer_mode):
     if transfer_mode == "copy":
         assert not target.is_symlink()
         assert target.read_bytes() == b"payload"
-        assert os.stat(target).st_ino != os.stat(
-            _resolve_destination_path(str(source_directory), checksum, create_dirs=False)
-        ).st_ino
+        assert (
+            os.stat(target).st_ino
+            != os.stat(
+                _resolve_destination_path(
+                    str(source_directory), checksum, create_dirs=False
+                )
+            ).st_ino
+        )
     elif transfer_mode == "hardlink":
         assert not target.is_symlink()
-        assert os.stat(target).st_ino == os.stat(
-            _resolve_destination_path(str(source_directory), checksum, create_dirs=False)
-        ).st_ino
+        assert (
+            os.stat(target).st_ino
+            == os.stat(
+                _resolve_destination_path(
+                    str(source_directory), checksum, create_dirs=False
+                )
+            ).st_ino
+        )
     else:
         assert target.is_symlink()
         assert os.readlink(target) == os.path.abspath(
-            _resolve_destination_path(str(source_directory), checksum, create_dirs=False)
+            _resolve_destination_path(
+                str(source_directory), checksum, create_dirs=False
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("suffix", "decompressor"),
+    [
+        (".zst", lambda data: zstandard.ZstdDecompressor().decompress(data)),
+        (".gz", gzip.decompress),
+    ],
+)
+def test_direct_download_can_compress_locally_when_requested(
+    tmp_path, suffix, decompressor
+):
+    source_directory = tmp_path / "buffers"
+    source_directory.mkdir()
+    checksum = _write_bufferdir_file(source_directory, b"payload")
+    target = tmp_path / f"result.txt{suffix}"
+
+    download_cmd.download(
+        [str(target)],
+        [],
+        checksum_dict={str(target): checksum},
+        max_download_size=10**9,
+        max_download_files=100,
+        auto_confirm="yes",
+        source_directory=str(source_directory),
+        transfer_mode="copy",
+        existing_entry_policy="skip",
+    )
+
+    assert decompressor(target.read_bytes()) == b"payload"
+
+
+def test_direct_download_can_decompress_from_compressed_source(tmp_path):
+    source_directory = tmp_path / "buffers"
+    source_directory.mkdir()
+    payload = b"payload"
+    checksum = calculate_checksum(payload)
+    source_path = _resolve_destination_path(
+        str(source_directory), checksum, compression_suffix=".zst"
+    )
+    with open(source_path, "wb") as f:
+        f.write(zstandard.ZstdCompressor().compress(payload))
+    with open(
+        _resolve_destination_path(str(source_directory), checksum) + ".BUFFERLENGTH",
+        "w",
+    ) as f:
+        f.write(str(len(payload)))
+    target = tmp_path / "result.txt"
+
+    download_cmd.download(
+        [str(target)],
+        [],
+        checksum_dict={str(target): checksum},
+        max_download_size=10**9,
+        max_download_files=100,
+        auto_confirm="yes",
+        source_directory=str(source_directory),
+        transfer_mode="copy",
+        existing_entry_policy="skip",
+    )
+
+    assert target.read_bytes() == payload
+
+
+def test_download_incremental_requires_hardlink(monkeypatch, tmp_path):
+    source_directory = tmp_path / "buffers"
+    source_directory.mkdir()
+    target = tmp_path / "result.txt"
+    (target.with_suffix(target.suffix + ".CHECKSUM")).write_text("1" * 64 + "\n")
+    monkeypatch.setattr(download_api, "err", _raise_runtime_error)
+
+    with pytest.raises(RuntimeError, match="--incremental requires --hardlink"):
+        download_api._main(
+            ["--destination", str(source_directory), "--incremental", str(target)]
         )
 
 

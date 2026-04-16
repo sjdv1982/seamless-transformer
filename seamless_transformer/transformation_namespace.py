@@ -8,6 +8,7 @@ from typing import Any, Dict, Tuple
 
 from seamless import CacheMissError, Checksum
 
+from .compression_utils import COMPRESSION_SUFFIXES, strip_compression_suffix
 from .code_manager import get_code_manager
 from .transformation_utils import (
     TRANSFORMATION_EXECUTION_DUNDER_KEYS,
@@ -16,10 +17,22 @@ from .transformation_utils import (
 )
 
 
-def _buffer_path_candidates(directory: str, checksum_hex: str) -> tuple[str, str]:
-    return (
+def _buffer_path_candidates(
+    directory: str, checksum_hex: str, compression_suffix: str | None = None
+) -> tuple[str, ...]:
+    bases = (
         os.path.join(directory, checksum_hex),
         os.path.join(directory, checksum_hex[:2], checksum_hex),
+    )
+    if compression_suffix:
+        return (
+            bases[0] + compression_suffix,
+            bases[1] + compression_suffix,
+            bases[0],
+            bases[1],
+        )
+    return bases + tuple(
+        base + suffix for base in bases for suffix in COMPRESSION_SUFFIXES
     )
 
 
@@ -48,23 +61,29 @@ def _get_read_folder_directories() -> list[str]:
 
 
 def _find_filesystem_path(
-    checksum: Checksum, mode: str, directories: list[str]
-) -> str | None:
+    checksum: Checksum,
+    mode: str,
+    directories: list[str],
+    compression_suffix: str | None = None,
+) -> tuple[str | None, str | None]:
     if not directories:
-        return None
+        return None, None
     checksum = Checksum(checksum)
     if not checksum:
-        return None
+        return None, None
     checksum_hex = checksum.hex()
     for directory in directories:
-        for candidate in _buffer_path_candidates(directory, checksum_hex):
+        for candidate in _buffer_path_candidates(
+            directory, checksum_hex, compression_suffix
+        ):
+            _candidate_base, candidate_suffix = strip_compression_suffix(candidate)
             if mode == "file":
                 if os.path.isfile(candidate):
-                    return candidate
+                    return candidate, candidate_suffix
             elif mode == "directory":
                 if os.path.isdir(candidate):
-                    return candidate
-    return None
+                    return candidate, candidate_suffix
+    return None, None
 
 
 def build_transformation_namespace_sync(
@@ -158,12 +177,20 @@ def build_transformation_namespace_sync(
         if fs_entry is not None:
             fs_mode = fs_entry.get("mode")
             if fs_mode:
+                compression_suffix = None
+                if fs_mode == "file":
+                    _pin_base, compression_suffix = strip_compression_suffix(
+                        as_.get(pinname, pinname)
+                    )
                 fs_result = _find_filesystem_path(
-                    checksum, fs_mode, read_folder_directories
+                    checksum,
+                    fs_mode,
+                    read_folder_directories,
+                    compression_suffix,
                 )
-                if fs_result is not None:
+                if fs_result[0] is not None:
                     fs_entry["filesystem"] = True
-                    value = fs_result
+                    value = fs_result[0]
                     from_filesystem = True
                 else:
                     fs_entry["filesystem"] = False

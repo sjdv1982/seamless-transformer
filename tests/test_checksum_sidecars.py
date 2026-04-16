@@ -1,6 +1,10 @@
 import subprocess
 from pathlib import Path
 
+import zstandard
+
+from seamless.checksum.calculate_checksum import calculate_checksum
+
 from seamless_transformer.cmd.parsing import fill_checksum_arguments, guess_arguments
 
 
@@ -24,6 +28,19 @@ def test_implicit_checksum_sidecar_is_still_used_for_base_name(tmp_path):
 
     assert result[target.as_posix()]["type"] == "file"
     assert result[target.as_posix()]["checksum"] == "0" * 64
+
+
+def test_implicit_checksum_sidecar_uses_semantic_name_for_compressed_file(tmp_path):
+    target = tmp_path / "input.npy.zst"
+    payload = b"semantic checksum payload"
+    target.write_bytes(zstandard.ZstdCompressor().compress(payload))
+    checksum_file = tmp_path / "input.npy.CHECKSUM"
+    checksum_file.write_text(calculate_checksum(payload) + "\n", encoding="utf-8")
+
+    result = guess_arguments([target.as_posix()])
+
+    assert result[target.as_posix()]["type"] == "file"
+    assert result[target.as_posix()]["checksum"] == calculate_checksum(payload)
 
 
 def test_fill_checksum_arguments_keeps_explicit_checksum_literal():

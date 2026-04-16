@@ -16,6 +16,11 @@ from seamless import Buffer, Checksum
 from seamless.checksum.calculate_checksum import calculate_checksum
 from seamless.checksum.json_ import json_dumps_bytes
 from seamless.caching.buffer_cache import get_buffer_cache
+from ..compression_utils import (
+    COMPRESSION_SUFFIXES,
+    decompress_bytes,
+    strip_compression_suffix,
+)
 from .message import message as msg
 
 TransferMode = Literal["copy", "hardlink", "symlink"]
@@ -44,7 +49,11 @@ def _has_hashserver_prefix(directory: str) -> bool:
 
 
 def _resolve_destination_path(
-    destination_folder: str, checksum_hex: str, *, create_dirs: bool = True
+    destination_folder: str,
+    checksum_hex: str,
+    *,
+    create_dirs: bool = True,
+    compression_suffix: str | None = None,
 ) -> str:
     if _has_hashserver_prefix(destination_folder):
         prefix = checksum_hex[:2]
@@ -52,8 +61,99 @@ def _resolve_destination_path(
         if create_dirs:
             os.makedirs(target_dir, exist_ok=True)
             _ensure_dir_permissions(target_dir, 0o3775)
-        return os.path.join(target_dir, checksum_hex)
-    return os.path.join(destination_folder, checksum_hex)
+        path = os.path.join(target_dir, checksum_hex)
+    else:
+        path = os.path.join(destination_folder, checksum_hex)
+    if compression_suffix:
+        path += compression_suffix
+    return path
+
+
+def _destination_path_candidates(
+    destination_folder: str,
+    checksum_hex: str,
+    *,
+    preferred_suffix: str | None = None,
+) -> list[str]:
+    candidates = []
+    if preferred_suffix is not None:
+        candidates.append(
+            _resolve_destination_path(
+                destination_folder,
+                checksum_hex,
+                create_dirs=False,
+                compression_suffix=preferred_suffix,
+            )
+        )
+    candidates.append(
+        _resolve_destination_path(destination_folder, checksum_hex, create_dirs=False)
+    )
+    for compression_suffix in COMPRESSION_SUFFIXES:
+        if compression_suffix == preferred_suffix:
+            continue
+        candidates.append(
+            _resolve_destination_path(
+                destination_folder,
+                checksum_hex,
+                create_dirs=False,
+                compression_suffix=compression_suffix,
+            )
+        )
+    return candidates
+
+
+def _existing_destination_entries(
+    destination_folder: str,
+    checksum_hex: str,
+    *,
+    preferred_suffix: str | None = None,
+) -> list[str]:
+    result = []
+    for path in _destination_path_candidates(
+        destination_folder, checksum_hex, preferred_suffix=preferred_suffix
+    ):
+        if os.path.lexists(path):
+            result.append(path)
+    return result
+
+
+def _write_bytes_to_path(path: str, data: bytes, *, overwrite: bool = False) -> None:
+    if os.path.lexists(path) and not overwrite:
+        _ensure_dir_permissions(path, 0o444)
+        return
+    target_dir = os.path.dirname(path)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=os.path.basename(path) + "-", dir=target_dir
+    )
+    try:
+        with os.fdopen(tmp_fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp_path, path)
+        _ensure_dir_permissions(path, 0o444)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def _write_buffer_length_sidecar(
+    destination_folder: str, checksum_hex: str, buffer_length: int
+) -> None:
+    path = _resolve_destination_path(destination_folder, checksum_hex, create_dirs=True)
+    with open(path + ".BUFFERLENGTH", "w") as f:
+        f.write(str(buffer_length))
+
+
+def _remove_buffer_length_sidecar(destination_folder: str, checksum_hex: str) -> None:
+    path = _resolve_destination_path(
+        destination_folder, checksum_hex, create_dirs=False
+    )
+    try:
+        os.unlink(path + ".BUFFERLENGTH")
+    except FileNotFoundError:
+        pass
 
 
 def _write_buffer_to_destination(
@@ -69,22 +169,7 @@ def _write_buffer_to_destination(
             f"Refusing to write checksum '{checksum_hex}': source bytes have checksum '{actual_checksum}'"
         )
     path = _resolve_destination_path(destination_folder, checksum_hex, create_dirs=True)
-    if os.path.lexists(path) and not overwrite:
-        _ensure_dir_permissions(path, 0o444)
-        return
-    target_dir = os.path.dirname(path)
-    tmp_fd, tmp_path = tempfile.mkstemp(prefix=checksum_hex + "-", dir=target_dir)
-    try:
-        with os.fdopen(tmp_fd, "wb") as f:
-            f.write(buffer)
-        os.replace(tmp_path, path)
-        _ensure_dir_permissions(path, 0o444)
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        except Exception:
-            pass
+    _write_bytes_to_path(path, buffer, overwrite=overwrite)
 
 
 def _destination_entry_mismatch_message(path: str, checksum_hex: str) -> str:
@@ -97,6 +182,12 @@ def _existing_destination_entry_valid(path: str, checksum_hex: str) -> bool:
             buffer = f.read()
     except Exception:
         return False
+    _base_path, compression_suffix = strip_compression_suffix(path)
+    if compression_suffix is not None:
+        try:
+            buffer = decompress_bytes(buffer, compression_suffix)
+        except Exception:
+            return False
     return calculate_checksum(buffer) == checksum_hex
 
 
@@ -107,16 +198,17 @@ def _handle_existing_destination_entry(
     existing_entry_policy: DestinationEntryPolicy = "skip",
     repair_buffer: bytes | None = None,
 ) -> bool:
-    path = _resolve_destination_path(destination_folder, checksum_hex, create_dirs=False)
-    if not os.path.lexists(path):
+    paths = _existing_destination_entries(destination_folder, checksum_hex)
+    if not paths:
         return False
     if existing_entry_policy == "skip":
         return True
-    if _existing_destination_entry_valid(path, checksum_hex):
-        return True
+    for path in paths:
+        if _existing_destination_entry_valid(path, checksum_hex):
+            return True
     if existing_entry_policy == "verify":
         raise DestinationEntryError(
-            _destination_entry_mismatch_message(path, checksum_hex)
+            _destination_entry_mismatch_message(paths[0], checksum_hex)
         )
     if repair_buffer is None:
         return False
@@ -189,14 +281,10 @@ def _buffers_exist_remote(checksum_hexes: list[str]) -> set[str]:
         for checksum_hex in checksum_hexes:
             if checksum_hex in present:
                 continue
-            filename = os.path.join(directory, checksum_hex)
-            if os.path.exists(filename):
-                present.add(checksum_hex)
-                continue
-            subdir = os.path.join(directory, checksum_hex[:2])
-            if os.path.isdir(subdir):
-                if os.path.exists(os.path.join(subdir, checksum_hex)):
+            for path in _destination_path_candidates(directory, checksum_hex):
+                if os.path.exists(path):
                     present.add(checksum_hex)
+                    break
 
     remaining = [cs for cs in checksum_hexes if cs not in present]
     try:
@@ -228,20 +316,21 @@ def _buffers_exist_local(
     for checksum_hex in checksum_hexes:
         if checksum_hex in present:
             continue
-        path = _resolve_destination_path(
-            destination_folder, checksum_hex, create_dirs=False
-        )
-        if not os.path.lexists(path):
+        paths = _existing_destination_entries(destination_folder, checksum_hex)
+        if not paths:
             continue
         if existing_entry_policy == "skip":
             present.add(checksum_hex)
             continue
-        if _existing_destination_entry_valid(path, checksum_hex):
-            present.add(checksum_hex)
+        for path in paths:
+            if _existing_destination_entry_valid(path, checksum_hex):
+                present.add(checksum_hex)
+                break
+        if checksum_hex in present:
             continue
         if existing_entry_policy == "verify":
             raise DestinationEntryError(
-                _destination_entry_mismatch_message(path, checksum_hex)
+                _destination_entry_mismatch_message(paths[0], checksum_hex)
             )
     return present
 
@@ -391,32 +480,74 @@ def register_file(
     destination_folder: instead of uploading to a buffer server, write to this folder
     """
     with open(filename, "rb") as f:
-        buffer = f.read()
+        storage_buffer = f.read()
 
+    _base_filename, compression_suffix = strip_compression_suffix(filename)
+    if compression_suffix is not None:
+        buffer = decompress_bytes(storage_buffer, compression_suffix)
+    else:
+        buffer = storage_buffer
     checksum_hex = calculate_checksum(buffer)
+    canonical_length = len(buffer)
     if transfer_mode is None and hardlink:
         transfer_mode = "hardlink"
     if destination_folder is not None:
         if transfer_mode is None:
             transfer_mode = "copy"
-        if _handle_existing_destination_entry(
+        existing_paths = _existing_destination_entries(
             destination_folder,
             checksum_hex,
-            existing_entry_policy=existing_entry_policy,
-            repair_buffer=buffer,
-        ):
-            return checksum_hex
-        destlink = _resolve_destination_path(
-            destination_folder, checksum_hex, create_dirs=True
+            preferred_suffix=compression_suffix,
         )
+        if existing_paths:
+            if existing_entry_policy == "skip":
+                return checksum_hex
+            for path in existing_paths:
+                if _existing_destination_entry_valid(path, checksum_hex):
+                    return checksum_hex
+            if existing_entry_policy == "verify":
+                raise DestinationEntryError(
+                    _destination_entry_mismatch_message(existing_paths[0], checksum_hex)
+                )
+        destlink = _resolve_destination_path(
+            destination_folder,
+            checksum_hex,
+            create_dirs=True,
+            compression_suffix=compression_suffix,
+        )
+        if existing_paths and existing_entry_policy == "repair":
+            if compression_suffix is None:
+                _write_buffer_to_destination(
+                    buffer, destination_folder, checksum_hex, overwrite=True
+                )
+            else:
+                _write_bytes_to_path(destlink, storage_buffer, overwrite=True)
+            if compression_suffix is None:
+                _remove_buffer_length_sidecar(destination_folder, checksum_hex)
+            else:
+                _write_buffer_length_sidecar(
+                    destination_folder, checksum_hex, canonical_length
+                )
+            return checksum_hex
+        if os.path.lexists(destlink):
+            os.unlink(destlink)
         if transfer_mode == "copy":
-            _write_buffer_to_destination(buffer, destination_folder, checksum_hex)
+            if compression_suffix is None:
+                _write_buffer_to_destination(buffer, destination_folder, checksum_hex)
+            else:
+                _write_bytes_to_path(destlink, storage_buffer, overwrite=True)
         elif transfer_mode == "hardlink":
             os.link(filename, destlink)
         elif transfer_mode == "symlink":
             os.symlink(os.path.abspath(filename), destlink)
         else:
             raise ValueError(transfer_mode)
+        if compression_suffix is None:
+            _remove_buffer_length_sidecar(destination_folder, checksum_hex)
+        else:
+            _write_buffer_length_sidecar(
+                destination_folder, checksum_hex, canonical_length
+            )
         return checksum_hex
     return register_buffer(
         buffer,

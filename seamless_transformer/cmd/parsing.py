@@ -9,13 +9,16 @@ from collections import namedtuple
 
 import bashlex
 
+from seamless.checksum.calculate_checksum import calculate_checksum
 from seamless.checksum.calculate_checksum import calculate_file_checksum
+from ..compression_utils import decompress_bytes, strip_compression_suffix
 from .message import message as msg, message_and_exit as err
 from .file_load import read_checksum_file
 
 
 def _has_explicit_sidecar_suffix(arg: str) -> bool:
-    return arg.endswith(".CHECKSUM") or arg.endswith(".INDEX")
+    arg_base, _compression_suffix = strip_compression_suffix(arg)
+    return arg_base.endswith(".CHECKSUM") or arg_base.endswith(".INDEX")
 
 
 def fill_checksum_arguments(file_args: list, order: list[str]):
@@ -29,14 +32,15 @@ def fill_checksum_arguments(file_args: list, order: list[str]):
         if _has_explicit_sidecar_suffix(arg):
             continue
         change = False
-        if arg.endswith(".CHECKSUM"):
+        arg_base, _compression_suffix = strip_compression_suffix(arg)
+        if arg_base.endswith(".CHECKSUM"):
             arg0 = os.path.splitext(arg)[0]
             arg_cs = arg
             newf["mapping"] = arg0
             change = True
         else:
             arg0 = arg
-            arg_cs = arg + ".CHECKSUM"
+            arg_cs = arg_base + ".CHECKSUM"
 
         if os.path.exists(arg_cs):
             checksum = read_checksum_file(arg_cs)
@@ -105,6 +109,7 @@ def guess_arguments_with_custom_error_messages(
     for argindex0, arg in enumerate(args.copy()):
         argindex = argindex0 + 1
         path = Path(arg)
+        arg_base, _compression_suffix = strip_compression_suffix(arg)
         future_path = Path(arg + ".FUTURE")
         if future_path.exists():
             msg(0, f"Waiting for future '{future_path}'...")
@@ -116,8 +121,8 @@ def guess_arguments_with_custom_error_messages(
                 if not future_path.exists():
                     break
 
-        checksum_path = Path(arg + ".CHECKSUM")
-        index_path = Path(arg + ".INDEX")
+        checksum_path = Path(arg_base + ".CHECKSUM")
+        index_path = Path(arg_base + ".INDEX")
         checksum = None
         if checksum_path.exists():
             item = {}
@@ -166,7 +171,15 @@ def guess_arguments_with_custom_error_messages(
         if checksum:
             if exists and not is_dir:
                 arg2 = os.path.expanduser(arg)
-                file_checksum = calculate_file_checksum(arg2)
+                _arg_base2, compression_suffix2 = strip_compression_suffix(arg2)
+                if compression_suffix2 is None:
+                    file_checksum = calculate_file_checksum(arg2)
+                else:
+                    with open(arg2, "rb") as f:
+                        file_buffer = f.read()
+                    file_checksum = calculate_checksum(
+                        decompress_bytes(file_buffer, compression_suffix2)
+                    )
                 if file_checksum != checksum:
                     raise ValueError(
                         # pylint: disable=line-too-long

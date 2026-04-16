@@ -22,6 +22,7 @@ from seamless_transformer.cmd.message import (
     message_and_exit as err,
 )
 from seamless_transformer.cmd.register import _resolve_destination_path
+from seamless_transformer.compression_utils import strip_compression_suffix
 
 try:
     from seamless_config.select import select_project, select_subproject
@@ -83,6 +84,14 @@ def _get_auto_destination_folder() -> str | None:
     if len(candidates) == 1:
         return os.path.expanduser(candidates[0])
     return None
+
+
+def _inode_signature(path: str) -> tuple[int, int] | None:
+    try:
+        stat_result = os.stat(path)
+    except OSError:
+        return None
+    return (stat_result.st_dev, stat_result.st_ino)
 
 
 def _get_buffer_content(
@@ -233,6 +242,17 @@ def _main(argv: list[str] | None = None) -> int:
         action="store_true",
         default=False,
     )
+    parser.add_argument(
+        "--incremental",
+        help="Skip downloads whose target already shares an inode with the source buffer entry. Requires --hardlink.",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--compression",
+        choices=["zst", "gz"],
+        help="Append this compression suffix to all downloaded output files.",
+    )
 
     parser.add_argument(
         "-v",
@@ -268,6 +288,9 @@ def _main(argv: list[str] | None = None) -> int:
     existing_entry_policy = _get_existing_entry_policy(args)
     source_directory = None
     transfer_mode = requested_transfer_mode
+
+    if args.incremental and not args.hardlink:
+        err("--incremental requires --hardlink")
 
     if args.destination:
         if args.project:
@@ -346,6 +369,7 @@ def _main(argv: list[str] | None = None) -> int:
     directories = []
     files = []
     index_checksums = {}
+    compression_suffix = f".{args.compression}" if args.compression else ""
     paths = [path.rstrip(os.sep) for path in args.files_directories_and_checksums]
     for pathnr, path in enumerate(paths):
         parsed_checksum = None
@@ -454,7 +478,7 @@ def _main(argv: list[str] | None = None) -> int:
                 err(maybe_err_msg)  # pylint: disable=possibly-used-before-assignment
             else:
                 for k, cs in index_data.items():
-                    kk = os.path.join(dirname, k)
+                    kk = os.path.join(dirname, k) + compression_suffix
                     to_download[kk] = cs
             index_checksums[dirname] = index_checksum.hex()
             continue
@@ -474,9 +498,26 @@ def _main(argv: list[str] | None = None) -> int:
 
         if pathnr < len(args.outputs):
             path = args.outputs[pathnr]
+        if compression_suffix:
+            path += compression_suffix
 
         to_download[path] = checksum.hex()
         files.append(path)
+
+    skip_targets = set()
+    if args.incremental:
+        if source_directory is None:
+            err("--incremental requires a source destination folder")
+        for target, checksum in to_download.items():
+            _target_base, output_suffix = strip_compression_suffix(target)
+            source_path = _resolve_destination_path(
+                source_directory,
+                checksum,
+                create_dirs=False,
+                compression_suffix=output_suffix,
+            )
+            if _inode_signature(target) == _inode_signature(source_path):
+                skip_targets.add(target)
 
     ################################################################
 
@@ -511,7 +552,8 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.index_only:
         for path, checksum in to_download.items():
-            with open(path + ".CHECKSUM", "w") as f:
+            path_base, _path_suffix = strip_compression_suffix(path)
+            with open(path_base + ".CHECKSUM", "w") as f:
                 f.write(checksum + "\n")
     elif args.stdout:
         if len(directories):
@@ -538,6 +580,7 @@ def _main(argv: list[str] | None = None) -> int:
             source_directory=source_directory,
             transfer_mode=transfer_mode or "copy",
             existing_entry_policy=existing_entry_policy,
+            skip_targets=skip_targets,
         )
 
 

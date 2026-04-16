@@ -13,9 +13,12 @@ from seamless_transformer.cmd.message import (
     message_and_exit as err,
 )
 from seamless_transformer.cmd.file_load import files_to_checksums
+from seamless_transformer.cmd.file_load import read_checksum_file
 from seamless_transformer.cmd.bytes2human import human2bytes
 from seamless_transformer.cmd.exceptions import SeamlessSystemExit
 from seamless import Checksum
+from seamless_transformer.cmd.register import _resolve_destination_path
+from seamless_transformer.compression_utils import strip_compression_suffix
 
 try:
     from seamless_config.select import select_project, select_subproject
@@ -77,6 +80,109 @@ def _get_auto_destination_folder() -> str | None:
     if len(candidates) == 1:
         return os.path.expanduser(candidates[0])
     return None
+
+
+def _inode_signature(path: str) -> tuple[int, int] | None:
+    try:
+        stat_result = os.stat(path)
+    except OSError:
+        return None
+    return (stat_result.st_dev, stat_result.st_ino)
+
+
+def _iter_input_files(paths: list[str]) -> list[str]:
+    result = []
+    for path in paths:
+        if os.path.isdir(path):
+            for dirpath, _dirnames, filenames in os.walk(path):
+                for filename in filenames:
+                    result.append(os.path.join(dirpath, filename))
+        else:
+            result.append(path)
+    return result
+
+
+def _build_destination_inode_set(destination_folder: str) -> set[tuple[int, int]]:
+    result = set()
+    for dirpath, _dirnames, filenames in os.walk(destination_folder):
+        for filename in filenames:
+            if filename.startswith(".") or filename.endswith(".BUFFERLENGTH"):
+                continue
+            path = os.path.join(dirpath, filename)
+            sig = _inode_signature(path)
+            if sig is not None:
+                result.add(sig)
+    return result
+
+
+def _collect_incremental_skip_inodes(
+    paths: list[str], destination_folder: str
+) -> set[str]:
+    skip_inodes: set[str] = set()
+    fallback_needed = False
+
+    for path in paths:
+        if os.path.isdir(path):
+            index_file = path + ".INDEX"
+            if not os.path.exists(index_file):
+                fallback_needed = True
+                continue
+            try:
+                with open(index_file, "r", encoding="utf-8") as f:
+                    index_data = json.load(f)
+            except Exception:
+                fallback_needed = True
+                continue
+            for dirpath, _dirnames, filenames in os.walk(path):
+                dirtail = dirpath[len(path) + 1 :]
+                for filename in filenames:
+                    full_filename = os.path.join(dirpath, filename)
+                    mapped_filename = os.path.join(dirtail, filename)
+                    canonical_name, compression_suffix = strip_compression_suffix(
+                        mapped_filename
+                    )
+                    checksum = index_data.get(canonical_name)
+                    if checksum is None:
+                        continue
+                    expected_path = _resolve_destination_path(
+                        destination_folder,
+                        checksum,
+                        create_dirs=False,
+                        compression_suffix=compression_suffix,
+                    )
+                    if _inode_signature(full_filename) == _inode_signature(
+                        expected_path
+                    ):
+                        skip_inodes.add(full_filename)
+        else:
+            path_base, compression_suffix = strip_compression_suffix(path)
+            checksum_file = path_base + ".CHECKSUM"
+            if not os.path.exists(checksum_file):
+                fallback_needed = True
+                continue
+            checksum = read_checksum_file(checksum_file)
+            if checksum is None:
+                fallback_needed = True
+                continue
+            expected_path = _resolve_destination_path(
+                destination_folder,
+                checksum,
+                create_dirs=False,
+                compression_suffix=compression_suffix,
+            )
+            if _inode_signature(path) == _inode_signature(expected_path):
+                skip_inodes.add(path)
+
+    if fallback_needed:
+        destination_inodes = _build_destination_inode_set(destination_folder)
+        for path in _iter_input_files(paths):
+            if path in skip_inodes:
+                continue
+            sig = _inode_signature(path)
+            if sig is not None and sig in destination_inodes:
+                skip_inodes.add(path)
+
+    return skip_inodes
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -141,6 +247,15 @@ def _main(argv: list[str] | None = None) -> int:
             - "rsync --in-place",
             - appending to a file using ">>".
         This will lead to checksum corruption!!
+        """,
+        action="store_true",
+    )
+    parser.add_argument(
+        "--incremental",
+        help="""Skip files that already share an inode with their destination buffer entry.
+
+        Requires --hardlink and the same immutability precondition:
+        never modify uploaded source files in-place afterwards.
         """,
         action="store_true",
     )
@@ -213,6 +328,9 @@ def _main(argv: list[str] | None = None) -> int:
     existing_entry_policy = _get_existing_entry_policy(args)
     destination_folder = None
     transfer_mode = requested_transfer_mode
+
+    if args.incremental and not args.hardlink:
+        err("--incremental requires --hardlink")
 
     if args.destination:
         if args.project:
@@ -295,6 +413,11 @@ def _main(argv: list[str] | None = None) -> int:
         if not path.endswith(".CHECKSUM")
     ]
     directories = [path for path in paths if os.path.isdir(path)]
+    skip_inodes = None
+    if args.incremental:
+        if destination_folder is None:
+            err("--incremental requires a destination folder")
+        skip_inodes = _collect_incremental_skip_inodes(paths, destination_folder)
 
     try:
         file_checksum_dict, directory_indices = files_to_checksums(
@@ -307,6 +430,7 @@ def _main(argv: list[str] | None = None) -> int:
             hardlink_destination=args.hardlink,
             transfer_mode=transfer_mode,
             existing_entry_policy=existing_entry_policy,
+            skip_inodes=skip_inodes,
         )
     except SeamlessSystemExit as exc:
         err(*exc.args)
@@ -319,6 +443,8 @@ def _main(argv: list[str] | None = None) -> int:
             filename2 = filename
             if filename.endswith(".INDEX"):
                 filename2 = os.path.splitext(filename)[0]
+            else:
+                filename2, _compression_suffix = strip_compression_suffix(filename2)
             with open(filename2 + ".CHECKSUM", "w") as f:
                 f.write(file_checksum.hex() + "\n")
         except Exception:

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
+import gzip
 
 import pytest
+import zstandard
 
 import seamless_config.cluster as cluster_mod
 import seamless_config.extern_clients as extern_clients
@@ -49,9 +51,7 @@ def test_upload_manual_destination_bypasses_seamless_config(monkeypatch, tmp_pat
     monkeypatch.setattr(extern_clients, "set_remote_clients_from_env", fail)
     monkeypatch.setattr(upload, "files_to_checksums", fake_files_to_checksums)
 
-    assert (
-        upload._main(["--destination", str(destination), str(source)]) is None
-    )
+    assert upload._main(["--destination", str(destination), str(source)]) is None
     assert captured["paths"] == [str(source)]
     assert captured["kwargs"]["destination_folder"] == str(destination)
     assert captured["kwargs"]["transfer_mode"] == "copy"
@@ -71,9 +71,7 @@ def test_upload_manual_destination_rejects_config_flags(monkeypatch, tmp_path, f
         upload._main([flag, "demo", "--destination", str(destination), str(source)])
 
 
-def test_upload_auto_destination_defaults_to_copy_and_dest_skip(
-    monkeypatch, tmp_path
-):
+def test_upload_auto_destination_defaults_to_copy_and_dest_skip(monkeypatch, tmp_path):
     source, _ = _make_source_file(tmp_path)
     destination = tmp_path / "buffers"
     destination.mkdir()
@@ -177,6 +175,51 @@ def test_register_file_dest_skip_trusts_existing_entry(tmp_path):
     )
 
     assert open(target, "rb").read() == b"bad"
+
+
+@pytest.mark.parametrize(
+    ("filename", "compressor", "suffix"),
+    [
+        (
+            "input.txt.zst",
+            lambda data: zstandard.ZstdCompressor().compress(data),
+            ".zst",
+        ),
+        ("input.txt.gz", gzip.compress, ".gz"),
+    ],
+)
+def test_register_file_compressed_preserves_storage_suffix(
+    tmp_path, filename, compressor, suffix
+):
+    source = tmp_path / filename
+    payload = b"compressed payload"
+    source.write_bytes(compressor(payload))
+    destination = tmp_path / "buffers"
+    destination.mkdir()
+    checksum_hex = calculate_checksum(payload)
+
+    register_file(
+        str(source), destination_folder=str(destination), transfer_mode="copy"
+    )
+
+    target = _resolve_destination_path(
+        str(destination), checksum_hex, create_dirs=False, compression_suffix=suffix
+    )
+    assert os.path.exists(target)
+    assert open(target, "rb").read() == source.read_bytes()
+    assert (destination / f"{checksum_hex}.BUFFERLENGTH").read_text() == str(
+        len(payload)
+    )
+
+
+def test_upload_incremental_requires_hardlink(monkeypatch, tmp_path):
+    source, _ = _make_source_file(tmp_path)
+    destination = tmp_path / "buffers"
+    destination.mkdir()
+    monkeypatch.setattr(upload, "err", _raise_runtime_error)
+
+    with pytest.raises(RuntimeError, match="--incremental requires --hardlink"):
+        upload._main(["--destination", str(destination), "--incremental", str(source)])
 
 
 def test_register_file_dest_verify_accepts_valid_and_rejects_corrupt(tmp_path):

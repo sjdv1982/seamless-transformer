@@ -2,11 +2,13 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import functools
+import json
 import os
 
 from seamless.checksum.calculate_checksum import calculate_checksum
 from seamless.checksum.serialize import serialize_sync as serialize
 from seamless import Checksum
+from ..compression_utils import decompress_bytes, strip_compression_suffix
 from .message import message as msg
 from .register import (
     DestinationEntryError,
@@ -45,7 +47,29 @@ def read_checksum_file(filename) -> str | None:
 def _file_checksum_and_length(filename: str) -> tuple[str, int]:
     with open(filename, "rb") as f:
         buffer = f.read()
+    _base_name, compression_suffix = strip_compression_suffix(filename)
+    if compression_suffix is not None:
+        buffer = decompress_bytes(buffer, compression_suffix)
     return calculate_checksum(buffer), len(buffer)
+
+
+def _read_directory_index_checksum(dirname: str, mapped_filename: str) -> str | None:
+    index_file = dirname + ".INDEX"
+    if not os.path.exists(index_file):
+        return None
+    try:
+        with open(index_file, "r") as f:
+            index_data = json.load(f)
+    except Exception:
+        return None
+    canonical_name, _compression_suffix = strip_compression_suffix(mapped_filename)
+    checksum = index_data.get(canonical_name)
+    if checksum is None:
+        return None
+    try:
+        return Checksum(checksum).hex()
+    except Exception:
+        return None
 
 
 def files_to_checksums(
@@ -61,6 +85,7 @@ def files_to_checksums(
     transfer_mode: str | None = None,
     existing_entry_policy: str = "skip",
     dry_run: bool = False,
+    skip_inodes: set[str] | None = None,
 ):
     """Convert a list of filenames to a dict of filename-to-checksum items
     In addition, each file buffer is uploaded.
@@ -78,6 +103,8 @@ def files_to_checksums(
         transfer_mode = "hardlink"
     elif transfer_mode is None and destination_folder is not None:
         transfer_mode = "copy"
+    if skip_inodes is None:
+        skip_inodes = set()
 
     all_filelist = [f for f in filelist if f not in directories]
     directory_files = {}
@@ -94,6 +121,31 @@ def files_to_checksums(
 
     upload_buffer_lengths = {}
     all_result = {}
+    filtered_filelist = []
+    for filename in all_filelist:
+        if filename not in skip_inodes:
+            filtered_filelist.append(filename)
+            continue
+        msg(2, f"Skip inode-matched file '{filename}'")
+        checksum = None
+        for dirname, curr_directory_files in directory_files.items():
+            for full_filename, mapped_filename in curr_directory_files:
+                if full_filename != filename:
+                    continue
+                checksum = _read_directory_index_checksum(dirname, mapped_filename)
+                break
+            if checksum is not None:
+                break
+        if checksum is None:
+            filename_base, _compression_suffix = strip_compression_suffix(filename)
+            checksum = read_checksum_file(filename_base + ".CHECKSUM")
+        if checksum is None:
+            raise SeamlessSystemExit(
+                f"Cannot determine checksum for skipped file '{filename}'"
+            )
+        all_result[filename] = checksum
+    all_filelist = filtered_filelist
+
     with ThreadPoolExecutor(max_workers=nparallel) as executor:
         file_infos = list(executor.map(_file_checksum_and_length, all_filelist))
 
@@ -138,7 +190,12 @@ def files_to_checksums(
 
     deepfolder_buffers = {}
     for dirname in directories:
-        deepfolder = {d[1]: all_result[d[0]] for d in directory_files[dirname]}
+        deepfolder = {}
+        for full_filename, mapped_filename in directory_files[dirname]:
+            canonical_name, _compression_suffix = strip_compression_suffix(
+                mapped_filename
+            )
+            deepfolder[canonical_name] = all_result[full_filename]
         deepfolder_buffers[dirname] = serialize(deepfolder, "plain")
 
     directory_indices = {}

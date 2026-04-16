@@ -15,6 +15,7 @@ dependencies = [
     "PyYAML",
     "tqdm",
     "seamless-core",
+    "zstandard",
 ]
 
 [project.optional-dependencies]
