@@ -200,6 +200,44 @@ int transform(unsigned int N, const PointsStruct *points, ShiftedStruct *shifted
     np.testing.assert_array_equal(result["label"], np.array([107, 108, 109]))
 
 
+def test_nested_structured_array_input():
+    tf = DirectCompiledTransformer("c")
+    tf.schema = """\
+inputs:
+  - name: samples
+    dtype:
+      fields:
+        - name: meta
+          dtype:
+            fields:
+              - {name: id, dtype: int32}
+              - {name: scale, dtype: float64}
+        - {name: value, dtype: float64}
+    shape: [N]
+outputs:
+  - {name: result, dtype: float64}
+"""
+    tf.code = """\
+#include "public.h"
+int transform(unsigned int N, const SamplesStruct *samples, double *result) {
+    double total = 0.0;
+    for (unsigned int i = 0; i < N; i++) {
+        total += samples[i].value * samples[i].meta.scale + samples[i].meta.id;
+    }
+    *result = total;
+    return 0;
+}
+"""
+    meta_dtype = np.dtype([("id", "int32"), ("scale", "float64")], align=True)
+    dtype = np.dtype([("meta", meta_dtype), ("value", "float64")], align=True)
+    samples = np.zeros(2, dtype=dtype)
+    samples["meta"]["id"] = [1, 2]
+    samples["meta"]["scale"] = [10.0, 100.0]
+    samples["value"] = [3.0, 4.0]
+
+    assert tf(samples=samples) == 433.0
+
+
 def test_multi_output_mixed_and_deepcell():
     schema = """\
 inputs:

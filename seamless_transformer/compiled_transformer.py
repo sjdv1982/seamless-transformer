@@ -473,8 +473,8 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
 
     **Schema**: a YAML string in the seamless-signature format. Accepts a
     string or a :class:`pathlib.Path`. The schema defines input/output parameter
-    names, dtypes, and shapes. Structured dtypes map to aligned NumPy structured
-    dtypes and generated C structs.
+    names, dtypes, and shapes. Struct parameters map to aligned NumPy
+    structured dtypes and generated C structs in the header.
 
     **Code**: the compiled source as a string or :class:`pathlib.Path`. The
     source must define a ``transform()`` function matching the schema signature
