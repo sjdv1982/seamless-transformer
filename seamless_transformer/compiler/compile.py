@@ -91,11 +91,6 @@ def compile(module_definition: dict) -> dict[str, bytes]:
     """Compile all source objects in a completed module definition."""
 
     with tempfile.TemporaryDirectory() as build_dir:
-        public_header = module_definition.get("public_header")
-        if public_header is not None:
-            with open(os.path.join(build_dir, "public.h"), "w") as f:
-                f.write(public_header["code"])
-
         binaries: dict[str, bytes] = {}
         for objname, obj in module_definition["objects"].items():
             source_path = os.path.join(build_dir, f"{objname}.code")

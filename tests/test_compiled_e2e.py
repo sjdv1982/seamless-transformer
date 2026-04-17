@@ -15,6 +15,69 @@ from seamless_transformer.transformation_class import Transformation
 pytestmark = pytest.mark.skipif(not shutil.which("gcc"), reason="gcc required")
 
 
+HEADER_STRUCTURED_SCALAR = """\
+#include <stdint.h>
+#include <stdbool.h>
+
+typedef struct {
+    int32_t x;
+    double y;
+} ItemStruct;
+
+typedef struct {
+    int32_t x;
+    double y;
+} ResultStruct;
+
+int transform(
+    ItemStruct item,
+    ResultStruct *result
+);
+"""
+
+HEADER_STRUCTURED_ARRAY = """\
+#include <stdint.h>
+#include <stdbool.h>
+
+typedef struct {
+    double xy[2];
+    int32_t label;
+} PointsStruct;
+
+typedef struct {
+    double xy[2];
+    int32_t label;
+} ShiftedStruct;
+
+int transform(
+    unsigned int N,
+    const PointsStruct *points,
+    ShiftedStruct *shifted
+);
+"""
+
+HEADER_NESTED_STRUCT = """\
+#include <stdint.h>
+#include <stdbool.h>
+
+typedef struct {
+    int32_t id;
+    double scale;
+} SamplesMetaStruct;
+
+typedef struct {
+    SamplesMetaStruct meta;
+    double value;
+} SamplesStruct;
+
+int transform(
+    unsigned int N,
+    const SamplesStruct *samples,
+    double *result
+);
+"""
+
+
 ADD_SCHEMA = """\
 inputs:
   - {name: a, dtype: int32}
@@ -73,6 +136,15 @@ pub unsafe extern "C" fn transform(a: i32, b: i32, result: *mut i32) -> i32 {
 
 def test_delayed_compiled_transformer():
     tf = CompiledTransformer("c")
+    tf.schema = ADD_SCHEMA
+    tf.code = ADD_C
+    result = tf(a=2, b=9)
+    assert isinstance(result, Transformation)
+    assert result.run() == 11
+
+
+def test_delayed_compiled_transformer_scratch_run():
+    tf = CompiledTransformer("c", scratch=True, local=True)
     tf.schema = ADD_SCHEMA
     tf.code = ADD_C
     result = tf(a=2, b=9)
@@ -142,8 +214,8 @@ outputs:
         - {name: x, dtype: int32}
         - {name: y, dtype: float64}
 """
-    tf.code = """\
-#include "public.h"
+    assert tf.header == HEADER_STRUCTURED_SCALAR
+    tf.code = HEADER_STRUCTURED_SCALAR + """\
 int transform(ItemStruct item, ResultStruct *result) {
     result->x = item.x + 1;
     result->y = item.y * 2.0;
@@ -175,8 +247,8 @@ outputs:
         - {name: label, dtype: int32}
     shape: [N]
 """
-    tf.code = """\
-#include "public.h"
+    assert tf.header == HEADER_STRUCTURED_ARRAY
+    tf.code = HEADER_STRUCTURED_ARRAY + """\
 int transform(unsigned int N, const PointsStruct *points, ShiftedStruct *shifted) {
     for (unsigned int i = 0; i < N; i++) {
         shifted[i].xy[0] = points[i].xy[0] + 10.0;
@@ -217,8 +289,8 @@ inputs:
 outputs:
   - {name: result, dtype: float64}
 """
-    tf.code = """\
-#include "public.h"
+    assert tf.header == HEADER_NESTED_STRUCT
+    tf.code = HEADER_NESTED_STRUCT + """\
 int transform(unsigned int N, const SamplesStruct *samples, double *result) {
     double total = 0.0;
     for (unsigned int i = 0; i < N; i++) {

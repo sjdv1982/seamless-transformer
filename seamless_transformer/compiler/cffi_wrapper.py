@@ -45,16 +45,11 @@ def build_extension_cffi(
                 f.write(data)
             object_paths.append(path)
 
-        header_path = os.path.join(build_dir, "public.h")
-        with open(header_path, "w") as f:
-            f.write(c_header)
-
         ffi.set_source(
             full_module_name,
-            '#include "public.h"',
+            c_header,
             extra_objects=object_paths,
             extra_link_args=list(link_options or []),
-            include_dirs=[build_dir],
         )
         ffi.compile(tmpdir=build_dir, verbose=compiler_verbose)
 
