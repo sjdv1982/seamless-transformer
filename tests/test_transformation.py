@@ -57,3 +57,20 @@ def test_transformation():
     duration2 = time.perf_counter() - start
     print(duration2)
     assert 4 * DELAY < duration2 < 4 * DELAY + 1, duration2
+
+
+def test_scratch_dependency_materialized_for_downstream():
+    @delayed
+    def inner(a):
+        return a + 7
+
+    @delayed
+    def outer(value):
+        return value * 3
+
+    inner.scratch = True
+    inner.local = True
+    outer.scratch = True
+    outer.local = True
+
+    assert outer(inner(4)).run() == 33

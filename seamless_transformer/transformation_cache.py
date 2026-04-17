@@ -4,6 +4,7 @@ from typing import Any, Dict
 
 import asyncio
 import os
+from copy import deepcopy
 
 from seamless import CacheMissError, Checksum, is_worker
 
@@ -55,15 +56,32 @@ class TransformationCache:
     def __init__(self) -> None:
         self._transformation_cache: dict[Checksum, Checksum] = {}
         self._rev_transformation_cache: dict[Checksum, set[Checksum]] = {}
+        self._transformation_dunder_cache: dict[Checksum, Dict[str, Any]] = {}
+
+    def _remember_transformation_dunder(
+        self, tf_checksum: Checksum, tf_dunder: Dict[str, Any] | None
+    ) -> None:
+        if not isinstance(tf_dunder, dict) or not tf_dunder:
+            return
+        tf_checksum = Checksum(tf_checksum)
+        self._transformation_dunder_cache[tf_checksum] = deepcopy(tf_dunder)
 
     def _register_transformation_result(
-        self, tf_checksum: Checksum, result_checksum: Checksum
+        self,
+        tf_checksum: Checksum,
+        result_checksum: Checksum,
+        tf_dunder: Dict[str, Any] | None = None,
     ) -> None:
         tf_checksum = Checksum(tf_checksum)
         result_checksum = Checksum(result_checksum)
+        self._remember_transformation_dunder(tf_checksum, tf_dunder)
         self._transformation_cache[tf_checksum] = result_checksum
         rev = self._rev_transformation_cache.setdefault(result_checksum, set())
         rev.add(tf_checksum)
+
+    def get_transformation_dunder(self, tf_checksum: Checksum) -> Dict[str, Any]:
+        tf_checksum = Checksum(tf_checksum)
+        return deepcopy(self._transformation_dunder_cache.get(tf_checksum, {}))
 
     def get_reverse_transformations(self, result_checksum: Checksum) -> list[Checksum]:
         result_checksum = Checksum(result_checksum)
@@ -88,6 +106,7 @@ class TransformationCache:
         is resolvable (buffer available locally or via remote) before returning.
         """
         tf_checksum = Checksum(tf_checksum)
+        self._remember_transformation_dunder(tf_checksum, tf_dunder)
         cached_result = self._transformation_cache.get(tf_checksum)
         if cached_result is not None:
             if require_value:
@@ -100,9 +119,12 @@ class TransformationCache:
                 if scratch:
                     cached_result.tempref(scratch=True)
                 else:
-                    await buffer_remote.promise(cached_result)
+                    if buffer_remote is not None:
+                        await buffer_remote.promise(cached_result)
                     cached_result.tempref()
-                self._register_transformation_result(tf_checksum, cached_result)
+                self._register_transformation_result(
+                    tf_checksum, cached_result, tf_dunder=tf_dunder
+                )
                 return cached_result
 
         if not force_local and database_remote is not None and not is_worker():
@@ -124,7 +146,9 @@ class TransformationCache:
                         remote_result.tempref(scratch=True)
                     else:
                         remote_result.tempref()
-                    self._register_transformation_result(tf_checksum, remote_result)
+                    self._register_transformation_result(
+                        tf_checksum, remote_result, tf_dunder=tf_dunder
+                    )
                     return remote_result
 
         execution = "process" if force_local else get_execution()
@@ -249,7 +273,9 @@ class TransformationCache:
             #         result_checksum, output_celltype, sync_to_remote=True
             #     )
 
-        self._register_transformation_result(tf_checksum, result_checksum)
+        self._register_transformation_result(
+            tf_checksum, result_checksum, tf_dunder=tf_dunder
+        )
         await _await_buffer_writer(result_checksum)
 
         return result_checksum
@@ -265,6 +291,7 @@ class TransformationCache:
         force_local: bool = False,
     ) -> Checksum:
         tf_checksum = Checksum(tf_checksum)
+        self._remember_transformation_dunder(tf_checksum, tf_dunder)
         cached_result = self._transformation_cache.get(tf_checksum)
         if cached_result is not None:
             if require_value:
@@ -273,7 +300,9 @@ class TransformationCache:
                 except CacheMissError:
                     cached_result = None
             if cached_result is not None:
-                self._register_transformation_result(tf_checksum, cached_result)
+                self._register_transformation_result(
+                    tf_checksum, cached_result, tf_dunder=tf_dunder
+                )
                 if scratch:
                     cached_result.tempref(scratch=True)
                 else:
@@ -390,10 +419,12 @@ async def recompute_from_transformation_checksum(
         return None
     if not isinstance(transformation_dict, dict):
         return None
-    return await get_transformation_cache().run(
+    cache = get_transformation_cache()
+    tf_dunder = cache.get_transformation_dunder(tf_checksum_obj)
+    return await cache.run(
         transformation_dict,
         tf_checksum=tf_checksum_obj,
-        tf_dunder={},
+        tf_dunder=tf_dunder,
         scratch=scratch,
         require_value=require_value,
         force_local=True,
@@ -413,10 +444,12 @@ def recompute_from_transformation_checksum_sync(
         return None
     if not isinstance(transformation_dict, dict):
         return None
-    return get_transformation_cache().run_sync(
+    cache = get_transformation_cache()
+    tf_dunder = cache.get_transformation_dunder(tf_checksum_obj)
+    return cache.run_sync(
         transformation_dict,
         tf_checksum=tf_checksum_obj,
-        tf_dunder={},
+        tf_dunder=tf_dunder,
         scratch=scratch,
         require_value=require_value,
         force_local=True,
@@ -428,10 +461,12 @@ def get_reverse_transformations(result_checksum: Checksum) -> list[Checksum]:
 
 
 def register_transformation_result(
-    tf_checksum: Checksum, result_checksum: Checksum
+    tf_checksum: Checksum,
+    result_checksum: Checksum,
+    tf_dunder: Dict[str, Any] | None = None,
 ) -> None:
     get_transformation_cache()._register_transformation_result(  # type: ignore[attr-defined]
-        tf_checksum, result_checksum
+        tf_checksum, result_checksum, tf_dunder=tf_dunder
     )
 
 

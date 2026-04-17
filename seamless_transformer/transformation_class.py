@@ -215,7 +215,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     def allow_input_fingertip(self) -> bool:
         """If True, inputs may be fingertipped when resolving their buffers."""
         try:
-            return bool(self._meta is not None and self._meta.get("allow_input_fingertip"))
+            return bool(
+                self._meta is not None and self._meta.get("allow_input_fingertip")
+            )
         except Exception:
             return False
 
@@ -302,8 +304,21 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             self._evaluated = True
         return self._result_checksum
 
+    async def _ensure_result_value(self) -> None:
+        if self._result_checksum is None:
+            return
+        try:
+            await self._result_checksum.fingertip(self.celltype)
+            self._exception = None
+        except (AssertionError, TransformationError):
+            self._exception = traceback.format_exc().strip("\n") + "\n"
+        except Exception as exc:
+            self._exception = _format_exception(exc)
+
     async def _evaluation(self, require_value: bool) -> Checksum | None:
         if self._evaluated:
+            if require_value:
+                await self._ensure_result_value()
             return self._result_checksum
         await self.construction()
         if self._exception is not None:
@@ -540,7 +555,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     async def _computation(self, require_value: bool) -> Checksum | None:
         if _dask_available() and not self._prefer_local_execution():
             return await self._compute_with_dask_async(require_value=require_value)
-        await self._run_dependencies_async(require_value=require_value)
+        await self._run_dependencies_async(
+            require_value=True
+        )  # TODO: review thoroughly if require_value=True is necessary in all cases
         await self._evaluation(require_value=require_value)
         return self._result_checksum
 
@@ -583,11 +600,15 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             if self._computation_task is not None:
                 await self._computation_task
                 self._computation_task = None
+                if require_value:
+                    await self._ensure_result_value()
                 return self._result_checksum
             return await self._compute_with_dask_async(require_value=require_value)
         if self._computation_future is not None:
             await asyncio.wrap_future(self._computation_future)
             self._computation_future = None
+            if require_value:
+                await self._ensure_result_value()
             return self._result_checksum
         if self._computation_task is None:
             return await self._computation(require_value=require_value)
@@ -607,6 +628,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         else:
             task_loop.run_until_complete(self._computation_task)
         self._computation_task = None
+        if require_value:
+            await self._ensure_result_value()
         return self._result_checksum
 
     def _future_cleanup(self, fut) -> None:
@@ -681,7 +704,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             return self
         loop = loop or get_event_loop()
         _ensure_loop_running(loop)
-        self._computation_task = loop.create_task(self._computation(require_value=False))
+        self._computation_task = loop.create_task(
+            self._computation(require_value=False)
+        )
         self._computation_task.add_done_callback(self._future_cleanup)
         return self
 
