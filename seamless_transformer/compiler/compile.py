@@ -36,6 +36,8 @@ def complete(module_definition: dict, languages_registry=None) -> dict:
         obj["compile_flag"] = comp.compile_flag
         obj["output_flag"] = comp.output_flag
         obj["language_flag"] = comp.language_flag
+        obj["include_flag"] = comp.include_flag
+        obj["extension"] = comp.extension
         if target in ("release", "profile"):
             options = obj.get("options")
             if options is None:
@@ -62,8 +64,9 @@ def _run_compiler(obj: dict, source_path: str, output_path: str, include_dir: st
     command += _as_list(obj.get("language_flag"))
     command += _as_list(obj.get("compile_flag"))
     command += _as_list(obj.get("options"))
-    if obj.get("language") != "rust":
-        command += ["-I", include_dir]
+    include_flag = obj.get("include_flag")
+    if include_flag:
+        command += [include_flag, include_dir]
     output_flag = obj.get("output_flag", "-o")
     if output_flag:
         command += _as_list(output_flag)
@@ -93,8 +96,9 @@ def compile(module_definition: dict) -> dict[str, bytes]:
     with tempfile.TemporaryDirectory() as build_dir:
         binaries: dict[str, bytes] = {}
         for objname, obj in module_definition["objects"].items():
-            source_path = os.path.join(build_dir, f"{objname}.code")
-            suffix = ".a" if obj["compile_mode"] == "archive" else ".o"
+            ext = obj.get("extension") or "code"
+            source_path = os.path.join(build_dir, f"{objname}.{ext}")
+            suffix = ".a" if obj["compile_mode"] in ("archive", "package") else ".o"
             output_path = os.path.join(build_dir, objname + suffix)
             with open(source_path, "w") as f:
                 f.write(obj["code"])
@@ -109,9 +113,9 @@ def _merge_objects(objects: dict[str, bytes], mode: str) -> bytes | dict[str, by
 
     if mode == "object":
         return objects
-    if mode == "archive":
+    if mode in ("archive", "package"):
         if len(objects) != 1:
-            raise ValueError("archive mode requires exactly one archive")
+            raise ValueError(f"{mode} mode requires exactly one archive")
         return next(iter(objects.values()))
     raise NotImplementedError(mode)
 

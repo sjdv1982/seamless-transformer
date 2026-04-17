@@ -40,6 +40,8 @@ class CompilationConfig:
     compile_flag: str = ""
     output_flag: str = "-o"
     language_flag: str = ""
+    include_flag: str = "-I"
+    extension: str = ""
 
 
 @dataclass
@@ -57,7 +59,13 @@ def define_compiled_language(name: str, compilation: dict) -> None:
     ``compilation`` is a dict with the following keys:
 
     - ``compiler`` (str): the compiler binary name (e.g. ``"gcc"``).
-    - ``mode`` (str): ``"object"`` (produces ``.o``) or ``"archive"`` (produces ``.a``).
+    - ``mode`` (str): ``"object"`` (produces ``.o``), ``"archive"`` (produces ``.a``),
+      or ``"package"`` (multi-file package compiled to ``.a``, e.g. Go).
+    - ``include_flag`` (str): flag used to pass the build include directory to the compiler
+      (e.g. ``"-I"`` for gcc/gfortran); empty string disables include-dir injection.
+      Defaults to ``"-I"``.
+    - ``extension`` (str): source-file extension required by the compiler (e.g. ``"go"``);
+      empty string falls back to ``"code"``.
     - ``options`` (list[str]): default (profile/release) compiler flags.
     - ``debug_options`` (list[str]): flags used for debug builds.
     - ``profile_options`` (list[str]): extra flags added on top of ``options`` for profile target.
@@ -71,7 +79,7 @@ def define_compiled_language(name: str, compilation: dict) -> None:
     """
 
     config = CompilationConfig(**compilation)
-    if config.mode not in ("object", "archive"):
+    if config.mode not in ("object", "archive", "package"):
         raise ValueError(f"Unsupported compile mode: {config.mode!r}")
     _registry[name] = LanguageDefinition(name=name, compilation=config)
 
