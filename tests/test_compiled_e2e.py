@@ -3,13 +3,14 @@ import shutil
 import numpy as np
 import pytest
 
-from seamless import Checksum
+from seamless import Buffer, Checksum
 from seamless_transformer import (
     CompiledObject,
     CompiledTransformer,
     DirectCompiledTransformer,
 )
 from seamless_transformer.transformation_class import Transformation
+from seamless_transformer import delayed as delayed_py
 
 
 pytestmark = pytest.mark.skipif(not shutil.which("gcc"), reason="gcc required")
@@ -392,3 +393,117 @@ int transform(unsigned int N, const int32_t *arr, int32_t *result) {
     arr = np.array([1, 2], dtype=dtype)
     with pytest.raises(TypeError):
         tf(arr=arr)
+
+
+def _make_checksum(value, celltype="mixed"):
+    buf = Buffer(value, celltype)
+    checksum = buf.get_checksum()
+    buf.tempref()
+    return checksum
+
+
+def test_compiled_checksum_input_scalar():
+    tf = DirectCompiledTransformer("c", local=True)
+    tf.schema = ADD_SCHEMA
+    tf.code = ADD_C
+
+    cs_a = _make_checksum(np.int32(4))
+    cs_b = _make_checksum(np.int32(5))
+
+    assert tf(a=cs_a, b=cs_b) == 9
+    assert tf(a=cs_a.hex(), b=cs_b.hex()) == 9
+
+
+def test_compiled_checksum_input_array():
+    tf = DirectCompiledTransformer("c", local=True)
+    tf.schema = """\
+inputs:
+  - {name: arr, dtype: float64, shape: [N]}
+  - {name: factor, dtype: float64}
+outputs:
+  - {name: result, dtype: float64, shape: [N]}
+"""
+    tf.code = """\
+#include <stdint.h>
+int transform(unsigned int N, const double *arr, double factor, double *result) {
+    for (unsigned int i = 0; i < N; i++) result[i] = arr[i] * factor;
+    return 0;
+}
+"""
+    source = np.arange(4, dtype=np.float64)
+    cs_arr = _make_checksum(source)
+    np.testing.assert_allclose(tf(arr=cs_arr, factor=3.0), source * 3.0)
+
+
+def test_compiled_transformation_input_scalar():
+    @delayed_py
+    def make_value(x: int, y: int) -> int:
+        return x + y
+
+    make_value.local = True
+
+    tf = DirectCompiledTransformer("c", local=True)
+    tf.schema = ADD_SCHEMA
+    tf.code = ADD_C
+
+    upstream_a = make_value(2, 3)  # -> 5
+    upstream_b = make_value(4, 6)  # -> 10
+    assert tf(a=upstream_a, b=upstream_b) == 15
+
+
+def test_compiled_delayed_transformation_input():
+    @delayed_py
+    def make_value(x: int) -> int:
+        return x * 2
+
+    make_value.local = True
+
+    upstream = make_value(7)  # -> 14
+
+    tf = CompiledTransformer("c", local=True)
+    tf.schema = ADD_SCHEMA
+    tf.code = ADD_C
+    t = tf(a=upstream, b=3)
+    assert isinstance(t, Transformation)
+    assert t.run() == 17
+
+
+def test_compiled_deferred_input_dtype_mismatch():
+    """Dtype validation must still trigger for deferred inputs — just later."""
+
+    # A checksum carrying a float64 array, where the schema demands int32.
+    bad_arr = _make_checksum(np.arange(3, dtype=np.float64))
+
+    tf = CompiledTransformer("c", local=True)
+    tf.schema = """\
+inputs:
+  - {name: arr, dtype: int32, shape: [N]}
+outputs:
+  - {name: result, dtype: int32}
+"""
+    tf.code = """\
+#include <stdint.h>
+int transform(unsigned int N, const int32_t *arr, int32_t *result) {
+    *result = arr[0];
+    return 0;
+}
+"""
+
+    # Binding does not raise (validation is deferred).
+    t = tf(arr=bad_arr)
+    assert isinstance(t, Transformation)
+
+    # Computing the transformation surfaces the dtype error.
+    t.compute()
+    assert t.exception is not None
+    assert "dtype" in t.exception
+
+
+def test_compiled_concrete_input_dtype_mismatch_immediate():
+    """Concrete (non-deferred) inputs must still fail eagerly."""
+
+    tf = DirectCompiledTransformer("c", local=True)
+    tf.schema = ADD_SCHEMA
+    tf.code = ADD_C
+    with pytest.raises(TypeError):
+        tf(a=np.float64(1.5), b=np.int32(2))

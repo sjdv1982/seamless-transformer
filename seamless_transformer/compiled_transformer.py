@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from seamless import ensure_open
+from seamless import Checksum, ensure_open
 
 from .environment import Environment
 from .pretransformation import compiled_transformer_to_pretransformation
@@ -130,6 +130,84 @@ def _validate_native_numpy_value(name: str, value, dtype_spec, is_array: bool):
             raise TypeError(f"Input {name!r} dtype is {value.dtype}, expected {expected}")
         if not value.dtype.isnative:
             raise TypeError(f"Input {name!r} must have native byte order")
+
+
+def _is_deferred_input(value) -> bool:
+    """Return True if the input must be resolved before dtype validation."""
+    if isinstance(value, (Checksum, Transformation)):
+        return True
+    if isinstance(value, str) and len(value) == 64:
+        try:
+            int(value, 16)
+        except ValueError:
+            return False
+        return True
+    if isinstance(value, (bytes, bytearray)) and len(value) == 32:
+        return True
+    return False
+
+
+def _resolve_deferred_value(prepared_value):
+    """Resolve a prepared pin value (hex string or None) to a Python value."""
+    if prepared_value is None:
+        return None
+    checksum = Checksum(prepared_value)
+    return checksum.fingertip_sync("mixed")
+
+
+async def _resolve_deferred_value_async(prepared_value):
+    if prepared_value is None:
+        return None
+    checksum = Checksum(prepared_value)
+    return await checksum.fingertip("mixed")
+
+
+def _install_deferred_validation(
+    tf: Transformation,
+    pre_transformation,
+    deferred_validations: "list[tuple[str, Any, bool]]",
+) -> None:
+    """Run _validate_native_numpy_value after deferred inputs are materialized.
+
+    The checks run after prepare_transformation has replaced Transformation/
+    Checksum pins with concrete hex checksums, so the resolved buffer carries
+    the value actually supplied to the compiled runner.
+    """
+
+    original_sync = tf._constructor_sync
+    original_async = tf._constructor_async
+    pretransformation_dict = pre_transformation.pretransformation_dict
+
+    def _run_validations_sync():
+        for name, dtype_spec, is_array in deferred_validations:
+            pin = pretransformation_dict.get(name)
+            if pin is None:
+                continue
+            prepared_value = pin[2]
+            value = _resolve_deferred_value(prepared_value)
+            _validate_native_numpy_value(name, value, dtype_spec, is_array)
+
+    async def _run_validations_async():
+        for name, dtype_spec, is_array in deferred_validations:
+            pin = pretransformation_dict.get(name)
+            if pin is None:
+                continue
+            prepared_value = pin[2]
+            value = await _resolve_deferred_value_async(prepared_value)
+            _validate_native_numpy_value(name, value, dtype_spec, is_array)
+
+    def wrapped_sync(transformation_obj):
+        result = original_sync(transformation_obj)
+        _run_validations_sync()
+        return result
+
+    async def wrapped_async(transformation_obj):
+        result = await original_async(transformation_obj)
+        await _run_validations_async()
+        return result
+
+    tf._constructor_sync = wrapped_sync
+    tf._constructor_async = wrapped_async
 
 
 class MetaVars:
@@ -410,14 +488,20 @@ class CompiledMixin:
         all_args = self._args.copy()
         all_args.update(self._call_signature.bind_partial(*args, **kwargs).arguments)
         arguments = self._call_signature.bind(**all_args).arguments
+        deferred_validations: list[tuple[str, Any, bool]] = []
         for parameter in self._schema.inputs:
+            value = arguments[parameter.name]
+            is_array = parameter.shape is not None
+            if _is_deferred_input(value):
+                deferred_validations.append((parameter.name, parameter.dtype, is_array))
+                continue
             _validate_native_numpy_value(
                 parameter.name,
-                arguments[parameter.name],
+                value,
                 parameter.dtype,
-                parameter.shape is not None,
+                is_array,
             )
-        return arguments
+        return arguments, deferred_validations
 
     def _compiled_payloads(self):
         objects = {}
@@ -535,7 +619,7 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
         ensure_open("compiled transformer call")
         if self._modules or self._globals:
             raise NotImplementedError("modules/globals are not supported for compiled transformers")
-        arguments = self._bind_compiled_arguments(*args, **kwargs)
+        arguments, deferred_validations = self._bind_compiled_arguments(*args, **kwargs)
         deps = {
             argname: arg
             for argname, arg in arguments.items()
@@ -556,13 +640,16 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
             env=self._environment._to_lowlevel(),
             language=self.language,
         )
-        return transformation_from_pretransformation(
+        tf = transformation_from_pretransformation(
             pre_transformation,
             upstream_dependencies=deps,
             meta=meta,
             scratch=self.scratch,
             tf_dunder={},
         )
+        if deferred_validations:
+            _install_deferred_validation(tf, pre_transformation, deferred_validations)
+        return tf
 
 
 class DirectCompiledTransformer(CompiledTransformer):
