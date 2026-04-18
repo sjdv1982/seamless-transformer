@@ -37,7 +37,7 @@ def test_func1():
     testdata = np.array([4, 5, 2.8, 1, 16, 66])
     result1 = func1(testdata)
     func1a = direct(func1)
-    func1a.globals.logsum_notypes = logsum_notypes
+    func1a.globals["logsum_notypes"] = logsum_notypes
     result2 = func1a(testdata)
     assert result1 == result2
 
@@ -64,6 +64,6 @@ def test_func4():
     testdata = np.array([4, 5, 2.8, 1, 16, 66])
     result1 = func4(testdata)
     func4a = direct(func4)
-    func4a.modules.testingmodule = testingmodule
+    func4a.modules["testingmodule"] = testingmodule
     result2 = func4a(testdata)
     assert result1 == result2

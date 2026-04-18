@@ -504,12 +504,26 @@ class ModulesWrapper:
     def __getattr__(self, attr):
         return self._modules[attr]
 
+    def __getitem__(self, key):
+        return self._modules[key]
+
     def __setattr__(self, attr, value):
         if attr.startswith("_"):
             return super().__setattr__(attr, value)
+        return self.__setitem__(attr, value)
+
+    def __setitem__(self, key, value):
         if not isinstance(value, (ModuleType, dict)):
             raise TypeError(type(value))
-        self._modules[attr] = value
+        self._modules[key] = value
+
+    def __delattr__(self, attr: str) -> None:
+        if attr.startswith("_"):
+            return super().__delattr__(attr)
+        return self.__delitem__(attr)
+
+    def __delitem__(self, key) -> None:
+        self._modules.pop(key, None)
 
     def __dir__(self):
         return sorted(self._modules.keys())
