@@ -323,6 +323,7 @@ class TransformationCache:
         started_at = _utcnow_iso()
         wall_start = time.perf_counter()
         cpu_start = os.times()
+        probe_context = None
         if execution == "remote" and not force_local:
             # NOTE: this branch is only hit if no seamless Dask client has been defined
             if jobserver_remote is None:
@@ -356,6 +357,9 @@ class TransformationCache:
                 tf_dunder=tf_dunder,
                 scratch=scratch,
             )
+            if isinstance(result_checksum, dict):
+                probe_context = result_checksum.get("probe_context")
+                result_checksum = result_checksum.get("result_checksum")
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
                 if remote_job_dir is not None:
@@ -436,8 +440,9 @@ class TransformationCache:
                 tf_checksum, result_checksum
             )
             if record_mode:
-                probe_context = None
-                if execution != "remote" or remote_target != "jobserver":
+                if probe_context is None and (
+                    execution != "remote" or remote_target != "jobserver"
+                ):
                     probe_context = await ensure_record_bucket_preconditions(
                         transformation_dict,
                         tf_dunder,
