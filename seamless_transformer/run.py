@@ -25,6 +25,7 @@ from .transformation_utils import (
     pack_deep_structure,
     resolve_env_checksum,
 )
+from .probe_index import ensure_record_bucket_preconditions_sync
 from .execute_bash import execute_bash, write_bash_job
 
 PACK_DEEP_RESULTS = True
@@ -130,6 +131,8 @@ def run_transformation_dict(
             env_dict = env_buffer.get_value("plain")
         if not isinstance(env_dict, dict):
             env_dict = {}
+
+    ensure_record_bucket_preconditions_sync(transformation, tf_dunder)
 
     inputs, output_name, output_celltype, output_subcelltype = (
         get_transformation_inputs_output(transformation)
