@@ -3,15 +3,29 @@
 from typing import Any, Dict
 
 import asyncio
-import os
 from copy import deepcopy
+from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
+import itertools
+import os
+import os as _os
+import socket
+import time
 
 from seamless import CacheMissError, Checksum, is_worker
 
 from .remote_job import RemoteJobWritten, parse_remote_job_written
 from .run import run_transformation_dict
 from . import worker
-from seamless_config.select import get_execution
+from seamless_config.select import (
+    check_remote_redundancy,
+    get_execution,
+    get_node,
+    get_queue,
+    get_record,
+    get_remote,
+    get_selected_cluster,
+)
 
 try:
     from seamless.caching import buffer_writer as _buffer_writer
@@ -34,11 +48,141 @@ _DEBUG = os.environ.get("SEAMLESS_DEBUG_TRANSFORMATION", "").lower() in (
     "true",
     "yes",
 )
+try:
+    _SEAMLESS_VERSION = importlib_metadata.version("seamless")
+except Exception:  # pragma: no cover - fallback for editable/source-only installs
+    try:
+        _SEAMLESS_VERSION = importlib_metadata.version("seamless-transformer")
+    except Exception:  # pragma: no cover - last resort
+        _SEAMLESS_VERSION = "unknown"
+_PROCESS_STARTED_AT = datetime.now(timezone.utc)
+_EXECUTION_RECORD_COUNTER = itertools.count(1)
 
 
 def _debug(msg: str) -> None:
     if _DEBUG:
         print(f"[transformation_cache] {msg}", flush=True)
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def _resolve_remote_target(execution: str) -> str | None:
+    if execution != "remote":
+        return None
+    remote_target = get_remote()
+    if remote_target is not None:
+        return remote_target
+    cluster = get_selected_cluster()
+    if cluster is None:
+        return None
+    try:
+        return check_remote_redundancy(cluster)
+    except Exception:
+        return None
+
+
+def build_execution_record(
+    transformation_dict: Dict[str, Any],
+    *,
+    tf_checksum: Checksum,
+    result_checksum: Checksum,
+    tf_dunder: Dict[str, Any] | None,
+    execution: str,
+    started_at: str,
+    finished_at: str,
+    wall_time_seconds: float,
+    cpu_user_seconds: float,
+    cpu_system_seconds: float,
+) -> dict[str, Any]:
+    meta = transformation_dict.get("__meta__", {}) or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    env_checksum = transformation_dict.get("__env__")
+    if env_checksum is None and isinstance(tf_dunder, dict):
+        env_checksum = tf_dunder.get("__env__")
+    if isinstance(env_checksum, Checksum):
+        env_checksum = env_checksum.hex()
+    elif env_checksum is not None:
+        env_checksum = str(env_checksum)
+
+    remote_target = _resolve_remote_target(execution)
+    requested_cluster = get_selected_cluster()
+    requested_queue = get_queue(requested_cluster)
+    requested_node = get_node()
+    language = transformation_dict.get("__language__", "python")
+    if language not in ("python", "bash", "compiled"):
+        if transformation_dict.get("__compiled__"):
+            language = "compiled"
+        else:
+            language = "python"
+
+    execution_envelope = {
+        "requested_cluster": requested_cluster,
+        "requested_queue": requested_queue,
+        "requested_node": requested_node,
+        "actual_remote_target": remote_target,
+        "scratch": bool(meta.get("scratch", False)),
+        "allow_input_fingertip": bool(meta.get("allow_input_fingertip", False)),
+        "language_kind": language,
+        "resolved_env_checksum": env_checksum,
+        "active_tf_dunder_keys": sorted((tf_dunder or {}).keys()),
+    }
+
+    return {
+        "schema_version": 1,
+        "checksum_fields": [
+            "node",
+            "environment",
+            "node_env",
+            "queue",
+            "queue_node",
+            "compilation_context",
+            "validation_snapshot",
+        ],
+        "tf_checksum": tf_checksum.hex(),
+        "result_checksum": result_checksum.hex(),
+        "seamless_version": _SEAMLESS_VERSION,
+        "execution_mode": execution,
+        "remote_target": remote_target,
+        "node": None,
+        "environment": env_checksum,
+        "node_env": None,
+        "queue": None,
+        "queue_node": None,
+        "execution_envelope": execution_envelope,
+        "compilation_context": None,
+        "freshness": {
+            "required_bucket_labels": [],
+            "required_bucket_checksums": {},
+            "live_tokens": {},
+            "bucket_tokens": {},
+        },
+        "bucket_contract_violations": [],
+        "job_contract_violations": [],
+        "contract_violations": [],
+        "validation_snapshot": None,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "wall_time_seconds": wall_time_seconds,
+        "cpu_time_user_seconds": cpu_user_seconds,
+        "cpu_time_system_seconds": cpu_system_seconds,
+        "memory_peak_bytes": None,
+        "gpu_memory_peak_bytes": None,
+        "input_total_bytes": None,
+        "output_total_bytes": None,
+        "compilation_time_seconds": None,
+        "hostname": socket.gethostname(),
+        "pid": _os.getpid(),
+        "process_started_at": _PROCESS_STARTED_AT.replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "worker_execution_index": next(_EXECUTION_RECORD_COUNTER),
+        "retry_count": 0,
+    }
 
 
 async def _await_buffer_writer(checksum: Checksum) -> None:
@@ -107,6 +251,7 @@ class TransformationCache:
         """
         tf_checksum = Checksum(tf_checksum)
         self._remember_transformation_dunder(tf_checksum, tf_dunder)
+        record_mode = bool(get_record())
         cached_result = self._transformation_cache.get(tf_checksum)
         if cached_result is not None:
             if require_value:
@@ -159,9 +304,17 @@ class TransformationCache:
         )
         if isinstance(meta, dict) and meta.get("local") is True:
             execution = "process"
+        if record_mode:
+            if database_remote is None or not database_remote.has_write_server():
+                raise RuntimeError(
+                    "Record mode requires an active database write server"
+                )
         _debug(
             f"execution={execution} has_spawned()={worker.has_spawned()} is_worker={is_worker()}"
         )
+        started_at = _utcnow_iso()
+        wall_start = time.perf_counter()
+        cpu_start = os.times()
         if execution == "remote" and not force_local:
             # NOTE: this branch is only hit if no seamless Dask client has been defined
             if jobserver_remote is None:
@@ -252,6 +405,12 @@ class TransformationCache:
                 raise RemoteJobWritten(remote_job_dir)
             result_checksum = Checksum(result_checksum)
 
+        finished_at = _utcnow_iso()
+        wall_time_seconds = round(time.perf_counter() - wall_start, 6)
+        cpu_end = os.times()
+        cpu_user_seconds = round(cpu_end.user - cpu_start.user, 6)
+        cpu_system_seconds = round(cpu_end.system - cpu_start.system, 6)
+
         if require_value:
             try:
                 _debug("ensuring result is resolvable")
@@ -268,6 +427,23 @@ class TransformationCache:
             await database_remote.set_transformation_result(
                 tf_checksum, result_checksum
             )
+            if record_mode:
+                record = build_execution_record(
+                    transformation_dict,
+                    tf_checksum=tf_checksum,
+                    result_checksum=result_checksum,
+                    tf_dunder=tf_dunder,
+                    execution=execution,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    wall_time_seconds=wall_time_seconds,
+                    cpu_user_seconds=cpu_user_seconds,
+                    cpu_system_seconds=cpu_system_seconds,
+                )
+                record["execution_envelope"]["scratch"] = bool(scratch)
+                await database_remote.set_execution_record(
+                    tf_checksum, result_checksum, record
+                )
             # TODO:
             #     buffer_cache.guarantee_buffer_info(
             #         result_checksum, output_celltype, sync_to_remote=True
@@ -477,6 +653,7 @@ __all__ = [
     "run_sync",
     "recompute_from_transformation_checksum",
     "recompute_from_transformation_checksum_sync",
+    "build_execution_record",
     "get_reverse_transformations",
     "register_transformation_result",
 ]
