@@ -15,6 +15,7 @@ import time
 from seamless import CacheMissError, Checksum, is_worker
 
 from .remote_job import RemoteJobWritten, parse_remote_job_written
+from .probe_index import ensure_record_bucket_preconditions
 from .run import run_transformation_dict
 from . import worker
 from seamless_config.select import (
@@ -97,6 +98,7 @@ def build_execution_record(
     wall_time_seconds: float,
     cpu_user_seconds: float,
     cpu_system_seconds: float,
+    probe_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     meta = transformation_dict.get("__meta__", {}) or {}
     if not isinstance(meta, dict):
@@ -131,6 +133,16 @@ def build_execution_record(
         "resolved_env_checksum": env_checksum,
         "active_tf_dunder_keys": sorted((tf_dunder or {}).keys()),
     }
+    probe_context = probe_context or {}
+    required_bucket_checksums = dict(probe_context.get("required_bucket_checksums", {}))
+    freshness = {
+        "required_bucket_labels": dict(
+            probe_context.get("required_bucket_labels", {})
+        ),
+        "required_bucket_checksums": required_bucket_checksums,
+        "live_tokens": dict(probe_context.get("live_tokens", {})),
+        "bucket_tokens": dict(probe_context.get("bucket_tokens", {})),
+    }
 
     return {
         "schema_version": 1,
@@ -148,19 +160,14 @@ def build_execution_record(
         "seamless_version": _SEAMLESS_VERSION,
         "execution_mode": execution,
         "remote_target": remote_target,
-        "node": None,
-        "environment": env_checksum,
-        "node_env": None,
-        "queue": None,
-        "queue_node": None,
+        "node": required_bucket_checksums.get("node"),
+        "environment": required_bucket_checksums.get("environment"),
+        "node_env": required_bucket_checksums.get("node_env"),
+        "queue": required_bucket_checksums.get("queue"),
+        "queue_node": required_bucket_checksums.get("queue_node"),
         "execution_envelope": execution_envelope,
         "compilation_context": None,
-        "freshness": {
-            "required_bucket_labels": [],
-            "required_bucket_checksums": {},
-            "live_tokens": {},
-            "bucket_tokens": {},
-        },
+        "freshness": freshness,
         "bucket_contract_violations": [],
         "job_contract_violations": [],
         "contract_violations": [],
@@ -304,6 +311,7 @@ class TransformationCache:
         )
         if isinstance(meta, dict) and meta.get("local") is True:
             execution = "process"
+        remote_target = _resolve_remote_target(execution)
         if record_mode:
             if database_remote is None or not database_remote.has_write_server():
                 raise RuntimeError(
@@ -428,6 +436,13 @@ class TransformationCache:
                 tf_checksum, result_checksum
             )
             if record_mode:
+                probe_context = None
+                if execution != "remote" or remote_target != "jobserver":
+                    probe_context = await ensure_record_bucket_preconditions(
+                        transformation_dict,
+                        tf_dunder,
+                        execution=execution,
+                    )
                 record = build_execution_record(
                     transformation_dict,
                     tf_checksum=tf_checksum,
@@ -439,6 +454,7 @@ class TransformationCache:
                     wall_time_seconds=wall_time_seconds,
                     cpu_user_seconds=cpu_user_seconds,
                     cpu_system_seconds=cpu_system_seconds,
+                    probe_context=probe_context,
                 )
                 record["execution_envelope"]["scratch"] = bool(scratch)
                 await database_remote.set_execution_record(

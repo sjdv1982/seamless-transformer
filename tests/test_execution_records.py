@@ -52,6 +52,34 @@ def test_record_mode_writes_execution_record(monkeypatch):
     env_checksum = _make_checksum({"conda_environment": "seamless1"})
     result_checksum = _make_checksum(3, "mixed")
     tf_checksum = _make_checksum({"kind": "execution-record-test"})
+    probe_context = {
+        "required_bucket_labels": {
+            "node": "worker-1",
+            "environment": "conda:/envs/seamless1",
+            "node_env": "a" * 64 + ":" + "b" * 64,
+        },
+        "required_bucket_checksums": {
+            "node": "a" * 64,
+            "environment": "b" * 64,
+            "node_env": "c" * 64,
+        },
+        "live_tokens": {
+            "node": {"hostname": "worker-1", "boot_id": "boot-1"},
+            "environment": {"sys_prefix": "/envs/seamless1"},
+            "node_env": {
+                "node": {"hostname": "worker-1", "boot_id": "boot-1"},
+                "environment": {"sys_prefix": "/envs/seamless1"},
+            },
+        },
+        "bucket_tokens": {
+            "node": {"hostname": "worker-1", "boot_id": "boot-1"},
+            "environment": {"sys_prefix": "/envs/seamless1"},
+            "node_env": {
+                "node": {"hostname": "worker-1", "boot_id": "boot-1"},
+                "environment": {"sys_prefix": "/envs/seamless1"},
+            },
+        },
+    }
 
     def _fake_run_transformation_dict(
         transformation_dict,
@@ -76,6 +104,11 @@ def test_record_mode_writes_execution_record(monkeypatch):
     monkeypatch.setattr(transformation_cache, "get_selected_cluster", lambda: None)
     monkeypatch.setattr(transformation_cache, "get_queue", lambda cluster=None: None)
     monkeypatch.setattr(transformation_cache, "get_node", lambda: None)
+    monkeypatch.setattr(
+        transformation_cache,
+        "ensure_record_bucket_preconditions",
+        lambda *args, **kwargs: asyncio.sleep(0, result=probe_context),
+    )
     monkeypatch.setattr(
         transformation_cache, "run_transformation_dict", _fake_run_transformation_dict
     )
@@ -104,11 +137,16 @@ def test_record_mode_writes_execution_record(monkeypatch):
     assert record["tf_checksum"] == tf_checksum.hex()
     assert record["result_checksum"] == result_checksum.hex()
     assert record["execution_mode"] == "process"
-    assert record["environment"] == env_checksum.hex()
+    assert record["node"] == "a" * 64
+    assert record["environment"] == "b" * 64
+    assert record["node_env"] == "c" * 64
+    assert record["queue"] is None
+    assert record["queue_node"] is None
     assert record["execution_envelope"]["language_kind"] == "python"
     assert record["execution_envelope"]["scratch"] is False
     assert record["execution_envelope"]["resolved_env_checksum"] == env_checksum.hex()
     assert record["execution_envelope"]["active_tf_dunder_keys"] == ["__env__"]
+    assert record["freshness"] == probe_context
     assert record["hostname"]
     assert isinstance(record["worker_execution_index"], int)
 
@@ -126,6 +164,11 @@ def test_record_mode_requires_database_write_server(monkeypatch):
     )
     monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
     monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(
+        transformation_cache,
+        "ensure_record_bucket_preconditions",
+        lambda *args, **kwargs: asyncio.sleep(0, result=None),
+    )
 
     with pytest.raises(
         RuntimeError, match="Record mode requires an active database write server"
