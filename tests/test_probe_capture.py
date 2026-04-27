@@ -192,3 +192,41 @@ def test_python_packages_includes_direct_url(monkeypatch, tmp_path):
             "direct_url": direct_url,
         }
     ]
+
+
+def test_cuda_toolkit_version_prefers_torch(monkeypatch):
+    fake_torch = ModuleType("torch")
+    fake_torch.version = ModuleType("torch.version")
+    fake_torch.version.cuda = "12.4"
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    result = probe_capture._cuda_toolkit_version()
+
+    assert result == "12.4"
+
+
+def test_visible_gpu_mapping_uses_pynvml(monkeypatch):
+    fake_pynvml = ModuleType("pynvml")
+    state = {"init": 0, "shutdown": 0}
+
+    def _init():
+        state["init"] += 1
+
+    def _shutdown():
+        state["shutdown"] += 1
+
+    fake_pynvml.nvmlInit = _init
+    fake_pynvml.nvmlShutdown = _shutdown
+    fake_pynvml.nvmlDeviceGetCount = lambda: 3
+    fake_pynvml.nvmlDeviceGetHandleByIndex = lambda index: index
+    fake_pynvml.nvmlDeviceGetUUID = lambda handle: f"GPU-{handle}"
+    monkeypatch.setitem(sys.modules, "pynvml", fake_pynvml)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,0")
+
+    result = probe_capture._visible_gpu_mapping()
+
+    assert result == [
+        {"visible_token": "2", "device_index": 2, "gpu_uuid": "GPU-2"},
+        {"visible_token": "0", "device_index": 0, "gpu_uuid": "GPU-0"},
+    ]
+    assert state == {"init": 1, "shutdown": 1}
