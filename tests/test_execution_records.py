@@ -37,6 +37,11 @@ class _FakeBufferRemote:
         return True
 
 
+async def _fake_buffer_write(self):
+    del self
+    return True
+
+
 class _ImmediateLoop:
     async def run_in_executor(self, executor, func, *args):
         del executor
@@ -103,6 +108,7 @@ def test_record_mode_writes_execution_record(monkeypatch):
             },
         },
     }
+    validation_snapshot = "9" * 64
 
     def _fake_run_transformation_dict(
         transformation_dict,
@@ -131,6 +137,11 @@ def test_record_mode_writes_execution_record(monkeypatch):
         transformation_cache,
         "ensure_record_bucket_preconditions",
         lambda *args, **kwargs: asyncio.sleep(0, result=probe_context),
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "build_validation_snapshot_checksum",
+        lambda *args, **kwargs: asyncio.sleep(0, result=validation_snapshot),
     )
     monkeypatch.setattr(
         transformation_cache, "run_transformation_dict", _fake_run_transformation_dict
@@ -180,6 +191,7 @@ def test_record_mode_writes_execution_record(monkeypatch):
     assert record["execution_envelope"]["resolved_env_checksum"] == env_checksum.hex()
     assert record["execution_envelope"]["active_tf_dunder_keys"] == ["__env__"]
     assert record["freshness"] == probe_context
+    assert record["validation_snapshot"] == validation_snapshot
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
     assert record["output_total_bytes"] > 0
@@ -289,6 +301,7 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
     result_checksum = _make_checksum(13, "mixed")
     tf_checksum = _make_checksum({"kind": "compiled-record-test"})
     compilation_context = "f" * 64
+    validation_snapshot = "8" * 64
 
     def _fake_run_transformation_dict(
         transformation_dict,
@@ -328,6 +341,11 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
         lambda *args, **kwargs: asyncio.sleep(0, result=compilation_context),
     )
     monkeypatch.setattr(
+        transformation_cache,
+        "build_validation_snapshot_checksum",
+        lambda *args, **kwargs: asyncio.sleep(0, result=validation_snapshot),
+    )
+    monkeypatch.setattr(
         transformation_cache, "run_transformation_dict", _fake_run_transformation_dict
     )
 
@@ -349,6 +367,7 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
     assert result == result_checksum
     record = fake_database_remote.execution_records[0][2]
     assert record["compilation_context"] == compilation_context
+    assert record["validation_snapshot"] == validation_snapshot
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
     assert record["output_total_bytes"] > 0
@@ -419,6 +438,11 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
         "ensure_record_bucket_preconditions",
         _unexpected_probe_context,
     )
+    monkeypatch.setattr(
+        transformation_cache,
+        "build_validation_snapshot_checksum",
+        lambda *args, **kwargs: asyncio.sleep(0, result="7" * 64),
+    )
 
     result = asyncio.run(
         cache.run(
@@ -444,6 +468,52 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     assert record["node_env"] == "c" * 64
     assert record["freshness"] == probe_context
     assert record["compilation_context"] == compilation_context
+    assert record["validation_snapshot"] == "7" * 64
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
     assert record["output_total_bytes"] > 0
+
+
+def test_validation_snapshot_helper_honors_first_n_policy(monkeypatch):
+    monkeypatch.setattr(
+        transformation_cache, "_VALIDATION_SNAPSHOT_COUNTS", {}, raising=False
+    )
+    monkeypatch.setenv("SEAMLESS_RECORD_VALIDATION_SNAPSHOT_LIMIT", "1")
+    monkeypatch.setattr(transformation_cache, "buffer_remote", _FakeBufferRemote())
+    monkeypatch.setattr(transformation_cache.Buffer, "write", _fake_buffer_write)
+    monkeypatch.setattr(transformation_cache, "get_selected_cluster", lambda: None)
+    monkeypatch.setattr(transformation_cache, "get_queue", lambda cluster=None: None)
+    monkeypatch.setattr(transformation_cache, "get_node", lambda: None)
+
+    probe_context = {
+        "required_bucket_checksums": {
+            "node": "a" * 64,
+            "environment": "b" * 64,
+        }
+    }
+
+    first = asyncio.run(
+        transformation_cache.build_validation_snapshot_checksum(
+            {"__language__": "python", "__output__": ("result", "mixed", None)},
+            {},
+            execution="process",
+            probe_context=probe_context,
+            compilation_context=None,
+            bucket_contract_violations=[],
+            job_contract_violations=[],
+        )
+    )
+    second = asyncio.run(
+        transformation_cache.build_validation_snapshot_checksum(
+            {"__language__": "python", "__output__": ("result", "mixed", None)},
+            {},
+            execution="process",
+            probe_context=probe_context,
+            compilation_context=None,
+            bucket_contract_violations=[],
+            job_contract_violations=[],
+        )
+    )
+
+    assert isinstance(first, str) and len(first) == 64
+    assert second is None
