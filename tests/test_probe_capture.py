@@ -230,3 +230,47 @@ def test_visible_gpu_mapping_uses_pynvml(monkeypatch):
         {"visible_token": "0", "device_index": 0, "gpu_uuid": "GPU-0"},
     ]
     assert state == {"init": 1, "shutdown": 1}
+
+
+def test_node_gpu_inventory_uses_pynvml(monkeypatch):
+    fake_pynvml = ModuleType("pynvml")
+    state = {"init": 0, "shutdown": 0}
+
+    def _init():
+        state["init"] += 1
+
+    def _shutdown():
+        state["shutdown"] += 1
+
+    fake_pynvml.nvmlInit = _init
+    fake_pynvml.nvmlShutdown = _shutdown
+    fake_pynvml.nvmlSystemGetDriverVersion = lambda: "550.54"
+    fake_pynvml.nvmlDeviceGetCount = lambda: 1
+    fake_pynvml.nvmlDeviceGetHandleByIndex = lambda index: index
+    fake_pynvml.nvmlDeviceGetName = lambda handle: "NVIDIA A100"
+    fake_pynvml.nvmlDeviceGetUUID = lambda handle: "GPU-ABC"
+    fake_pynvml.nvmlDeviceGetMemoryInfo = lambda handle: type(
+        "MemInfo", (), {"total": 80 * 1024 * 1024 * 1024}
+    )()
+    fake_pynvml.nvmlDeviceGetCudaComputeCapability = lambda handle: (8, 0)
+    fake_pynvml.nvmlDeviceGetEccMode = lambda handle: (1, 1)
+    fake_pynvml.nvmlDeviceGetPersistenceMode = lambda handle: 1
+    monkeypatch.setitem(sys.modules, "pynvml", fake_pynvml)
+
+    result = probe_capture._node_gpu_inventory()
+
+    assert result == {
+        "driver_version": "550.54",
+        "gpus": [
+            {
+                "index": 0,
+                "name": "NVIDIA A100",
+                "uuid": "GPU-ABC",
+                "memory_total_bytes": 80 * 1024 * 1024 * 1024,
+                "compute_capability": "8.0",
+                "ecc_mode": 1,
+                "persistence_mode": 1,
+            }
+        ],
+    }
+    assert state == {"init": 1, "shutdown": 1}

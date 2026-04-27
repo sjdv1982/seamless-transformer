@@ -296,6 +296,86 @@ def _visible_gpu_mapping() -> list[dict[str, Any]] | None:
     return mapping
 
 
+def _node_gpu_inventory() -> dict[str, Any] | None:
+    try:
+        import pynvml
+    except Exception:
+        return None
+    try:
+        pynvml.nvmlInit()
+        driver_version = pynvml.nvmlSystemGetDriverVersion()
+        if isinstance(driver_version, bytes):
+            driver_version = driver_version.decode("utf-8", errors="replace")
+        gpus = []
+        device_count = int(pynvml.nvmlDeviceGetCount())
+        for index in range(device_count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+            name = pynvml.nvmlDeviceGetName(handle)
+            uuid = pynvml.nvmlDeviceGetUUID(handle)
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="replace")
+            if isinstance(uuid, bytes):
+                uuid = uuid.decode("utf-8", errors="replace")
+            memory_info = None
+            try:
+                memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            except Exception:
+                memory_info = None
+            compute_capability = None
+            get_compute_capability = getattr(
+                pynvml, "nvmlDeviceGetCudaComputeCapability", None
+            )
+            if callable(get_compute_capability):
+                try:
+                    major, minor = get_compute_capability(handle)
+                    compute_capability = f"{major}.{minor}"
+                except Exception:
+                    compute_capability = None
+            ecc_mode = None
+            get_ecc_mode = getattr(pynvml, "nvmlDeviceGetEccMode", None)
+            if callable(get_ecc_mode):
+                try:
+                    current, _pending = get_ecc_mode(handle)
+                    ecc_mode = current
+                except Exception:
+                    ecc_mode = None
+            persistence_mode = None
+            get_persistence_mode = getattr(
+                pynvml, "nvmlDeviceGetPersistenceMode", None
+            )
+            if callable(get_persistence_mode):
+                try:
+                    persistence_mode = get_persistence_mode(handle)
+                except Exception:
+                    persistence_mode = None
+            gpus.append(
+                {
+                    "index": index,
+                    "name": str(name),
+                    "uuid": str(uuid),
+                    "memory_total_bytes": (
+                        int(memory_info.total) if memory_info is not None else None
+                    ),
+                    "compute_capability": compute_capability,
+                    "ecc_mode": ecc_mode,
+                    "persistence_mode": persistence_mode,
+                }
+            )
+    except Exception:
+        return None
+    finally:
+        shutdown = getattr(pynvml, "nvmlShutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown()
+            except Exception:
+                pass
+    return {
+        "driver_version": str(driver_version),
+        "gpus": gpus,
+    }
+
+
 def _common_payload(bucket_kind: str) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -333,6 +413,7 @@ def _build_node_payload(request: dict[str, Any]) -> dict[str, Any]:
                 "affinity_cores": _affinity_count(),
             },
             "memory_total_bytes": _memory_total_bytes(),
+            "gpu_inventory": _node_gpu_inventory(),
         }
     )
     return payload
