@@ -180,6 +180,9 @@ def test_record_mode_writes_execution_record(monkeypatch):
     assert record["execution_envelope"]["resolved_env_checksum"] == env_checksum.hex()
     assert record["execution_envelope"]["active_tf_dunder_keys"] == ["__env__"]
     assert record["freshness"] == probe_context
+    assert record["input_total_bytes"] == 0
+    assert isinstance(record["output_total_bytes"], int)
+    assert record["output_total_bytes"] > 0
     assert record["hostname"]
     assert isinstance(record["worker_execution_index"], int)
 
@@ -346,6 +349,9 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
     assert result == result_checksum
     record = fake_database_remote.execution_records[0][2]
     assert record["compilation_context"] == compilation_context
+    assert record["input_total_bytes"] == 0
+    assert isinstance(record["output_total_bytes"], int)
+    assert record["output_total_bytes"] > 0
 
 
 def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
@@ -438,3 +444,6 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     assert record["node_env"] == "c" * 64
     assert record["freshness"] == probe_context
     assert record["compilation_context"] == compilation_context
+    assert record["input_total_bytes"] == 0
+    assert isinstance(record["output_total_bytes"], int)
+    assert record["output_total_bytes"] > 0
