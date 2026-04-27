@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -302,6 +303,8 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
     tf_checksum = _make_checksum({"kind": "compiled-record-test"})
     compilation_context = "f" * 64
     validation_snapshot = "8" * 64
+    job_contract_violations = ["native_link_outside_conda_prefix"]
+    captured_snapshot_kwargs = {}
 
     def _fake_run_transformation_dict(
         transformation_dict,
@@ -340,10 +343,26 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
         "build_compilation_context_checksum",
         lambda *args, **kwargs: asyncio.sleep(0, result=compilation_context),
     )
+    async def _fake_validation_snapshot(*args, **kwargs):
+        del args
+        captured_snapshot_kwargs.update(kwargs)
+        return validation_snapshot
+
     monkeypatch.setattr(
         transformation_cache,
         "build_validation_snapshot_checksum",
-        lambda *args, **kwargs: asyncio.sleep(0, result=validation_snapshot),
+        _fake_validation_snapshot,
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "collect_job_validation",
+        lambda *args, **kwargs: asyncio.sleep(
+            0,
+            result={
+                "job_contract_violations": job_contract_violations,
+                "diagnostics": {"compiled": True},
+            },
+        ),
     )
     monkeypatch.setattr(
         transformation_cache, "run_transformation_dict", _fake_run_transformation_dict
@@ -367,7 +386,13 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
     assert result == result_checksum
     record = fake_database_remote.execution_records[0][2]
     assert record["compilation_context"] == compilation_context
+    assert record["job_contract_violations"] == job_contract_violations
+    assert record["contract_violations"] == job_contract_violations
     assert record["validation_snapshot"] == validation_snapshot
+    assert captured_snapshot_kwargs["job_contract_violations"] == job_contract_violations
+    assert captured_snapshot_kwargs["job_validation_diagnostics"] == {
+        "compiled": True
+    }
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
     assert record["output_total_bytes"] > 0
@@ -407,6 +432,10 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
         },
     }
     compilation_context = "d" * 64
+    job_validation = {
+        "job_contract_violations": ["runpath_outside_conda_prefix"],
+        "diagnostics": {"compiled": True, "origin": "jobserver"},
+    }
 
     class _FakeJobserverRemote:
         async def run_transformation(self, *args, **kwargs):
@@ -415,6 +444,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
                 "result_checksum": result_checksum,
                 "probe_context": probe_context,
                 "compilation_context": compilation_context,
+                "job_validation": job_validation,
             }
 
     async def _unexpected_probe_context(*args, **kwargs):
@@ -468,6 +498,10 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     assert record["node_env"] == "c" * 64
     assert record["freshness"] == probe_context
     assert record["compilation_context"] == compilation_context
+    assert record["job_contract_violations"] == [
+        "runpath_outside_conda_prefix"
+    ]
+    assert record["contract_violations"] == ["runpath_outside_conda_prefix"]
     assert record["validation_snapshot"] == "7" * 64
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
@@ -517,3 +551,93 @@ def test_validation_snapshot_helper_honors_first_n_policy(monkeypatch):
 
     assert isinstance(first, str) and len(first) == 64
     assert second is None
+
+
+def test_collect_job_validation_reports_and_caches_native_linkage(monkeypatch, tmp_path):
+    conda_prefix = tmp_path / "conda"
+    conda_lib = conda_prefix / "lib"
+    outside_dir = tmp_path / "outside"
+    module_dir = tmp_path / "module"
+    conda_lib.mkdir(parents=True)
+    outside_dir.mkdir()
+    module_dir.mkdir()
+    module_path = module_dir / "compiled-demo.so"
+    module_path.write_bytes(b"so")
+    (outside_dir / "libcustom.so").write_bytes(b"custom")
+    (outside_dir / "preload.so").write_bytes(b"preload")
+
+    code_checksum = _make_checksum("int demo(void) { return 1; }", "text")
+    header_checksum = _make_checksum("", "text")
+    compilation_checksum = _make_checksum({}, "plain")
+    monkeypatch.setenv("CONDA_PREFIX", str(conda_prefix))
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(outside_dir))
+    monkeypatch.setenv("LD_PRELOAD", str(outside_dir / "preload.so"))
+    monkeypatch.setattr(
+        transformation_cache, "_COMPILED_VALIDATION_CACHE", {}, raising=False
+    )
+
+    import seamless_transformer.compiler as compiler
+
+    monkeypatch.setattr(
+        compiler,
+        "get_compiled_module_info",
+        lambda *args, **kwargs: {
+            "digest": "compiled-digest",
+            "path": str(module_path),
+        },
+    )
+    calls = []
+
+    def _fake_readelf(cmd, **kwargs):
+        del kwargs
+        calls.append(cmd)
+        return SimpleNamespace(
+            stdout=(
+                " 0x000000000000000f (RPATH)              Library rpath: "
+                f"[{outside_dir}:{conda_lib}]\n"
+                " 0x000000000000001d (RUNPATH)            Library runpath: "
+                f"[{outside_dir}]\n"
+                " 0x0000000000000001 (NEEDED)             Shared library: "
+                "[libcustom.so]\n"
+            )
+        )
+
+    monkeypatch.setattr(transformation_cache.subprocess, "run", _fake_readelf)
+
+    transformation_dict = {
+        "__language__": "c",
+        "__compiled__": True,
+        "__header__": header_checksum.hex(),
+        "__compilation__": compilation_checksum.hex(),
+        "code": ("text", None, code_checksum.hex()),
+        "__output__": ("result", "mixed", None),
+    }
+
+    first = asyncio.run(
+        transformation_cache.collect_job_validation(
+            transformation_dict,
+            {},
+            compilation_context="a" * 64,
+        )
+    )
+    second = asyncio.run(
+        transformation_cache.collect_job_validation(
+            transformation_dict,
+            {},
+            compilation_context="a" * 64,
+        )
+    )
+
+    assert set(first["job_contract_violations"]) == {
+        "ld_library_path_outside_conda_prefix",
+        "ld_preload_outside_conda_prefix",
+        "native_link_outside_conda_prefix",
+        "rpath_outside_conda_prefix",
+        "runpath_outside_conda_prefix",
+    }
+    assert first == second
+    assert len(calls) == 1
+    assert first["diagnostics"]["compiled_module_digest"] == "compiled-digest"
+    assert first["diagnostics"]["readelf"]["resolved_needed"]["libcustom.so"] == str(
+        outside_dir / "libcustom.so"
+    )

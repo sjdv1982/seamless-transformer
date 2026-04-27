@@ -276,6 +276,31 @@ def _path_allowed_for_contract(
     return False
 
 
+def _normalize_job_validation_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "job_contract_violations": [],
+            "diagnostics": {},
+        }
+    job_contract_violations = payload.get("job_contract_violations")
+    if not isinstance(job_contract_violations, list):
+        job_contract_violations = []
+    normalized_violations = sorted(
+        {
+            code
+            for code in job_contract_violations
+            if isinstance(code, str) and code
+        }
+    )
+    diagnostics = payload.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+    return {
+        "job_contract_violations": normalized_violations,
+        "diagnostics": diagnostics,
+    }
+
+
 def _split_path_like(value: str) -> list[str]:
     return [item for item in value.split(":") if item]
 
@@ -433,13 +458,13 @@ async def collect_job_validation(
                 cached_violations: set[str] = set()
                 for entry in dynamic["rpath"]:
                     if not _path_allowed_for_contract(
-                        entry, conda_prefix=conda_prefix, allow_system_roots=True
+                        entry, conda_prefix=conda_prefix, allow_system_roots=False
                     ):
                         cached_violations.add("rpath_outside_conda_prefix")
                         break
                 for entry in dynamic["runpath"]:
                     if not _path_allowed_for_contract(
-                        entry, conda_prefix=conda_prefix, allow_system_roots=True
+                        entry, conda_prefix=conda_prefix, allow_system_roots=False
                     ):
                         cached_violations.add("runpath_outside_conda_prefix")
                         break
@@ -479,7 +504,7 @@ async def collect_job_validation(
         ]
         for entry in diagnostics["ld_library_path_entries"]:
             if not _path_allowed_for_contract(
-                entry, conda_prefix=conda_prefix, allow_system_roots=True
+                entry, conda_prefix=conda_prefix, allow_system_roots=False
             ):
                 job_contract_violations.add("ld_library_path_outside_conda_prefix")
                 break
@@ -530,6 +555,7 @@ async def build_validation_snapshot_checksum(
     compilation_context: str | None,
     bucket_contract_violations: list[str] | None,
     job_contract_violations: list[str] | None,
+    job_validation_diagnostics: dict[str, Any] | None = None,
 ) -> str | None:
     limit = _validation_snapshot_limit()
     if limit <= 0:
@@ -558,6 +584,7 @@ async def build_validation_snapshot_checksum(
         "compilation_context": compilation_context,
         "bucket_contract_violations": sorted(set(bucket_contract_violations or [])),
         "job_contract_violations": sorted(set(job_contract_violations or [])),
+        "job_validation_diagnostics": job_validation_diagnostics or {},
         "hostname": socket.gethostname(),
         "pid": _os.getpid(),
         "cwd": os.getcwd(),
@@ -919,6 +946,7 @@ class TransformationCache:
         cpu_start = os.times()
         probe_context = None
         compilation_context = None
+        job_validation_payload = None
         if execution == "remote" and not force_local:
             # NOTE: this branch is only hit if no seamless Dask client has been defined
             if jobserver_remote is None:
@@ -955,6 +983,7 @@ class TransformationCache:
             if isinstance(result_checksum, dict):
                 probe_context = result_checksum.get("probe_context")
                 compilation_context = result_checksum.get("compilation_context")
+                job_validation_payload = result_checksum.get("job_validation")
                 result_checksum = result_checksum.get("result_checksum")
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
@@ -1047,13 +1076,25 @@ class TransformationCache:
                 bucket_contract_violations = await load_bucket_contract_violations(
                     probe_context
                 )
-                input_total_bytes, output_total_bytes = await compute_record_io_bytes(
-                    transformation_dict, result_checksum
-                )
                 if compilation_context is None:
                     compilation_context = await build_compilation_context_checksum(
                         transformation_dict, tf_dunder
                     )
+                if execution == "remote" and remote_target == "jobserver":
+                    job_validation = _normalize_job_validation_payload(
+                        job_validation_payload
+                    )
+                else:
+                    job_validation = await collect_job_validation(
+                        transformation_dict,
+                        tf_dunder,
+                        compilation_context=compilation_context,
+                    )
+                    job_validation = _normalize_job_validation_payload(job_validation)
+                job_contract_violations = job_validation["job_contract_violations"]
+                input_total_bytes, output_total_bytes = await compute_record_io_bytes(
+                    transformation_dict, result_checksum
+                )
                 validation_snapshot = await build_validation_snapshot_checksum(
                     transformation_dict,
                     tf_dunder,
@@ -1061,7 +1102,8 @@ class TransformationCache:
                     probe_context=probe_context,
                     compilation_context=compilation_context,
                     bucket_contract_violations=bucket_contract_violations,
-                    job_contract_violations=[],
+                    job_contract_violations=job_contract_violations,
+                    job_validation_diagnostics=job_validation["diagnostics"],
                 )
                 record = build_execution_record(
                     transformation_dict,
@@ -1076,6 +1118,7 @@ class TransformationCache:
                     cpu_system_seconds=cpu_system_seconds,
                     probe_context=probe_context,
                     bucket_contract_violations=bucket_contract_violations,
+                    job_contract_violations=job_contract_violations,
                     compilation_context=compilation_context,
                     validation_snapshot=validation_snapshot,
                 )
