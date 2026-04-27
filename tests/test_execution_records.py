@@ -136,6 +136,12 @@ def test_record_mode_writes_execution_record(monkeypatch):
     monkeypatch.setattr(transformation_cache, "get_node", lambda: None)
     monkeypatch.setattr(transformation_cache, "_memory_peak_bytes", lambda: 654321)
     monkeypatch.setattr(
+        transformation_cache, "start_gpu_memory_sampler", lambda pid=None: object()
+    )
+    monkeypatch.setattr(
+        transformation_cache, "stop_gpu_memory_sampler", lambda sampler: 222333444
+    )
+    monkeypatch.setattr(
         transformation_cache,
         "ensure_record_bucket_preconditions",
         lambda *args, **kwargs: asyncio.sleep(0, result=probe_context),
@@ -195,6 +201,7 @@ def test_record_mode_writes_execution_record(monkeypatch):
     assert record["freshness"] == probe_context
     assert record["validation_snapshot"] == validation_snapshot
     assert record["memory_peak_bytes"] == 654321
+    assert record["gpu_memory_peak_bytes"] == 222333444
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
     assert record["output_total_bytes"] > 0
@@ -454,6 +461,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
         "cpu_user_seconds": 1.2,
         "cpu_system_seconds": 0.4,
         "memory_peak_bytes": 123456,
+        "gpu_memory_peak_bytes": 444555666,
         "compilation_time_seconds": 1.75,
         "hostname": "jobserver-worker-1",
         "pid": 4321,
@@ -535,6 +543,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     assert record["cpu_time_user_seconds"] == record_runtime["cpu_user_seconds"]
     assert record["cpu_time_system_seconds"] == record_runtime["cpu_system_seconds"]
     assert record["memory_peak_bytes"] == record_runtime["memory_peak_bytes"]
+    assert record["gpu_memory_peak_bytes"] == record_runtime["gpu_memory_peak_bytes"]
     assert record["compilation_time_seconds"] == record_runtime["compilation_time_seconds"]
     assert record["hostname"] == record_runtime["hostname"]
     assert record["pid"] == record_runtime["pid"]

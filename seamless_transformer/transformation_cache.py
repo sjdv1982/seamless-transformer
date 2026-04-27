@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 from seamless import Buffer, CacheMissError, Checksum, is_worker
@@ -91,6 +92,95 @@ def _memory_peak_bytes() -> int | None:
     if sys.platform.startswith("linux"):
         return peak * 1024
     return peak
+
+
+class _GpuMemorySampler:
+    def __init__(self, *, pid: int, interval_seconds: float = 0.1):
+        self._pid = int(pid)
+        self._interval_seconds = interval_seconds
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._peak_bytes: int | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"seamless-gpu-sampler-{self._pid}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> int | None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=max(self._interval_seconds * 2.0, 0.2))
+        return self._peak_bytes
+
+    def _run(self) -> None:
+        self._sample_once()
+        while not self._stop_event.wait(self._interval_seconds):
+            self._sample_once()
+        self._sample_once()
+
+    def _sample_once(self) -> None:
+        try:
+            completed = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=pid,used_gpu_memory",
+                    "--format=csv,noheader,nounits",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+        except Exception:
+            return
+
+        total_mib = 0
+        matched = False
+        for line in completed.stdout.splitlines():
+            parts = [part.strip() for part in line.split(",", 1)]
+            if len(parts) != 2:
+                continue
+            try:
+                pid = int(parts[0])
+            except Exception:
+                continue
+            if pid != self._pid:
+                continue
+            value = parts[1].split()[0]
+            try:
+                used_mib = int(value)
+            except Exception:
+                continue
+            total_mib += max(used_mib, 0)
+            matched = True
+        if not matched:
+            return
+        total_bytes = total_mib * 1024 * 1024
+        if self._peak_bytes is None or total_bytes > self._peak_bytes:
+            self._peak_bytes = total_bytes
+
+
+def start_gpu_memory_sampler(pid: int | None = None) -> _GpuMemorySampler | None:
+    if shutil.which("nvidia-smi") is None:
+        return None
+    if pid is None:
+        pid = _os.getpid()
+    sampler = _GpuMemorySampler(pid=pid)
+    sampler.start()
+    return sampler
+
+
+def stop_gpu_memory_sampler(sampler: _GpuMemorySampler | None) -> int | None:
+    if sampler is None:
+        return None
+    return sampler.stop()
 
 
 def _utcnow_iso() -> str:
@@ -1008,6 +1098,7 @@ class TransformationCache:
         compilation_context = None
         job_validation_payload = None
         runtime_metadata = None
+        gpu_memory_peak_bytes = None
         if execution == "remote" and not force_local:
             # NOTE: this branch is only hit if no seamless Dask client has been defined
             if jobserver_remote is None:
@@ -1090,15 +1181,19 @@ class TransformationCache:
         else:
             _debug("running transformation in-process")
             loop = asyncio.get_running_loop()
-            result_checksum = await loop.run_in_executor(
-                None,
-                run_transformation_dict,
-                transformation_dict,
-                tf_checksum,
-                tf_dunder,
-                scratch,
-                require_value,
-            )
+            gpu_sampler = start_gpu_memory_sampler()
+            try:
+                result_checksum = await loop.run_in_executor(
+                    None,
+                    run_transformation_dict,
+                    transformation_dict,
+                    tf_checksum,
+                    tf_dunder,
+                    scratch,
+                    require_value,
+                )
+            finally:
+                gpu_memory_peak_bytes = stop_gpu_memory_sampler(gpu_sampler)
             remote_job_dir = parse_remote_job_written(result_checksum)
             if remote_job_dir is not None:
                 raise RemoteJobWritten(remote_job_dir)
@@ -1183,6 +1278,10 @@ class TransformationCache:
                 record_runtime_metadata.setdefault(
                     "memory_peak_bytes", _memory_peak_bytes()
                 )
+                if gpu_memory_peak_bytes is not None:
+                    record_runtime_metadata.setdefault(
+                        "gpu_memory_peak_bytes", gpu_memory_peak_bytes
+                    )
                 if "compilation_time_seconds" not in record_runtime_metadata:
                     record_runtime_metadata.update(
                         await collect_compilation_runtime_metadata(
