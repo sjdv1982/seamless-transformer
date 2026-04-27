@@ -57,17 +57,35 @@ def test_record_mode_writes_execution_record(monkeypatch):
     env_checksum = _make_checksum({"conda_environment": "seamless1"})
     result_checksum = _make_checksum(3, "mixed")
     tf_checksum = _make_checksum({"kind": "execution-record-test"})
+    node_checksum = _make_checksum(
+        {
+            "bucket_kind": "node",
+            "contract_violations": ["node.contract"],
+        }
+    )
+    environment_checksum = _make_checksum(
+        {
+            "bucket_kind": "environment",
+            "contract_violations": ["environment.contract"],
+        }
+    )
+    node_env_checksum = _make_checksum(
+        {
+            "bucket_kind": "node_env",
+            "contract_violations": ["node_env.contract"],
+        }
+    )
     probe_context = {
         "required_bucket_labels": {
             "node": "worker-1",
             "environment": "conda:/envs/seamless1",
-            "node_env": "a" * 64 + ":" + "b" * 64,
-        },
-        "required_bucket_checksums": {
-            "node": "a" * 64,
-            "environment": "b" * 64,
-            "node_env": "c" * 64,
-        },
+                "node_env": node_checksum.hex() + ":" + environment_checksum.hex(),
+            },
+            "required_bucket_checksums": {
+                "node": node_checksum.hex(),
+                "environment": environment_checksum.hex(),
+                "node_env": node_env_checksum.hex(),
+            },
         "live_tokens": {
             "node": {"hostname": "worker-1", "boot_id": "boot-1"},
             "environment": {"sys_prefix": "/envs/seamless1"},
@@ -142,11 +160,21 @@ def test_record_mode_writes_execution_record(monkeypatch):
     assert record["tf_checksum"] == tf_checksum.hex()
     assert record["result_checksum"] == result_checksum.hex()
     assert record["execution_mode"] == "process"
-    assert record["node"] == "a" * 64
-    assert record["environment"] == "b" * 64
-    assert record["node_env"] == "c" * 64
+    assert record["node"] == node_checksum.hex()
+    assert record["environment"] == environment_checksum.hex()
+    assert record["node_env"] == node_env_checksum.hex()
     assert record["queue"] is None
     assert record["queue_node"] is None
+    assert record["bucket_contract_violations"] == [
+        "environment.contract",
+        "node.contract",
+        "node_env.contract",
+    ]
+    assert record["contract_violations"] == [
+        "environment.contract",
+        "node.contract",
+        "node_env.contract",
+    ]
     assert record["execution_envelope"]["language_kind"] == "python"
     assert record["execution_envelope"]["scratch"] is False
     assert record["execution_envelope"]["resolved_env_checksum"] == env_checksum.hex()

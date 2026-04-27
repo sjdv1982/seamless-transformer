@@ -99,6 +99,8 @@ def build_execution_record(
     cpu_user_seconds: float,
     cpu_system_seconds: float,
     probe_context: dict[str, Any] | None = None,
+    bucket_contract_violations: list[str] | None = None,
+    job_contract_violations: list[str] | None = None,
 ) -> dict[str, Any]:
     meta = transformation_dict.get("__meta__", {}) or {}
     if not isinstance(meta, dict):
@@ -134,6 +136,11 @@ def build_execution_record(
         "active_tf_dunder_keys": sorted((tf_dunder or {}).keys()),
     }
     probe_context = probe_context or {}
+    bucket_contract_violations = sorted(set(bucket_contract_violations or []))
+    job_contract_violations = sorted(set(job_contract_violations or []))
+    contract_violations = sorted(
+        set(bucket_contract_violations) | set(job_contract_violations)
+    )
     required_bucket_checksums = dict(probe_context.get("required_bucket_checksums", {}))
     freshness = {
         "required_bucket_labels": dict(
@@ -168,9 +175,9 @@ def build_execution_record(
         "execution_envelope": execution_envelope,
         "compilation_context": None,
         "freshness": freshness,
-        "bucket_contract_violations": [],
-        "job_contract_violations": [],
-        "contract_violations": [],
+        "bucket_contract_violations": bucket_contract_violations,
+        "job_contract_violations": job_contract_violations,
+        "contract_violations": contract_violations,
         "validation_snapshot": None,
         "started_at": started_at,
         "finished_at": finished_at,
@@ -190,6 +197,33 @@ def build_execution_record(
         "worker_execution_index": next(_EXECUTION_RECORD_COUNTER),
         "retry_count": 0,
     }
+
+
+async def load_bucket_contract_violations(
+    probe_context: dict[str, Any] | None,
+) -> list[str]:
+    if not isinstance(probe_context, dict):
+        return []
+    required_bucket_checksums = probe_context.get("required_bucket_checksums", {})
+    if not isinstance(required_bucket_checksums, dict):
+        return []
+    violations: set[str] = set()
+    for checksum_hex in required_bucket_checksums.values():
+        if not checksum_hex:
+            continue
+        try:
+            payload = await Checksum(checksum_hex).resolution("plain")
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        contract_violations = payload.get("contract_violations")
+        if not isinstance(contract_violations, list):
+            continue
+        for code in contract_violations:
+            if isinstance(code, str) and code:
+                violations.add(code)
+    return sorted(violations)
 
 
 async def _await_buffer_writer(checksum: Checksum) -> None:
@@ -449,6 +483,9 @@ class TransformationCache:
                         tf_dunder,
                         execution=execution,
                     )
+                bucket_contract_violations = await load_bucket_contract_violations(
+                    probe_context
+                )
                 record = build_execution_record(
                     transformation_dict,
                     tf_checksum=tf_checksum,
@@ -461,6 +498,7 @@ class TransformationCache:
                     cpu_user_seconds=cpu_user_seconds,
                     cpu_system_seconds=cpu_system_seconds,
                     probe_context=probe_context,
+                    bucket_contract_violations=bucket_contract_violations,
                 )
                 record["execution_envelope"]["scratch"] = bool(scratch)
                 await database_remote.set_execution_record(
