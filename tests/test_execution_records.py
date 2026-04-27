@@ -449,7 +449,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
         "pid": 4321,
         "process_started_at": "2026-04-27T09:00:00Z",
         "worker_execution_index": 17,
-        "retry_count": 0,
+        "retry_count": 1,
     }
 
     class _FakeJobserverRemote:
@@ -529,6 +529,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     assert record["pid"] == record_runtime["pid"]
     assert record["process_started_at"] == record_runtime["process_started_at"]
     assert record["worker_execution_index"] == record_runtime["worker_execution_index"]
+    assert record["retry_count"] == record_runtime["retry_count"]
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
     assert record["output_total_bytes"] > 0
