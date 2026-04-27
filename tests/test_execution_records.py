@@ -193,6 +193,65 @@ def test_record_mode_requires_database_write_server(monkeypatch):
         )
 
 
+def test_record_probe_skips_execution_record_write(monkeypatch):
+    cache = TransformationCache()
+    fake_database_remote = _FakeDatabaseRemote()
+    result_checksum = _make_checksum(9, "mixed")
+    tf_checksum = _make_checksum({"kind": "probe-record-skip"})
+
+    def _fake_run_transformation_dict(
+        transformation_dict,
+        tf_checksum_arg,
+        tf_dunder,
+        scratch,
+        require_value,
+    ):
+        del transformation_dict, tf_checksum_arg, tf_dunder, scratch, require_value
+        return result_checksum
+
+    async def _unexpected_probe_context(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("record probe should skip execution-record preflight")
+
+    monkeypatch.setattr(transformation_cache, "database_remote", fake_database_remote)
+    monkeypatch.setattr(transformation_cache, "buffer_remote", None)
+    monkeypatch.setattr(transformation_cache, "_buffer_writer", None)
+    monkeypatch.setattr(transformation_cache, "jobserver_remote", None)
+    monkeypatch.setattr(
+        transformation_cache.asyncio, "get_running_loop", lambda: _ImmediateLoop()
+    )
+    monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
+    monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(
+        transformation_cache,
+        "ensure_record_bucket_preconditions",
+        _unexpected_probe_context,
+    )
+    monkeypatch.setattr(
+        transformation_cache, "run_transformation_dict", _fake_run_transformation_dict
+    )
+
+    result = asyncio.run(
+        cache.run(
+            {
+                "__language__": "python",
+                "__output__": ("result", "mixed", None),
+            },
+            tf_checksum=tf_checksum,
+            tf_dunder={"__record_probe__": {"mode": "capture"}},
+            scratch=False,
+            require_value=False,
+            force_local=True,
+        )
+    )
+
+    assert result == result_checksum
+    assert fake_database_remote.transformation_results == [
+        (tf_checksum.hex(), result_checksum.hex())
+    ]
+    assert fake_database_remote.execution_records == []
+
+
 def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     cache = TransformationCache()
     fake_database_remote = _FakeDatabaseRemote()

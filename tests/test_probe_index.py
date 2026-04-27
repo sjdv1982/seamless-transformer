@@ -142,3 +142,33 @@ def test_run_transformation_dict_checks_bucket_preconditions(monkeypatch):
             Checksum("1" * 64),
             {},
         )
+
+
+def test_run_transformation_dict_skips_bucket_preconditions_for_record_probe(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        run_module,
+        "ensure_record_bucket_preconditions_sync",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("record probe should bypass bucket preconditions")
+        ),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "build_transformation_namespace_sync",
+        lambda transformation: (
+            "result = 7",
+            {"PINS": {}, "OUTPUTPIN": "mixed", "FILESYSTEM": {}},
+            {},
+            {},
+        ),
+    )
+
+    result = run_module.run_transformation_dict(
+        {"__language__": "python", "__output__": ("result", "mixed", None)},
+        Checksum("2" * 64),
+        {"__record_probe__": {"mode": "capture"}},
+    )
+
+    assert result.hex()

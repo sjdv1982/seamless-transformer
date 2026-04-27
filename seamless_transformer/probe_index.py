@@ -34,6 +34,21 @@ class RecordBucketError(RuntimeError):
     """Raised when record-mode bucket preconditions are not satisfied."""
 
 
+RECORD_PROBE_DUNDER = "__record_probe__"
+
+
+def is_record_probe(
+    transformation_dict: dict[str, Any] | None = None,
+    tf_dunder: dict[str, Any] | None = None,
+) -> bool:
+    for payload in (tf_dunder, transformation_dict):
+        if not isinstance(payload, dict):
+            continue
+        if payload.get(RECORD_PROBE_DUNDER):
+            return True
+    return False
+
+
 def _resolve_remote_target(execution: str) -> str | None:
     if execution != "remote":
         return None
@@ -319,7 +334,9 @@ def ensure_record_bucket_preconditions_sync(
 
 __all__ = [
     "RecordBucketError",
+    "RECORD_PROBE_DUNDER",
     "resolve_probe_plan",
     "ensure_record_bucket_preconditions",
     "ensure_record_bucket_preconditions_sync",
+    "is_record_probe",
 ]

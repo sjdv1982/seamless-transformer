@@ -15,7 +15,7 @@ import time
 from seamless import CacheMissError, Checksum, is_worker
 
 from .remote_job import RemoteJobWritten, parse_remote_job_written
-from .probe_index import ensure_record_bucket_preconditions
+from .probe_index import ensure_record_bucket_preconditions, is_record_probe
 from .run import run_transformation_dict
 from . import worker
 from seamless_config.select import (
@@ -304,6 +304,7 @@ class TransformationCache:
                     return remote_result
 
         execution = "process" if force_local else get_execution()
+        record_probe = is_record_probe(transformation_dict, tf_dunder)
         meta = (
             transformation_dict.get("__meta__")
             if isinstance(transformation_dict, dict)
@@ -439,7 +440,7 @@ class TransformationCache:
             await database_remote.set_transformation_result(
                 tf_checksum, result_checksum
             )
-            if record_mode:
+            if record_mode and not record_probe:
                 if probe_context is None and (
                     execution != "remote" or remote_target != "jobserver"
                 ):

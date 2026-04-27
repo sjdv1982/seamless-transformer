@@ -23,6 +23,7 @@ from seamless import Checksum, Buffer
 from seamless.caching.buffer_cache import get_buffer_cache
 from seamless.util import unchecksum
 from seamless_transformer.cmd.message import (
+    set_header,
     set_verbosity,
     message as msg,
     message_and_exit as err,
@@ -137,7 +138,11 @@ def _require_config_file(workdir: str) -> None:
     )
 
 
-def _main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> int:
+    if probe_mode is None:
+        prog = pathlib.Path(sys.argv[0]).name
+        probe_mode = prog == "seamless-probe"
+    set_header("seamless-probe" if probe_mode else "seamless-run")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "-v",
@@ -360,6 +365,17 @@ def _main(argv: list[str] | None = None) -> int:
             "Supported for remote daskserver backends that can honor scheduler node targeting."
         ),
     )
+    parser.add_argument(
+        "--force",
+        help=(
+            "Reprobe every required execution-record bucket even when the shared "
+            "probe index already has a fresh entry."
+            if probe_mode
+            else argparse.SUPPRESS
+        ),
+        action="store_true",
+        default=False,
+    )
 
     """
     ### TODO
@@ -430,8 +446,28 @@ def _main(argv: list[str] | None = None) -> int:
 
     parser.add_argument("command", nargs=argparse.REMAINDER)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     remote_job_write = bool(args.write_remote_job)
+
+    if probe_mode:
+        unsupported = []
+        if args.dry_run:
+            unsupported.append("--dry")
+        if args.qsubmit:
+            unsupported.append("--qsubmit")
+        if args.write_job:
+            unsupported.append("--write-job")
+        if args.write_remote_job:
+            unsupported.append("--write-remote-job")
+        if args.upload:
+            unsupported.append("--upload")
+        if args.undo:
+            unsupported.append("--undo")
+        if unsupported:
+            err(
+                "seamless-probe does not support "
+                + ", ".join(sorted(unsupported))
+            )
 
     primary_index = args.primary - 1  # convert to 0-indexed
 
@@ -455,7 +491,12 @@ def _main(argv: list[str] | None = None) -> int:
     verbosity = min(args.verbosity, 3)
     set_verbosity(verbosity)
     msg(1, "Verbosity set to {}".format(verbosity))
-    msg(1, "seamless-run {}".format(__version__))
+    msg(
+        1,
+        "{} {}".format(
+            "seamless-probe" if probe_mode else "seamless-run", __version__
+        ),
+    )
     msg(3, "Command:", json.dumps(command, indent=4))
 
     local_mode = args.local
@@ -1083,6 +1124,38 @@ def _main(argv: list[str] | None = None) -> int:
     transformation_checksum = Checksum(transformation_checksum).hex()
     msg(3, f"Transformation checksum: {transformation_checksum}")
 
+    if probe_mode:
+        from seamless_transformer.probe_capture import refresh_required_buckets_sync
+
+        tf_dunder = extract_tf_dunder(transformation_dict)
+        try:
+            summary = refresh_required_buckets_sync(
+                transformation_dict,
+                tf_dunder=tf_dunder,
+                force=bool(args.force),
+                msg_func=msg,
+            )
+        except Exception:
+            traceback.print_exc(limit=0)
+            return 1
+        refreshed = summary.get("refreshed", [])
+        reused = summary.get("reused", [])
+        if refreshed:
+            msg(
+                1,
+                "Refreshed bucket kinds: "
+                + ", ".join(item["bucket_kind"] for item in refreshed),
+            )
+        else:
+            msg(1, "No bucket refresh needed")
+        if reused:
+            msg(
+                2,
+                "Reused bucket kinds: "
+                + ", ".join(item["bucket_kind"] for item in reused),
+            )
+        return 0
+
     def file_write(handle, buf):
         if isinstance(buf, Buffer):
             buf = buf.content
@@ -1300,6 +1373,13 @@ def _main(argv: list[str] | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     try:
         return _main(argv)
+    finally:
+        seamless.close()
+
+
+def probe_main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv, probe_mode=True)
     finally:
         seamless.close()
 

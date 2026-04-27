@@ -20,6 +20,7 @@ NON_CHECKSUM_ITEMS = (
     "__code_checksum__",
     "__compiled__",
     "__compilation__",
+    "__record_probe__",
     "__schema__",
     "__header__",
 )

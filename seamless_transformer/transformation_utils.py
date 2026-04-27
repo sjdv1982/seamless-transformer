@@ -14,6 +14,7 @@ TRANSFORMATION_LOCAL_DUNDER_KEYS = {"__meta__", "__env__"}
 TRANSFORMATION_EXECUTION_DUNDER_KEYS = {
     "__compiled__",
     "__compilation__",
+    "__record_probe__",
     "__schema__",
     "__header__",
 }
