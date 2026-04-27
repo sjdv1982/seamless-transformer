@@ -8,6 +8,7 @@ import hashlib
 import json
 import socket
 import sys
+import sysconfig
 from pathlib import Path
 from typing import Any
 
@@ -69,9 +70,9 @@ def _read_boot_id() -> str | None:
         return None
 
 
-def _conda_meta_mtime_ns(prefix: str) -> int | None:
+def _path_mtime_ns(path: Path) -> int | None:
     try:
-        return int((Path(prefix) / "conda-meta").stat().st_mtime_ns)
+        return int(path.stat().st_mtime_ns)
     except Exception:
         return None
 
@@ -124,16 +125,29 @@ def _environment_label_and_tokens(
     if "conda" in env_dict or "conda_environment" in env_dict:
         prefix = sys.prefix
         tokens: dict[str, Any] = {"sys_prefix": prefix}
-        conda_meta_mtime_ns = _conda_meta_mtime_ns(prefix)
-        if conda_meta_mtime_ns is not None:
-            tokens["conda_meta_mtime_ns"] = conda_meta_mtime_ns
+        conda_history_mtime_ns = _path_mtime_ns(
+            Path(prefix) / "conda-meta" / "history"
+        )
+        if conda_history_mtime_ns is not None:
+            tokens["conda_history_mtime_ns"] = conda_history_mtime_ns
+        purelib = sysconfig.get_path("purelib")
+        if purelib:
+            purelib_mtime_ns = _path_mtime_ns(Path(purelib))
+            if purelib_mtime_ns is not None:
+                tokens["purelib_mtime_ns"] = purelib_mtime_ns
         conda_environment = env_dict.get("conda_environment")
         if isinstance(conda_environment, str) and conda_environment:
             tokens["conda_environment"] = conda_environment
         return f"conda:{prefix}", tokens
 
     prefix = sys.prefix
-    return f"python:{prefix}", {"sys_prefix": prefix}
+    tokens = {"sys_prefix": prefix}
+    purelib = sysconfig.get_path("purelib")
+    if purelib:
+        purelib_mtime_ns = _path_mtime_ns(Path(purelib))
+        if purelib_mtime_ns is not None:
+            tokens["purelib_mtime_ns"] = purelib_mtime_ns
+    return f"python:{prefix}", tokens
 
 
 def _required_bucket_kinds(execution: str, remote_target: str | None) -> list[str]:

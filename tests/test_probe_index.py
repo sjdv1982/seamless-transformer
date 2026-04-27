@@ -1,4 +1,6 @@
 import pytest
+import sysconfig
+from pathlib import Path
 
 from seamless import Buffer, Checksum
 
@@ -85,6 +87,69 @@ def test_ensure_record_bucket_preconditions_process_success(monkeypatch):
     assert result["required_bucket_labels"]["environment"] == plan["labels"][
         "environment"
     ]
+
+
+def test_resolve_probe_plan_conda_environment_tokens_include_freshness_mtims(
+    monkeypatch, tmp_path
+):
+    prefix = tmp_path / "env"
+    conda_meta = prefix / "conda-meta"
+    conda_meta.mkdir(parents=True)
+    history = conda_meta / "history"
+    history.write_text("demo\n", encoding="utf-8")
+    purelib = tmp_path / "purelib"
+    purelib.mkdir()
+
+    monkeypatch.setattr(probe_index.sys, "prefix", str(prefix))
+    monkeypatch.setattr(
+        probe_index.sysconfig,
+        "get_path",
+        lambda name: str(purelib) if name == "purelib" else sysconfig.get_path(name),
+    )
+
+    plan = probe_index.resolve_probe_plan(
+        {
+            "__language__": "python",
+            "__output__": ("result", "mixed", None),
+            "__env__": _env_checksum({"conda_environment": "demo"}),
+        },
+        {},
+    )
+
+    tokens = plan["live_tokens"]["environment"]
+    assert tokens["sys_prefix"] == str(prefix)
+    assert tokens["conda_environment"] == "demo"
+    assert tokens["conda_history_mtime_ns"] == history.stat().st_mtime_ns
+    assert tokens["purelib_mtime_ns"] == purelib.stat().st_mtime_ns
+
+
+def test_resolve_probe_plan_python_environment_tokens_include_purelib_mtime(
+    monkeypatch, tmp_path
+):
+    prefix = tmp_path / "pyenv"
+    purelib = tmp_path / "site-packages"
+    purelib.mkdir(parents=True)
+
+    monkeypatch.setattr(probe_index.sys, "prefix", str(prefix))
+    monkeypatch.setattr(
+        probe_index.sysconfig,
+        "get_path",
+        lambda name: str(purelib) if name == "purelib" else sysconfig.get_path(name),
+    )
+
+    plan = probe_index.resolve_probe_plan(
+        {
+            "__language__": "python",
+            "__output__": ("result", "mixed", None),
+        },
+        {},
+    )
+
+    tokens = plan["live_tokens"]["environment"]
+    assert tokens == {
+        "sys_prefix": str(prefix),
+        "purelib_mtime_ns": purelib.stat().st_mtime_ns,
+    }
 
 
 def test_ensure_record_bucket_preconditions_process_missing_bucket(monkeypatch):
