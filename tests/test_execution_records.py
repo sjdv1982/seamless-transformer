@@ -280,6 +280,74 @@ def test_record_probe_skips_execution_record_write(monkeypatch):
     assert fake_database_remote.execution_records == []
 
 
+def test_compiled_record_writes_compilation_context(monkeypatch):
+    cache = TransformationCache()
+    fake_database_remote = _FakeDatabaseRemote()
+    result_checksum = _make_checksum(13, "mixed")
+    tf_checksum = _make_checksum({"kind": "compiled-record-test"})
+    compilation_context = "f" * 64
+
+    def _fake_run_transformation_dict(
+        transformation_dict,
+        tf_checksum_arg,
+        tf_dunder,
+        scratch,
+        require_value,
+    ):
+        del transformation_dict, tf_checksum_arg, tf_dunder, scratch, require_value
+        return result_checksum
+
+    monkeypatch.setattr(transformation_cache, "database_remote", fake_database_remote)
+    monkeypatch.setattr(transformation_cache, "buffer_remote", None)
+    monkeypatch.setattr(transformation_cache, "_buffer_writer", None)
+    monkeypatch.setattr(transformation_cache, "jobserver_remote", None)
+    monkeypatch.setattr(
+        transformation_cache.asyncio, "get_running_loop", lambda: _ImmediateLoop()
+    )
+    monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
+    monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(
+        transformation_cache,
+        "ensure_record_bucket_preconditions",
+        lambda *args, **kwargs: asyncio.sleep(
+            0,
+            result={
+                "required_bucket_labels": {},
+                "required_bucket_checksums": {},
+                "live_tokens": {},
+                "bucket_tokens": {},
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "build_compilation_context_checksum",
+        lambda *args, **kwargs: asyncio.sleep(0, result=compilation_context),
+    )
+    monkeypatch.setattr(
+        transformation_cache, "run_transformation_dict", _fake_run_transformation_dict
+    )
+
+    result = asyncio.run(
+        cache.run(
+            {
+                "__language__": "c",
+                "__compiled__": True,
+                "__output__": ("result", "mixed", None),
+            },
+            tf_checksum=tf_checksum,
+            tf_dunder={},
+            scratch=False,
+            require_value=False,
+            force_local=True,
+        )
+    )
+
+    assert result == result_checksum
+    record = fake_database_remote.execution_records[0][2]
+    assert record["compilation_context"] == compilation_context
+
+
 def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     cache = TransformationCache()
     fake_database_remote = _FakeDatabaseRemote()
@@ -313,6 +381,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
             },
         },
     }
+    compilation_context = "d" * 64
 
     class _FakeJobserverRemote:
         async def run_transformation(self, *args, **kwargs):
@@ -320,6 +389,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
             return {
                 "result_checksum": result_checksum,
                 "probe_context": probe_context,
+                "compilation_context": compilation_context,
             }
 
     async def _unexpected_probe_context(*args, **kwargs):
@@ -367,3 +437,4 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     assert record["environment"] == "b" * 64
     assert record["node_env"] == "c" * 64
     assert record["freshness"] == probe_context
+    assert record["compilation_context"] == compilation_context
