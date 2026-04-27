@@ -7,6 +7,7 @@ import contextlib
 import dataclasses
 import importlib.metadata
 import io
+import json
 import locale
 import os
 import platform
@@ -130,8 +131,8 @@ def _resource_limits() -> dict[str, list[int | str]]:
     return limits
 
 
-def _python_packages() -> list[dict[str, str]]:
-    packages: list[dict[str, str]] = []
+def _python_packages() -> list[dict[str, Any]]:
+    packages: list[dict[str, Any]] = []
     try:
         distributions = importlib.metadata.distributions()
     except Exception:
@@ -140,16 +141,36 @@ def _python_packages() -> list[dict[str, str]]:
         name = dist.metadata.get("Name") or dist.metadata.get("Summary")
         if not name:
             continue
-        packages.append({"name": str(name), "version": str(dist.version)})
+        payload: dict[str, Any] = {"name": str(name), "version": str(dist.version)}
+        try:
+            direct_url_path = dist.locate_file("direct_url.json")
+        except Exception:
+            direct_url_path = None
+        if direct_url_path is not None:
+            try:
+                if os.path.exists(direct_url_path):
+                    with open(direct_url_path, "r", encoding="utf-8") as f:
+                        payload["direct_url"] = _json_safe(json.load(f))
+            except Exception:
+                pass
+        packages.append(payload)
     packages.sort(key=lambda item: item["name"].lower())
     return packages
 
 
-def _numpy_show_config() -> str | None:
+def _numpy_show_config() -> Any | None:
     try:
         import numpy as np
     except Exception:
         return None
+    try:
+        result = np.show_config(mode="dicts")
+    except TypeError:
+        result = None
+    except Exception:
+        return None
+    if result is not None:
+        return _json_safe(result)
     stream = io.StringIO()
     with contextlib.redirect_stdout(stream):
         try:

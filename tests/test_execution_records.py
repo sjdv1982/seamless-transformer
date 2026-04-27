@@ -1,5 +1,7 @@
 import asyncio
-from types import SimpleNamespace
+import sys
+import time
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -688,3 +690,32 @@ def test_collect_job_validation_reports_and_caches_native_linkage(monkeypatch, t
     assert first["diagnostics"]["readelf"]["resolved_needed"]["libcustom.so"] == str(
         outside_dir / "libcustom.so"
     )
+
+
+def test_gpu_memory_sampler_uses_pynvml(monkeypatch):
+    fake_pynvml = ModuleType("pynvml")
+    state = {"init": 0, "shutdown": 0}
+
+    def _init():
+        state["init"] += 1
+
+    def _shutdown():
+        state["shutdown"] += 1
+
+    fake_pynvml.nvmlInit = _init
+    fake_pynvml.nvmlShutdown = _shutdown
+    fake_pynvml.nvmlDeviceGetCount = lambda: 1
+    fake_pynvml.nvmlDeviceGetHandleByIndex = lambda index: index
+    fake_pynvml.nvmlDeviceGetComputeRunningProcesses = lambda handle: [
+        SimpleNamespace(pid=4321, usedGpuMemory=2048),
+        SimpleNamespace(pid=9999, usedGpuMemory=4096),
+    ]
+    monkeypatch.setitem(sys.modules, "pynvml", fake_pynvml)
+
+    sampler = transformation_cache.start_gpu_memory_sampler(pid=4321)
+    assert sampler is not None
+    time.sleep(0.02)
+    peak = transformation_cache.stop_gpu_memory_sampler(sampler)
+
+    assert peak == 2048
+    assert state == {"init": 1, "shutdown": 1}

@@ -117,6 +117,7 @@ class _GpuMemorySampler:
         thread = self._thread
         if thread is not None:
             thread.join(timeout=max(self._interval_seconds * 2.0, 0.2))
+        self._cleanup()
         return self._peak_bytes
 
     def _run(self) -> None:
@@ -125,54 +126,99 @@ class _GpuMemorySampler:
             self._sample_once()
         self._sample_once()
 
-    def _sample_once(self) -> None:
-        try:
-            completed = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-compute-apps=pid,used_gpu_memory",
-                    "--format=csv,noheader,nounits",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=1,
-            )
-        except Exception:
-            return
+    def _cleanup(self) -> None:
+        return
 
-        total_mib = 0
+    def _sample_once(self) -> None:
+        raise NotImplementedError
+
+
+class _PynvmlGpuMemorySampler(_GpuMemorySampler):
+    def __init__(
+        self,
+        *,
+        pid: int,
+        pynvml: Any,
+        interval_seconds: float = 0.1,
+    ):
+        super().__init__(pid=pid, interval_seconds=interval_seconds)
+        self._pynvml = pynvml
+        self._handles: list[Any] = []
+        self._value_not_available = getattr(pynvml, "NVML_VALUE_NOT_AVAILABLE", None)
+        pynvml.nvmlInit()
+        for index in range(int(pynvml.nvmlDeviceGetCount())):
+            self._handles.append(pynvml.nvmlDeviceGetHandleByIndex(index))
+
+    def _cleanup(self) -> None:
+        shutdown = getattr(self._pynvml, "nvmlShutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown()
+            except Exception:
+                pass
+
+    def _iter_processes(self, handle: Any) -> list[Any]:
+        processes: list[Any] = []
+        for name in (
+            "nvmlDeviceGetComputeRunningProcesses_v3",
+            "nvmlDeviceGetComputeRunningProcesses_v2",
+            "nvmlDeviceGetComputeRunningProcesses",
+            "nvmlDeviceGetGraphicsRunningProcesses_v3",
+            "nvmlDeviceGetGraphicsRunningProcesses_v2",
+            "nvmlDeviceGetGraphicsRunningProcesses",
+        ):
+            getter = getattr(self._pynvml, name, None)
+            if not callable(getter):
+                continue
+            try:
+                items = getter(handle)
+            except Exception:
+                continue
+            if items:
+                processes.extend(items)
+        return processes
+
+    def _sample_once(self) -> None:
+        total_bytes = 0
         matched = False
-        for line in completed.stdout.splitlines():
-            parts = [part.strip() for part in line.split(",", 1)]
-            if len(parts) != 2:
-                continue
-            try:
-                pid = int(parts[0])
-            except Exception:
-                continue
-            if pid != self._pid:
-                continue
-            value = parts[1].split()[0]
-            try:
-                used_mib = int(value)
-            except Exception:
-                continue
-            total_mib += max(used_mib, 0)
-            matched = True
+        for handle in self._handles:
+            for process in self._iter_processes(handle):
+                pid = getattr(process, "pid", None)
+                if pid != self._pid:
+                    continue
+                used = getattr(process, "usedGpuMemory", None)
+                if used is None:
+                    continue
+                if (
+                    self._value_not_available is not None
+                    and used == self._value_not_available
+                ):
+                    continue
+                try:
+                    used_bytes = int(used)
+                except Exception:
+                    continue
+                if used_bytes < 0:
+                    continue
+                total_bytes += used_bytes
+                matched = True
         if not matched:
             return
-        total_bytes = total_mib * 1024 * 1024
         if self._peak_bytes is None or total_bytes > self._peak_bytes:
             self._peak_bytes = total_bytes
 
 
 def start_gpu_memory_sampler(pid: int | None = None) -> _GpuMemorySampler | None:
-    if shutil.which("nvidia-smi") is None:
+    try:
+        import pynvml
+    except Exception:
         return None
     if pid is None:
         pid = _os.getpid()
-    sampler = _GpuMemorySampler(pid=pid)
+    try:
+        sampler = _PynvmlGpuMemorySampler(pid=pid, pynvml=pynvml)
+    except Exception:
+        return None
     sampler.start()
     return sampler
 

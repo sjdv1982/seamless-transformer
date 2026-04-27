@@ -1,4 +1,7 @@
 import asyncio
+import json
+import sys
+from types import ModuleType
 
 from seamless import Buffer
 
@@ -138,3 +141,54 @@ def test_refresh_required_buckets_updates_stale_base_and_composite(monkeypatch):
     ]
     assert [item["bucket_kind"] for item in result["reused"]] == ["node"]
 
+
+def test_numpy_show_config_prefers_structured_mode(monkeypatch):
+    fake_numpy = ModuleType("numpy")
+
+    def _show_config(*, mode=None):
+        assert mode == "dicts"
+        return {"blas": {"name": "openblas"}}
+
+    fake_numpy.show_config = _show_config
+    monkeypatch.setitem(sys.modules, "numpy", fake_numpy)
+
+    result = probe_capture._numpy_show_config()
+
+    assert result == {"blas": {"name": "openblas"}}
+
+
+def test_python_packages_includes_direct_url(monkeypatch, tmp_path):
+    dist_info = tmp_path / "demo.dist-info"
+    dist_info.mkdir()
+    direct_url = {
+        "url": "file:///workspace/demo",
+        "dir_info": {"editable": True},
+    }
+    (dist_info / "direct_url.json").write_text(json.dumps(direct_url), encoding="utf-8")
+
+    class _FakeMetadata(dict):
+        def get(self, key, default=None):
+            return super().get(key, default)
+
+    class _FakeDistribution:
+        metadata = _FakeMetadata({"Name": "demo"})
+        version = "1.2.3"
+
+        def locate_file(self, path):
+            return dist_info / path
+
+    monkeypatch.setattr(
+        probe_capture.importlib.metadata,
+        "distributions",
+        lambda: [_FakeDistribution()],
+    )
+
+    result = probe_capture._python_packages()
+
+    assert result == [
+        {
+            "name": "demo",
+            "version": "1.2.3",
+            "direct_url": direct_url,
+        }
+    ]
