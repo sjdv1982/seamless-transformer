@@ -94,6 +94,17 @@ def _memory_peak_bytes() -> int | None:
     return peak
 
 
+def _process_create_time_epoch() -> float | None:
+    try:
+        import psutil
+    except Exception:
+        return None
+    try:
+        return float(psutil.Process().create_time())
+    except Exception:
+        return None
+
+
 class _GpuMemorySampler:
     def __init__(self, *, pid: int, interval_seconds: float = 0.1):
         self._pid = int(pid)
@@ -744,6 +755,7 @@ async def build_validation_snapshot_checksum(
     bucket_contract_violations: list[str] | None,
     job_contract_violations: list[str] | None,
     job_validation_diagnostics: dict[str, Any] | None = None,
+    runtime_metadata: dict[str, Any] | None = None,
 ) -> str | None:
     limit = _validation_snapshot_limit()
     if limit <= 0:
@@ -755,6 +767,8 @@ async def build_validation_snapshot_checksum(
     count = _VALIDATION_SNAPSHOT_COUNTS.get(key, 0)
     if count >= limit:
         return None
+    runtime_metadata = dict(runtime_metadata or {})
+    worker_execution_index = runtime_metadata.get("worker_execution_index")
 
     payload = {
         "schema_version": 1,
@@ -775,6 +789,19 @@ async def build_validation_snapshot_checksum(
         "job_validation_diagnostics": job_validation_diagnostics or {},
         "hostname": socket.gethostname(),
         "pid": _os.getpid(),
+        "process_started_at": runtime_metadata.get(
+            "process_started_at",
+            _PROCESS_STARTED_AT.replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        ),
+        "process_create_time_epoch": runtime_metadata.get(
+            "process_create_time_epoch", _process_create_time_epoch()
+        ),
+        "worker_execution_index": worker_execution_index,
+        "worker_fresh_process": worker_execution_index == 1
+        if worker_execution_index is not None
+        else None,
         "cwd": os.getcwd(),
         "tempdir": tempfile.gettempdir(),
         "platform": {
@@ -923,6 +950,7 @@ def build_execution_record(
             .isoformat()
             .replace("+00:00", "Z"),
         ),
+        "process_create_time_epoch": runtime_metadata.get("process_create_time_epoch"),
         "worker_execution_index": runtime_metadata.get(
             "worker_execution_index",
             next(_EXECUTION_RECORD_COUNTER),
@@ -1307,6 +1335,23 @@ class TransformationCache:
                     )
                     job_validation = _normalize_job_validation_payload(job_validation)
                 job_contract_violations = job_validation["job_contract_violations"]
+                record_runtime_metadata = dict(runtime_metadata or {})
+                record_runtime_metadata.setdefault(
+                    "memory_peak_bytes", _memory_peak_bytes()
+                )
+                record_runtime_metadata.setdefault(
+                    "process_create_time_epoch", _process_create_time_epoch()
+                )
+                if gpu_memory_peak_bytes is not None:
+                    record_runtime_metadata.setdefault(
+                        "gpu_memory_peak_bytes", gpu_memory_peak_bytes
+                    )
+                if "compilation_time_seconds" not in record_runtime_metadata:
+                    record_runtime_metadata.update(
+                        await collect_compilation_runtime_metadata(
+                            transformation_dict, tf_dunder
+                        )
+                    )
                 input_total_bytes, output_total_bytes = await compute_record_io_bytes(
                     transformation_dict, result_checksum
                 )
@@ -1319,21 +1364,8 @@ class TransformationCache:
                     bucket_contract_violations=bucket_contract_violations,
                     job_contract_violations=job_contract_violations,
                     job_validation_diagnostics=job_validation["diagnostics"],
+                    runtime_metadata=record_runtime_metadata,
                 )
-                record_runtime_metadata = dict(runtime_metadata or {})
-                record_runtime_metadata.setdefault(
-                    "memory_peak_bytes", _memory_peak_bytes()
-                )
-                if gpu_memory_peak_bytes is not None:
-                    record_runtime_metadata.setdefault(
-                        "gpu_memory_peak_bytes", gpu_memory_peak_bytes
-                    )
-                if "compilation_time_seconds" not in record_runtime_metadata:
-                    record_runtime_metadata.update(
-                        await collect_compilation_runtime_metadata(
-                            transformation_dict, tf_dunder
-                        )
-                    )
                 record = build_execution_record(
                     transformation_dict,
                     tf_checksum=tf_checksum,

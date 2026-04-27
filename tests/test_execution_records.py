@@ -138,6 +138,9 @@ def test_record_mode_writes_execution_record(monkeypatch):
     monkeypatch.setattr(transformation_cache, "get_node", lambda: None)
     monkeypatch.setattr(transformation_cache, "_memory_peak_bytes", lambda: 654321)
     monkeypatch.setattr(
+        transformation_cache, "_process_create_time_epoch", lambda: 1234.5
+    )
+    monkeypatch.setattr(
         transformation_cache, "start_gpu_memory_sampler", lambda pid=None: object()
     )
     monkeypatch.setattr(
@@ -204,6 +207,7 @@ def test_record_mode_writes_execution_record(monkeypatch):
     assert record["validation_snapshot"] == validation_snapshot
     assert record["memory_peak_bytes"] == 654321
     assert record["gpu_memory_peak_bytes"] == 222333444
+    assert record["process_create_time_epoch"] == 1234.5
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
     assert record["output_total_bytes"] > 0
@@ -314,6 +318,7 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
     tf_checksum = _make_checksum({"kind": "compiled-record-test"})
     compilation_context = "f" * 64
     compilation_time_seconds = 2.5
+    process_create_time_epoch = 4567.8
     validation_snapshot = "8" * 64
     job_contract_violations = ["native_link_outside_conda_prefix"]
     captured_snapshot_kwargs = {}
@@ -384,6 +389,11 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
         ),
     )
     monkeypatch.setattr(
+        transformation_cache,
+        "_process_create_time_epoch",
+        lambda: process_create_time_epoch,
+    )
+    monkeypatch.setattr(
         transformation_cache, "run_transformation_dict", _fake_run_transformation_dict
     )
 
@@ -409,10 +419,14 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
     assert record["contract_violations"] == job_contract_violations
     assert record["validation_snapshot"] == validation_snapshot
     assert record["compilation_time_seconds"] == compilation_time_seconds
+    assert record["process_create_time_epoch"] == process_create_time_epoch
     assert captured_snapshot_kwargs["job_contract_violations"] == job_contract_violations
     assert captured_snapshot_kwargs["job_validation_diagnostics"] == {
         "compiled": True
     }
+    assert captured_snapshot_kwargs["runtime_metadata"]["process_create_time_epoch"] == (
+        process_create_time_epoch
+    )
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
     assert record["output_total_bytes"] > 0
@@ -468,6 +482,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
         "hostname": "jobserver-worker-1",
         "pid": 4321,
         "process_started_at": "2026-04-27T09:00:00Z",
+        "process_create_time_epoch": 9876.5,
         "worker_execution_index": 17,
         "retry_count": 1,
     }
@@ -550,6 +565,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     assert record["hostname"] == record_runtime["hostname"]
     assert record["pid"] == record_runtime["pid"]
     assert record["process_started_at"] == record_runtime["process_started_at"]
+    assert record["process_create_time_epoch"] == record_runtime["process_create_time_epoch"]
     assert record["worker_execution_index"] == record_runtime["worker_execution_index"]
     assert record["retry_count"] == record_runtime["retry_count"]
     assert record["input_total_bytes"] == 0
