@@ -708,6 +708,131 @@ def test_collect_job_validation_reports_and_caches_native_linkage(monkeypatch, t
     )
 
 
+def test_collect_job_validation_adds_runtime_contract_diagnostics(monkeypatch):
+    node_checksum = _make_checksum(
+        {
+            "filesystems": {
+                "cwd": {
+                    "filesystem_type": "overlay",
+                    "mount_source": "overlay",
+                },
+                "tempdir": {
+                    "filesystem_type": "tmpfs",
+                    "mount_source": "tmpfs",
+                },
+            }
+        }
+    )
+    environment_checksum = _make_checksum(
+        {
+            "validation_views": {
+                "determinant_env": {
+                    "PATH": "/env/bin",
+                    "PYTHONHASHSEED": "0",
+                    "LD_LIBRARY_PATH": "/env/lib",
+                },
+                "path_entries": ["/env/bin"],
+                "sys_path_entries": ["/env/lib/python3.12/site-packages"],
+            },
+            "python": {"prefix": "/env"},
+        }
+    )
+    node_env_checksum = _make_checksum(
+        {
+            "cuda_visible_devices": "0",
+            "visible_gpu_mapping": [{"gpu_uuid": "GPU-1"}],
+        }
+    )
+    queue_node_checksum = _make_checksum(
+        {
+            "environment_variables": {
+                "OMP_NUM_THREADS": "8",
+                "TMPDIR": "/tmp/runtime",
+            }
+        }
+    )
+    probe_context = {
+        "required_bucket_checksums": {
+            "node": node_checksum.hex(),
+            "environment": environment_checksum.hex(),
+            "node_env": node_env_checksum.hex(),
+            "queue_node": queue_node_checksum.hex(),
+        }
+    }
+
+    monkeypatch.setattr(
+        transformation_cache,
+        "_determinant_env_live",
+        lambda: {
+            "PATH": "/env/bin",
+            "PYTHONHASHSEED": "0",
+            "LD_LIBRARY_PATH": "/env/lib",
+            "OMP_NUM_THREADS": "8",
+            "TMPDIR": "/tmp/runtime",
+        },
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "_canonical_path_entries",
+        lambda value: ["/env/bin"] if value is not None else [],
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "_canonical_sys_path",
+        lambda: ["/env/lib/python3.12/site-packages"],
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "_filesystem_facts_live",
+        lambda: {
+            "cwd": {
+                "filesystem_type": "overlay",
+                "mount_source": "overlay",
+            },
+            "tempdir": {
+                "filesystem_type": "tmpfs",
+                "mount_source": "tmpfs",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "_read_proc_self_maps_paths",
+        lambda: ["/env/lib/libpython3.12.so"],
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "_gpu_policy_live",
+        lambda: {
+            "cuda_visible_devices": "0",
+            "visible_gpu_mapping": [{"gpu_uuid": "GPU-1"}],
+        },
+    )
+    monkeypatch.setattr(transformation_cache, "_current_umask", lambda: 0o022)
+    monkeypatch.setattr(transformation_cache, "_system_library_roots", lambda: ("/usr/lib",))
+    monkeypatch.setenv("PATH", "/env/bin")
+    monkeypatch.setenv("TMPDIR", "/tmp/runtime")
+
+    result = asyncio.run(
+        transformation_cache.collect_job_validation(
+            {"__language__": "python", "__output__": ("result", "mixed", None)},
+            {},
+            compilation_context=None,
+            probe_context=probe_context,
+        )
+    )
+
+    assert result["job_contract_violations"] == []
+    checks = result["diagnostics"]["checks"]
+    assert checks["determinant_env_hash"]["ok"] is True
+    assert checks["path_roots"]["ok"] is True
+    assert checks["sys_path_roots"]["ok"] is True
+    assert checks["mount_policy"]["ok"] is True
+    assert checks["cwd_temp_umask"]["ok"] is True
+    assert checks["proc_self_maps"]["ok"] is True
+    assert checks["gpu_visible_device_policy"]["ok"] is True
+
+
 def test_gpu_memory_sampler_uses_pynvml(monkeypatch):
     fake_pynvml = ModuleType("pynvml")
     state = {"init": 0, "shutdown": 0}

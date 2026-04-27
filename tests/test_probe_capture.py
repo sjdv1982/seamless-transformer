@@ -310,6 +310,22 @@ def test_build_node_payload_includes_proc_and_sys_facts(monkeypatch):
             "/proc/sys/vm/overcommit_memory": "0",
         }.get(path),
     )
+    monkeypatch.setattr(probe_capture, "_physical_core_count", lambda: 64)
+    monkeypatch.setattr(
+        probe_capture,
+        "_container_identity",
+        lambda: {"markers": ["/.dockerenv"], "root_mount": {"filesystem_type": "overlay"}},
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_filesystem_facts",
+        lambda: {"cwd": {"filesystem_type": "overlay"}},
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_library_identity",
+        lambda name: {"name": f"lib{name}.so", "path": f"/usr/lib/lib{name}.so"},
+    )
 
     payload = probe_capture._build_node_payload({"label": "worker-1"})
 
@@ -317,9 +333,175 @@ def test_build_node_payload_includes_proc_and_sys_facts(monkeypatch):
     assert payload["cpu"]["model_name"] == "AMD EPYC"
     assert payload["cpu"]["microcode"] == "0x123"
     assert payload["cpu"]["flags"] == ["avx2", "fma"]
+    assert payload["cpu"]["physical_cores"] == 64
     assert payload["numa_topology"] == [{"node": "node0", "cpulist": "0-7"}]
     assert payload["gpu_inventory"] == {"driver_version": "550.54", "gpus": []}
     assert payload["distribution"] == {"ID": "ubuntu", "VERSION_ID": "24.04"}
+    assert payload["container"] == {
+        "markers": ["/.dockerenv"],
+        "root_mount": {"filesystem_type": "overlay"},
+    }
+    assert payload["filesystems"] == {"cwd": {"filesystem_type": "overlay"}}
     assert payload["transparent_hugepages"] == "always [madvise] never"
     assert payload["aslr"] == "2"
     assert payload["overcommit_memory"] == "0"
+    assert payload["libraries"] == {
+        "glibc": {"name": "libc.so", "path": "/usr/lib/libc.so"},
+        "libm": {"name": "libm.so", "path": "/usr/lib/libm.so"},
+    }
+
+
+def test_build_environment_payload_includes_compilers_and_conda(monkeypatch):
+    monkeypatch.setattr(
+        probe_capture,
+        "_resolve_env_spec",
+        lambda env_checksum: {"docker": {"name": "repo/image:latest"}}
+        if env_checksum == "e" * 64
+        else {},
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_compiler_inventory",
+        lambda: {"selected": {"CC": {"path": "/usr/bin/gcc", "version": "gcc 13"}}},
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_conda_env_export",
+        lambda: "name: seamless1\ndependencies:\n  - python=3.12",
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_gpu_determinism_env",
+        lambda: {"CUBLAS_WORKSPACE_CONFIG": ":16:8"},
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_docker_image_digest",
+        lambda env_spec: {"name": env_spec["docker"]["name"], "digest": "sha256:abc"},
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_python_packages",
+        lambda: [{"name": "demo", "version": "1.0"}],
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_environment_validation_views",
+        lambda: {
+            "determinant_env": {"PATH": "/env/bin"},
+            "determinant_env_hash": "h" * 64,
+            "path_entries": ["/env/bin"],
+            "path_hash": "p" * 64,
+            "sys_path_entries": ["/env/lib/python3.12/site-packages"],
+            "sys_path_hash": "s" * 64,
+            "ld_library_path_entries": ["/env/lib"],
+            "ld_preload_entries": [],
+        },
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_environment_contract_summary",
+        lambda validation_views: (
+            ["ld_library_path_outside_conda_prefix"],
+            {"validation_views": validation_views},
+        ),
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_write_snapshot_checksum_sync",
+        lambda value: "v" * 64 if value else None,
+    )
+    monkeypatch.setenv("CC", "gcc")
+
+    payload = probe_capture._build_environment_payload(
+        {"label": "conda:/envs/seamless1", "env_checksum": "e" * 64}
+    )
+
+    assert payload["compiler_environment"] == {"CC": "gcc"}
+    assert payload["compiler_inventory"] == {
+        "selected": {"CC": {"path": "/usr/bin/gcc", "version": "gcc 13"}}
+    }
+    assert payload["conda_env_export"] == "name: seamless1\ndependencies:\n  - python=3.12"
+    assert payload["gpu_determinism_environment_variables"] == {
+        "CUBLAS_WORKSPACE_CONFIG": ":16:8"
+    }
+    assert payload["docker_image"] == {
+        "name": "repo/image:latest",
+        "digest": "sha256:abc",
+    }
+    assert payload["python_packages"] == [{"name": "demo", "version": "1.0"}]
+    assert payload["validation_views"]["determinant_env_hash"] == "h" * 64
+    assert payload["contract_violations"] == ["ld_library_path_outside_conda_prefix"]
+    assert payload["contract_ok"] is False
+    assert payload["validation_snapshot"] == "v" * 64
+
+
+def test_build_node_env_payload_includes_cudnn_and_mxcsr(monkeypatch):
+    monkeypatch.setattr(probe_capture, "_numpy_show_config", lambda: {"blas": {}})
+    monkeypatch.setattr(probe_capture, "_threadpool_info", lambda: [{"internal_api": "openblas"}])
+    monkeypatch.setattr(probe_capture, "_visible_gpu_mapping", lambda: [{"gpu_uuid": "GPU-1"}])
+    monkeypatch.setattr(probe_capture, "_cuda_toolkit_version", lambda: "12.4")
+    monkeypatch.setattr(probe_capture, "_cudnn_version", lambda: 91002)
+    monkeypatch.setattr(
+        probe_capture,
+        "_mxcsr_state",
+        lambda: {"raw": 32832, "ftz": True, "daz": True},
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_write_snapshot_checksum_sync",
+        lambda value: "n" * 64 if value else None,
+    )
+
+    payload = probe_capture._build_node_env_payload({"label": "node:env"})
+
+    assert payload["cudnn_version"] == 91002
+    assert payload["mxcsr_state"] == {"raw": 32832, "ftz": True, "daz": True}
+    assert payload["validation_snapshot"] == "n" * 64
+
+
+def test_build_queue_node_payload_includes_runtime_env_and_allocations(monkeypatch):
+    monkeypatch.setattr(
+        probe_capture,
+        "_queue_runtime_env",
+        lambda: {"OMP_NUM_THREADS": "8", "MKL_NUM_THREADS": "8"},
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_allocation_counts",
+        lambda: {"logical_cores": 16, "slurm_cpus_per_task": 8, "visible_gpu_count": 1},
+    )
+    monkeypatch.setattr(probe_capture, "_resource_limits", lambda: {"RLIMIT_NOFILE": [1024, 4096]})
+    monkeypatch.setattr(probe_capture, "_cgroup_memory_limit_bytes", lambda: 2 * 1024**3)
+    monkeypatch.setattr(probe_capture, "_affinity_count", lambda: 8)
+    monkeypatch.setattr(
+        probe_capture,
+        "_queue_node_contract_summary",
+        lambda: (
+            ["ld_preload_outside_conda_prefix"],
+            {"runtime_environment": {"OMP_NUM_THREADS": "8"}},
+        ),
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_write_snapshot_checksum_sync",
+        lambda value: "q" * 64 if value else None,
+    )
+
+    payload = probe_capture._build_queue_node_payload(
+        {"label": "queue:worker-1", "queue_checksum": "a" * 64, "requested_node": "worker-1"}
+    )
+
+    assert payload["environment_variables"] == {
+        "OMP_NUM_THREADS": "8",
+        "MKL_NUM_THREADS": "8",
+    }
+    assert payload["allocation_counts"] == {
+        "logical_cores": 16,
+        "slurm_cpus_per_task": 8,
+        "visible_gpu_count": 1,
+    }
+    assert payload["resource_limits"] == {"RLIMIT_NOFILE": [1024, 4096]}
+    assert payload["cgroup_memory_limit_bytes"] == 2 * 1024**3
+    assert payload["contract_violations"] == ["ld_preload_outside_conda_prefix"]
+    assert payload["validation_snapshot"] == "q" * 64

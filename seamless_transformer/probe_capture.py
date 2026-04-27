@@ -5,19 +5,28 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import ctypes
+import ctypes.util
 import importlib.metadata
 import io
 import json
 import locale
+import mmap
 import os
 import platform
 import re
 import resource
+import shutil
 import socket
 import subprocess
 import sys
+import sysconfig
+import tempfile
+import threading
 import time
+import hashlib
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from seamless import Buffer, Checksum
@@ -61,12 +70,41 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _stable_digest(value: Any) -> str:
+    try:
+        payload = json.dumps(value, sort_keys=True, default=repr).encode("utf-8")
+    except TypeError:
+        payload = repr(value).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _selected_env_vars(*prefixes: str, names: tuple[str, ...] = ()) -> dict[str, str]:
     result: dict[str, str] = {}
     for key, value in os.environ.items():
         if key in names or any(key.startswith(prefix) for prefix in prefixes):
             result[key] = value
     return dict(sorted(result.items()))
+
+
+def _split_path_like(value: str) -> list[str]:
+    return [item for item in value.split(":") if item]
+
+
+def _split_preload(value: str) -> list[str]:
+    try:
+        import shlex
+
+        tokens = shlex.split(value)
+    except Exception:
+        tokens = value.split()
+    items: list[str] = []
+    for token in tokens:
+        items.extend(part for part in token.split(":") if part)
+    return items
+
+
+def _normalize_path(path: str) -> str:
+    return os.path.realpath(os.path.expanduser(os.path.expandvars(path)))
 
 
 def _memory_total_bytes() -> int | None:
@@ -79,6 +117,20 @@ def _memory_total_bytes() -> int | None:
         return int(page_size) * int(phys_pages)
     except Exception:
         return None
+
+
+def _physical_core_count() -> int | None:
+    try:
+        import psutil
+    except Exception:
+        return None
+    try:
+        count = psutil.cpu_count(logical=False)
+    except Exception:
+        return None
+    if count is None or count <= 0:
+        return None
+    return int(count)
 
 
 def _affinity_count() -> int | None:
@@ -144,6 +196,70 @@ def _os_release() -> dict[str, str] | None:
     return result or None
 
 
+def _system_library_roots() -> tuple[str, ...]:
+    roots = {
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+        "/lib/x86_64-linux-gnu",
+        "/usr/lib/x86_64-linux-gnu",
+    }
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        roots.add(os.path.join(conda_prefix, "lib"))
+    return tuple(sorted(roots))
+
+
+def _path_allowed_for_contract(path: str, *, conda_prefix: str | None) -> bool:
+    if not path:
+        return True
+    if conda_prefix and path.startswith(conda_prefix + os.sep):
+        return True
+    return False
+
+
+def _allowlisted_library_name(name: str) -> bool:
+    return name.startswith(
+        (
+            "ld-linux",
+            "libc.so",
+            "libm.so",
+            "libdl.so",
+            "libpthread.so",
+            "librt.so",
+            "libutil.so",
+            "libcuda.so",
+            "libnvidia-ml.so",
+        )
+    )
+
+
+def _resolve_library_path(name: str) -> str | None:
+    if not name:
+        return None
+    if os.path.isabs(name):
+        path = os.path.realpath(name)
+        return path if os.path.exists(path) else None
+    for root in _system_library_roots():
+        candidate = os.path.realpath(os.path.join(root, name))
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _library_identity(short_name: str) -> dict[str, Any] | None:
+    library_name = ctypes.util.find_library(short_name)
+    if not library_name:
+        return None
+    path = _resolve_library_path(library_name)
+    return {
+        "name": library_name,
+        "path": path,
+        "basename": os.path.basename(path) if path else library_name,
+    }
+
+
 def _kernel_setting(path: str) -> str | None:
     return _read_text_file(path)
 
@@ -191,6 +307,86 @@ def _resource_limits() -> dict[str, list[int | str]]:
             for value in (soft, hard)
         ]
     return limits
+
+
+def _compiler_version(command: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            [command, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    output = (completed.stdout or completed.stderr or "").strip().splitlines()
+    if not output:
+        return None
+    return output[0].strip() or None
+
+
+def _compiler_details(command_text: str | None) -> dict[str, Any] | None:
+    if not isinstance(command_text, str) or not command_text.strip():
+        return None
+    try:
+        import shlex
+
+        argv = shlex.split(command_text)
+    except Exception:
+        argv = command_text.split()
+    if not argv:
+        return None
+    binary = argv[0]
+    path = shutil.which(binary)
+    return {
+        "command": command_text,
+        "binary": binary,
+        "path": path,
+        "version": _compiler_version(path or binary),
+    }
+
+
+def _compiler_inventory() -> dict[str, Any]:
+    selected = {
+        name: _compiler_details(os.environ.get(name))
+        for name in ("CC", "CXX", "FC")
+        if os.environ.get(name)
+    }
+    defaults: dict[str, Any] = {}
+    for name, candidates in (
+        ("c", ("cc", "gcc", "clang")),
+        ("cxx", ("c++", "g++", "clang++")),
+        ("fortran", ("gfortran", "flang", "ifort", "ifx")),
+    ):
+        for candidate in candidates:
+            if shutil.which(candidate):
+                defaults[name] = _compiler_details(candidate)
+                break
+    return {
+        "selected": selected,
+        "defaults": defaults,
+    }
+
+
+def _conda_env_export() -> str | None:
+    conda_exe = os.environ.get("CONDA_EXE") or shutil.which("conda")
+    if not conda_exe or not os.environ.get("CONDA_PREFIX"):
+        return None
+    try:
+        completed = subprocess.run(
+            [conda_exe, "env", "export", "--no-builds"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception:
+        return None
+    if completed.returncode != 0:
+        return None
+    result = completed.stdout.strip()
+    return result or None
 
 
 def _python_packages() -> list[dict[str, Any]]:
@@ -250,6 +446,23 @@ def _threadpool_info() -> list[dict[str, Any]] | None:
         return None
     try:
         return _json_safe(threadpool_info())
+    except Exception:
+        return None
+
+
+def _cudnn_version() -> int | None:
+    try:
+        import torch
+    except Exception:
+        return None
+    try:
+        version = torch.backends.cudnn.version()
+    except Exception:
+        return None
+    if version is None:
+        return None
+    try:
+        return int(version)
     except Exception:
         return None
 
@@ -436,6 +649,417 @@ def _node_gpu_inventory() -> dict[str, Any] | None:
     }
 
 
+def _parse_mountinfo() -> list[dict[str, Any]]:
+    text = _read_text_file("/proc/self/mountinfo")
+    if not text:
+        return []
+    result = []
+    for line in text.splitlines():
+        if " - " not in line:
+            continue
+        left, right = line.split(" - ", 1)
+        left_fields = left.split()
+        right_fields = right.split()
+        if len(left_fields) < 6 or len(right_fields) < 3:
+            continue
+        result.append(
+            {
+                "mount_point": left_fields[4],
+                "root": left_fields[3],
+                "mount_options": left_fields[5],
+                "optional_fields": left_fields[6:],
+                "filesystem_type": right_fields[0],
+                "mount_source": right_fields[1],
+                "super_options": right_fields[2:],
+            }
+        )
+    return result
+
+
+def _mount_for_path(path: str, mountinfo: list[dict[str, Any]]) -> dict[str, Any] | None:
+    best = None
+    best_len = -1
+    for entry in mountinfo:
+        mount_point = entry.get("mount_point")
+        if not isinstance(mount_point, str):
+            continue
+        if path == mount_point or path.startswith(mount_point.rstrip("/") + "/"):
+            if len(mount_point) > best_len:
+                best = entry
+                best_len = len(mount_point)
+    return best
+
+
+def _filesystem_facts() -> dict[str, Any] | None:
+    mountinfo = _parse_mountinfo()
+    if not mountinfo:
+        return None
+    targets = {
+        "cwd": os.getcwd(),
+        "tempdir": tempfile.gettempdir(),
+        "sys_prefix": sys.prefix,
+    }
+    purelib = sysconfig.get_path("purelib")
+    if purelib:
+        targets["purelib"] = purelib
+    result: dict[str, Any] = {}
+    for name, path in targets.items():
+        resolved = os.path.realpath(path)
+        entry = _mount_for_path(resolved, mountinfo)
+        if entry is None:
+            continue
+        result[name] = {
+            "path": resolved,
+            "mount_point": entry["mount_point"],
+            "filesystem_type": entry["filesystem_type"],
+            "mount_source": entry["mount_source"],
+        }
+    return result or None
+
+
+def _container_identity() -> dict[str, Any] | None:
+    markers = []
+    for marker in ("/.dockerenv", "/run/.containerenv"):
+        if os.path.exists(marker):
+            markers.append(marker)
+    container_env = {
+        name: os.environ[name]
+        for name in ("SINGULARITY_CONTAINER", "APPTAINER_CONTAINER")
+        if os.environ.get(name)
+    }
+    mountinfo = _parse_mountinfo()
+    root_mount = _mount_for_path("/", mountinfo)
+    root_fstype = None if root_mount is None else root_mount.get("filesystem_type")
+    root_source = "" if root_mount is None else str(root_mount.get("mount_source") or "")
+    root_looks_containerized = root_fstype in ("overlay", "fuse-overlayfs", "squashfs") or (
+        "containers" in root_source or "overlay" in root_source
+    )
+    if not markers and not container_env and not root_looks_containerized:
+        return None
+    identity: dict[str, Any] = {
+        "markers": markers,
+        "environment": container_env or None,
+    }
+    if root_mount is not None:
+        mount_source = root_mount.get("mount_source")
+        super_options = list(root_mount.get("super_options") or [])
+        root_payload = {
+            "filesystem_type": root_mount.get("filesystem_type"),
+            "mount_source": mount_source,
+            "mount_point": root_mount.get("mount_point"),
+        }
+        layer_ids = sorted(set(re.findall(r"[0-9a-f]{64}", " ".join(super_options))))
+        if layer_ids:
+            root_payload["overlay_layer_ids"] = layer_ids
+        identity["root_mount"] = root_payload
+    return identity
+
+
+def _docker_image_digest(env_spec: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(env_spec, dict):
+        return None
+    docker = env_spec.get("docker")
+    if not isinstance(docker, dict):
+        return None
+    image_name = docker.get("name")
+    if not isinstance(image_name, str) or not image_name:
+        return None
+    payload: dict[str, Any] = {"name": image_name}
+    for client in ("docker", "podman"):
+        binary = shutil.which(client)
+        if not binary:
+            continue
+        try:
+            completed = subprocess.run(
+                [binary, "inspect", "--format={{.Id}}", image_name],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:
+            continue
+        digest = completed.stdout.strip()
+        if completed.returncode == 0 and digest:
+            payload["digest"] = digest
+            payload["client"] = client
+            break
+    return payload
+
+
+def _resolve_env_spec(env_checksum: str | None) -> dict[str, Any]:
+    if not env_checksum:
+        return {}
+    try:
+        env_buffer = Checksum(env_checksum).resolve()
+    except Exception:
+        return {}
+    if env_buffer is None:
+        return {}
+    try:
+        env_spec = env_buffer.get_value("plain")
+    except Exception:
+        return {}
+    if not isinstance(env_spec, dict):
+        return {}
+    return env_spec
+
+
+def _mxcsr_state() -> dict[str, Any] | None:
+    if platform.machine().lower() not in ("x86_64", "amd64"):
+        return None
+    code = b"\x0f\xae\x1f\xc3"  # stmxcsr [rdi]; ret
+    try:
+        buf = mmap.mmap(
+            -1,
+            len(code),
+            prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC,
+        )
+    except Exception:
+        return None
+    try:
+        buf.write(code)
+        storage = ctypes.c_uint32()
+        func_type = ctypes.CFUNCTYPE(None, ctypes.POINTER(ctypes.c_uint32))
+        func = func_type(ctypes.addressof(ctypes.c_char.from_buffer(buf)))
+        func(ctypes.byref(storage))
+        raw = int(storage.value)
+    except Exception:
+        return None
+    finally:
+        buf.close()
+    return {
+        "raw": raw,
+        "ftz": bool(raw & (1 << 15)),
+        "daz": bool(raw & (1 << 6)),
+    }
+
+
+def _gpu_determinism_env() -> dict[str, str]:
+    return _selected_env_vars(
+        names=(
+            "CUBLAS_WORKSPACE_CONFIG",
+            "TF_DETERMINISTIC_OPS",
+            "TF_CUDNN_DETERMINISTIC",
+            "PYTORCH_CUDA_ALLOC_CONF",
+            "CUDA_DEVICE_ORDER",
+            "CUDA_LAUNCH_BLOCKING",
+            "NVIDIA_TF32_OVERRIDE",
+        )
+    )
+
+
+def _determinant_environment() -> dict[str, str]:
+    return _selected_env_vars(
+        "OMP_",
+        "GOMP_",
+        "KMP_",
+        "MKL_",
+        "OPENBLAS_",
+        names=(
+            "PATH",
+            "PYTHONPATH",
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+            "PYTHONHASHSEED",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TZ",
+        ),
+    ) | _gpu_determinism_env()
+
+
+def _environment_validation_views() -> dict[str, Any]:
+    determinant_env = _determinant_environment()
+    path_entries = [_normalize_path(item) for item in _split_path_like(os.environ.get("PATH", ""))]
+    sys_path_entries = [
+        _normalize_path(item) for item in sys.path if isinstance(item, str) and item
+    ]
+    ld_library_path = [
+        _normalize_path(item)
+        for item in _split_path_like(os.environ.get("LD_LIBRARY_PATH", ""))
+    ]
+    ld_preload = [
+        _normalize_path(item)
+        for item in _split_preload(os.environ.get("LD_PRELOAD", ""))
+    ]
+    return {
+        "determinant_env": determinant_env,
+        "determinant_env_hash": _stable_digest(determinant_env),
+        "path_entries": path_entries,
+        "path_hash": _stable_digest(path_entries),
+        "sys_path_entries": sys_path_entries,
+        "sys_path_hash": _stable_digest(sys_path_entries),
+        "ld_library_path_entries": ld_library_path,
+        "ld_preload_entries": ld_preload,
+    }
+
+
+def _queue_runtime_env() -> dict[str, str]:
+    return _selected_env_vars(
+        "GOMP_",
+        "KMP_",
+        names=(
+            "OMP_NUM_THREADS",
+            "OMP_SCHEDULE",
+            "OMP_PROC_BIND",
+            "OMP_PLACES",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "CUBLAS_WORKSPACE_CONFIG",
+            "TF_DETERMINISTIC_OPS",
+            "TF_CUDNN_DETERMINISTIC",
+            "PYTORCH_CUDA_ALLOC_CONF",
+            "CUDA_DEVICE_ORDER",
+            "TMPDIR",
+            "TEMP",
+            "TMP",
+        ),
+    )
+
+
+def _allocation_counts() -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "logical_cores": os.cpu_count(),
+        "affinity_cores": _affinity_count(),
+    }
+    for name in (
+        "SLURM_CPUS_PER_TASK",
+        "SLURM_CPUS_ON_NODE",
+        "SLURM_JOB_NUM_NODES",
+        "SLURM_NTASKS",
+        "PBS_NP",
+        "NCPUS",
+        "NSLOTS",
+    ):
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        try:
+            payload[name.lower()] = int(value)
+        except Exception:
+            payload[name.lower()] = value
+    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_visible_devices:
+        payload["visible_gpu_count"] = len(
+            [item for item in cuda_visible_devices.split(",") if item]
+        )
+    return payload
+
+
+def _write_snapshot_checksum_sync(value: Any) -> str | None:
+    buffer = Buffer(value, "plain")
+
+    async def _write() -> bool:
+        return await buffer.write()
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            written = asyncio.run(_write())
+        except Exception:
+            return None
+    else:
+        result: dict[str, bool] = {}
+        error: dict[str, BaseException] = {}
+
+        def _runner():
+            try:
+                result["written"] = asyncio.run(_write())
+            except BaseException as exc:
+                error["exc"] = exc
+
+        thread = threading.Thread(target=_runner, daemon=True, name="probe-snapshot")
+        thread.start()
+        thread.join()
+        if error:
+            return None
+        written = result.get("written", False)
+    if not written:
+        return None
+    return buffer.get_checksum().hex()
+
+
+def _apply_bucket_contract_summary(
+    payload: dict[str, Any],
+    *,
+    contract_violations: list[str],
+    validation_details: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload["contract_violations"] = sorted(
+        {code for code in contract_violations if isinstance(code, str) and code}
+    )
+    payload["contract_ok"] = not payload["contract_violations"]
+    payload["validation_snapshot"] = None
+    if validation_details:
+        payload["validation_snapshot"] = _write_snapshot_checksum_sync(validation_details)
+    return payload
+
+
+def _environment_contract_summary(
+    validation_views: dict[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        conda_prefix = _normalize_path(conda_prefix)
+    violations: set[str] = set()
+    for entry in validation_views.get("ld_library_path_entries", []):
+        if not _path_allowed_for_contract(entry, conda_prefix=conda_prefix):
+            violations.add("ld_library_path_outside_conda_prefix")
+            break
+    for entry in validation_views.get("ld_preload_entries", []):
+        if _allowlisted_library_name(os.path.basename(entry)):
+            continue
+        if not _path_allowed_for_contract(entry, conda_prefix=conda_prefix):
+            violations.add("ld_preload_outside_conda_prefix")
+            break
+    details = {
+        "schema_version": 1,
+        "bucket_kind": "environment",
+        "conda_prefix": conda_prefix,
+        "validation_views": validation_views,
+        "violations": sorted(violations),
+    }
+    return sorted(violations), details
+
+
+def _queue_node_contract_summary() -> tuple[list[str], dict[str, Any]]:
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        conda_prefix = _normalize_path(conda_prefix)
+    ld_library_path_entries = [
+        _normalize_path(item)
+        for item in _split_path_like(os.environ.get("LD_LIBRARY_PATH", ""))
+    ]
+    ld_preload_entries = [
+        _normalize_path(item)
+        for item in _split_preload(os.environ.get("LD_PRELOAD", ""))
+    ]
+    violations: set[str] = set()
+    for entry in ld_library_path_entries:
+        if not _path_allowed_for_contract(entry, conda_prefix=conda_prefix):
+            violations.add("ld_library_path_outside_conda_prefix")
+            break
+    for entry in ld_preload_entries:
+        if _allowlisted_library_name(os.path.basename(entry)):
+            continue
+        if not _path_allowed_for_contract(entry, conda_prefix=conda_prefix):
+            violations.add("ld_preload_outside_conda_prefix")
+            break
+    details = {
+        "schema_version": 1,
+        "bucket_kind": "queue_node",
+        "conda_prefix": conda_prefix,
+        "runtime_environment": _queue_runtime_env(),
+        "ld_library_path_entries": ld_library_path_entries,
+        "ld_preload_entries": ld_preload_entries,
+        "violations": sorted(violations),
+    }
+    return sorted(violations), details
+
+
 def _common_payload(bucket_kind: str) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -473,6 +1097,7 @@ def _build_node_payload(request: dict[str, Any]) -> dict[str, Any]:
                 "model_name": None if cpuinfo is None else cpuinfo.get("model_name"),
                 "microcode": None if cpuinfo is None else cpuinfo.get("microcode"),
                 "flags": None if cpuinfo is None else cpuinfo.get("flags"),
+                "physical_cores": _physical_core_count(),
                 "logical_cores": os.cpu_count(),
                 "affinity_cores": _affinity_count(),
             },
@@ -480,17 +1105,29 @@ def _build_node_payload(request: dict[str, Any]) -> dict[str, Any]:
             "numa_topology": _numa_topology(),
             "gpu_inventory": _node_gpu_inventory(),
             "distribution": _os_release(),
+            "container": _container_identity(),
+            "filesystems": _filesystem_facts(),
             "transparent_hugepages": _kernel_setting(
                 "/sys/kernel/mm/transparent_hugepage/enabled"
             ),
             "aslr": _kernel_setting("/proc/sys/kernel/randomize_va_space"),
             "overcommit_memory": _kernel_setting("/proc/sys/vm/overcommit_memory"),
+            "libraries": {
+                "glibc": _library_identity("c"),
+                "libm": _library_identity("m"),
+            },
         }
     )
-    return payload
+    return _apply_bucket_contract_summary(
+        payload,
+        contract_violations=[],
+        validation_details=None,
+    )
 
 
 def _build_environment_payload(request: dict[str, Any]) -> dict[str, Any]:
+    env_spec = _resolve_env_spec(request.get("env_checksum"))
+    validation_views = _environment_validation_views()
     payload = _common_payload("environment")
     payload.update(
         {
@@ -502,6 +1139,13 @@ def _build_environment_payload(request: dict[str, Any]) -> dict[str, Any]:
                 "prefix": sys.prefix,
                 "path": list(sys.path),
             },
+            "compiler_environment": {
+                name: os.environ[name]
+                for name in ("CC", "CXX", "FC")
+                if os.environ.get(name) is not None
+            },
+            "compiler_inventory": _compiler_inventory(),
+            "conda_env_export": _conda_env_export(),
             "locale": {
                 "preferred_encoding": locale.getpreferredencoding(False),
                 "default_locale": list(locale.getlocale()),
@@ -519,15 +1163,28 @@ def _build_environment_payload(request: dict[str, Any]) -> dict[str, Any]:
                     "LD_LIBRARY_PATH",
                     "LD_PRELOAD",
                     "PYTHONHASHSEED",
-                    "CUDA_VISIBLE_DEVICES",
                     "CONDA_DEFAULT_ENV",
                     "CONDA_PREFIX",
+                    "LANG",
+                    "LC_ALL",
+                    "LC_CTYPE",
+                    "TZ",
                 ),
             ),
+            "gpu_determinism_environment_variables": _gpu_determinism_env(),
+            "docker_image": _docker_image_digest(env_spec),
             "python_packages": _python_packages(),
+            "validation_views": validation_views,
         }
     )
-    return payload
+    contract_violations, validation_details = _environment_contract_summary(
+        validation_views
+    )
+    return _apply_bucket_contract_summary(
+        payload,
+        contract_violations=contract_violations,
+        validation_details=validation_details,
+    )
 
 
 def _build_node_env_payload(request: dict[str, Any]) -> dict[str, Any]:
@@ -542,9 +1199,22 @@ def _build_node_env_payload(request: dict[str, Any]) -> dict[str, Any]:
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
             "visible_gpu_mapping": _visible_gpu_mapping(),
             "cuda_toolkit_version": _cuda_toolkit_version(),
+            "cudnn_version": _cudnn_version(),
+            "mxcsr_state": _mxcsr_state(),
         }
     )
-    return payload
+    return _apply_bucket_contract_summary(
+        payload,
+        contract_violations=[],
+        validation_details={
+            "schema_version": 1,
+            "bucket_kind": "node_env",
+            "visible_gpu_mapping": payload.get("visible_gpu_mapping"),
+            "cuda_toolkit_version": payload.get("cuda_toolkit_version"),
+            "cudnn_version": payload.get("cudnn_version"),
+            "mxcsr_state": payload.get("mxcsr_state"),
+        },
+    )
 
 
 def _build_queue_payload(request: dict[str, Any]) -> dict[str, Any]:
@@ -573,7 +1243,15 @@ def _build_queue_payload(request: dict[str, Any]) -> dict[str, Any]:
             ),
         }
     )
-    return payload
+    return _apply_bucket_contract_summary(
+        payload,
+        contract_violations=[],
+        validation_details={
+            "schema_version": 1,
+            "bucket_kind": "queue",
+            "queue_parameters": payload.get("queue_parameters"),
+        },
+    )
 
 
 def _build_queue_node_payload(request: dict[str, Any]) -> dict[str, Any]:
@@ -584,20 +1262,19 @@ def _build_queue_node_payload(request: dict[str, Any]) -> dict[str, Any]:
             "hostname": socket.gethostname(),
             "queue_checksum": request.get("queue_checksum"),
             "requested_node": request.get("requested_node"),
-            "environment_variables": _selected_env_vars(
-                "OMP_",
-                "GOMP_",
-                "KMP_",
-                "MKL_",
-                "OPENBLAS_",
-                names=("CUDA_VISIBLE_DEVICES",),
-            ),
+            "environment_variables": _queue_runtime_env(),
+            "allocation_counts": _allocation_counts(),
             "resource_limits": _resource_limits(),
             "cgroup_memory_limit_bytes": _cgroup_memory_limit_bytes(),
             "affinity_cores": _affinity_count(),
         }
     )
-    return payload
+    contract_violations, validation_details = _queue_node_contract_summary()
+    return _apply_bucket_contract_summary(
+        payload,
+        contract_violations=contract_violations,
+        validation_details=validation_details,
+    )
 
 
 def _probe_request_for_bucket(
@@ -615,6 +1292,7 @@ def _probe_request_for_bucket(
         "requested_node": plan["labels"].get("node"),
         "hostname": plan.get("hostname"),
         "live_tokens": plan.get("live_tokens", {}).get(bucket_kind),
+        "env_checksum": plan.get("env_checksum"),
     }
     if bucket_kind == "node_env":
         request["node_checksum"] = current_checksums.get("node")

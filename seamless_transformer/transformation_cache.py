@@ -473,6 +473,256 @@ def _split_preload(value: str) -> list[str]:
     return items
 
 
+def _selected_env_vars(
+    *prefixes: str, names: tuple[str, ...] = ()
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if key in names or any(key.startswith(prefix) for prefix in prefixes):
+            result[key] = value
+    return dict(sorted(result.items()))
+
+
+def _determinant_env_live() -> dict[str, str]:
+    return _selected_env_vars(
+        "OMP_",
+        "GOMP_",
+        "KMP_",
+        "MKL_",
+        "OPENBLAS_",
+        names=(
+            "PATH",
+            "PYTHONPATH",
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+            "PYTHONHASHSEED",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TZ",
+            "CUBLAS_WORKSPACE_CONFIG",
+            "TF_DETERMINISTIC_OPS",
+            "TF_CUDNN_DETERMINISTIC",
+            "PYTORCH_CUDA_ALLOC_CONF",
+            "CUDA_DEVICE_ORDER",
+            "CUDA_LAUNCH_BLOCKING",
+            "NVIDIA_TF32_OVERRIDE",
+        ),
+    )
+
+
+def _canonical_path_entries(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [_normalize_path(item) for item in _split_path_like(value)]
+
+
+def _canonical_sys_path() -> list[str]:
+    return [
+        _normalize_path(item)
+        for item in sys.path
+        if isinstance(item, str) and item
+    ]
+
+
+def _current_umask() -> int | None:
+    try:
+        value = os.umask(0)
+    except Exception:
+        return None
+    os.umask(value)
+    return value
+
+
+def _parse_mountinfo() -> list[dict[str, Any]]:
+    try:
+        with open("/proc/self/mountinfo", "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return []
+    result = []
+    for line in text.splitlines():
+        if " - " not in line:
+            continue
+        left, right = line.split(" - ", 1)
+        left_fields = left.split()
+        right_fields = right.split()
+        if len(left_fields) < 6 or len(right_fields) < 3:
+            continue
+        result.append(
+            {
+                "mount_point": left_fields[4],
+                "filesystem_type": right_fields[0],
+                "mount_source": right_fields[1],
+            }
+        )
+    return result
+
+
+def _mount_for_path(path: str, mountinfo: list[dict[str, Any]]) -> dict[str, Any] | None:
+    best = None
+    best_len = -1
+    for entry in mountinfo:
+        mount_point = entry.get("mount_point")
+        if not isinstance(mount_point, str):
+            continue
+        if path == mount_point or path.startswith(mount_point.rstrip("/") + "/"):
+            if len(mount_point) > best_len:
+                best = entry
+                best_len = len(mount_point)
+    return best
+
+
+def _filesystem_facts_live() -> dict[str, Any]:
+    import sysconfig
+
+    mountinfo = _parse_mountinfo()
+    targets = {
+        "cwd": os.getcwd(),
+        "tempdir": tempfile.gettempdir(),
+        "sys_prefix": sys.prefix,
+    }
+    purelib = sysconfig.get_path("purelib")
+    if purelib:
+        targets["purelib"] = purelib
+    result: dict[str, Any] = {}
+    for name, path in targets.items():
+        resolved = _normalize_path(path)
+        entry = _mount_for_path(resolved, mountinfo)
+        if entry is None:
+            continue
+        result[name] = {
+            "path": resolved,
+            "mount_point": entry["mount_point"],
+            "filesystem_type": entry["filesystem_type"],
+            "mount_source": entry["mount_source"],
+        }
+    return result
+
+
+def _read_proc_self_maps_paths() -> list[str]:
+    try:
+        with open("/proc/self/maps", "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return []
+    result: list[str] = []
+    for line in lines:
+        fields = line.strip().split()
+        if len(fields) < 6:
+            continue
+        path = fields[-1]
+        if not path.startswith("/"):
+            continue
+        result.append(_normalize_path(path))
+    return sorted(set(result))
+
+
+def _path_under_any_root(path: str, roots: list[str]) -> bool:
+    for root in roots:
+        if path == root or path.startswith(root.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
+def _allowed_map_roots(
+    *,
+    environment_payload: dict[str, Any] | None,
+    node_payload: dict[str, Any] | None,
+) -> list[str]:
+    roots: list[str] = list(_system_library_roots())
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        roots.append(_normalize_path(conda_prefix))
+    if environment_payload:
+        validation_views = environment_payload.get("validation_views", {}) or {}
+        for path in validation_views.get("sys_path_entries", []) or []:
+            if isinstance(path, str) and path:
+                roots.append(_normalize_path(path))
+        python_payload = environment_payload.get("python", {}) or {}
+        prefix = python_payload.get("prefix")
+        if isinstance(prefix, str) and prefix:
+            roots.append(_normalize_path(prefix))
+    if node_payload:
+        libraries = node_payload.get("libraries", {}) or {}
+        for name in ("glibc", "libm"):
+            lib = libraries.get(name)
+            if isinstance(lib, dict):
+                lib_path = lib.get("path")
+                if isinstance(lib_path, str) and lib_path:
+                    roots.append(os.path.dirname(_normalize_path(lib_path)))
+    return sorted({root for root in roots if isinstance(root, str) and root})
+
+
+async def _load_bucket_payloads(
+    probe_context: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    if not isinstance(probe_context, dict):
+        return result
+    required_bucket_checksums = probe_context.get("required_bucket_checksums", {})
+    if not isinstance(required_bucket_checksums, dict):
+        return result
+    for kind, checksum_hex in required_bucket_checksums.items():
+        if not checksum_hex:
+            continue
+        try:
+            payload = await Checksum(checksum_hex).resolution("plain")
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            result[kind] = payload
+    return result
+
+
+def _expected_determinant_env(
+    environment_payload: dict[str, Any] | None,
+    queue_node_payload: dict[str, Any] | None,
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    if environment_payload:
+        validation_views = environment_payload.get("validation_views", {}) or {}
+        env_dict = validation_views.get("determinant_env", {}) or {}
+        if isinstance(env_dict, dict):
+            for key, value in env_dict.items():
+                if isinstance(key, str) and isinstance(value, str):
+                    result[key] = value
+    if queue_node_payload:
+        runtime_env = queue_node_payload.get("environment_variables", {}) or {}
+        if isinstance(runtime_env, dict):
+            for key, value in runtime_env.items():
+                if isinstance(key, str) and isinstance(value, str):
+                    result[key] = value
+    return dict(sorted(result.items()))
+
+
+def _gpu_policy_live() -> dict[str, Any]:
+    try:
+        from seamless_transformer.probe_capture import _visible_gpu_mapping
+    except Exception:
+        _visible_gpu_mapping = None
+    mapping = None
+    if callable(_visible_gpu_mapping):
+        try:
+            mapping = _visible_gpu_mapping()
+        except Exception:
+            mapping = None
+    return {
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "visible_gpu_mapping": mapping,
+    }
+
+
+def _job_check_payload(expected: Any, actual: Any) -> dict[str, Any]:
+    return {
+        "expected": expected,
+        "actual": actual,
+        "expected_hash": _stable_digest(expected),
+        "actual_hash": _stable_digest(actual),
+        "ok": expected == actual,
+    }
+
+
 def _parse_readelf_dynamic(text: str, *, module_dir: str) -> dict[str, Any]:
     rpath_entries: list[str] = []
     runpath_entries: list[str] = []
@@ -540,12 +790,133 @@ async def collect_job_validation(
     tf_dunder: Dict[str, Any] | None,
     *,
     compilation_context: str | None,
+    probe_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     compiled = bool(
         transformation_dict.get("__compiled__")
         or (isinstance(tf_dunder, dict) and tf_dunder.get("__compiled__"))
     )
-    diagnostics: dict[str, Any] = {"compiled": compiled}
+    bucket_payloads = await _load_bucket_payloads(probe_context)
+    environment_payload = bucket_payloads.get("environment")
+    node_payload = bucket_payloads.get("node")
+    node_env_payload = bucket_payloads.get("node_env")
+    queue_node_payload = bucket_payloads.get("queue_node")
+    checks: dict[str, Any] = {}
+
+    expected_env = _expected_determinant_env(environment_payload, queue_node_payload)
+    live_env = {
+        key: value
+        for key, value in _determinant_env_live().items()
+        if key in expected_env
+    }
+    if expected_env:
+        checks["determinant_env_hash"] = _job_check_payload(expected_env, live_env)
+
+    if environment_payload:
+        validation_views = environment_payload.get("validation_views", {}) or {}
+        expected_path_entries = validation_views.get("path_entries")
+        if isinstance(expected_path_entries, list):
+            checks["path_roots"] = _job_check_payload(
+                expected_path_entries,
+                _canonical_path_entries(os.environ.get("PATH")),
+            )
+        expected_sys_path_entries = validation_views.get("sys_path_entries")
+        if isinstance(expected_sys_path_entries, list):
+            checks["sys_path_roots"] = _job_check_payload(
+                expected_sys_path_entries,
+                _canonical_sys_path(),
+            )
+
+    live_filesystems = _filesystem_facts_live()
+    if node_payload:
+        expected_filesystems = node_payload.get("filesystems")
+        if isinstance(expected_filesystems, dict) and expected_filesystems:
+            expected_mount_view = {
+                key: {
+                    "filesystem_type": value.get("filesystem_type"),
+                    "mount_source": value.get("mount_source"),
+                }
+                for key, value in expected_filesystems.items()
+                if isinstance(value, dict)
+            }
+            actual_mount_view = {
+                key: {
+                    "filesystem_type": value.get("filesystem_type"),
+                    "mount_source": value.get("mount_source"),
+                }
+                for key, value in live_filesystems.items()
+            }
+            checks["mount_policy"] = _job_check_payload(
+                expected_mount_view,
+                actual_mount_view,
+            )
+
+    temp_env = {
+        name: os.environ.get(name)
+        for name in ("TMPDIR", "TEMP", "TMP")
+        if os.environ.get(name) is not None
+    }
+    expected_temp_env = {}
+    if queue_node_payload:
+        runtime_env = queue_node_payload.get("environment_variables", {}) or {}
+        if isinstance(runtime_env, dict):
+            expected_temp_env = {
+                key: value
+                for key, value in runtime_env.items()
+                if key in ("TMPDIR", "TEMP", "TMP")
+            }
+    checks["cwd_temp_umask"] = {
+        "cwd": os.getcwd(),
+        "cwd_exists": os.path.isdir(os.getcwd()),
+        "tempdir": tempfile.gettempdir(),
+        "temp_environment": _job_check_payload(expected_temp_env, temp_env)
+        if expected_temp_env
+        else {
+            "expected": {},
+            "actual": temp_env,
+            "expected_hash": _stable_digest({}),
+            "actual_hash": _stable_digest(temp_env),
+            "ok": True,
+        },
+        "umask": _current_umask(),
+    }
+    checks["cwd_temp_umask"]["ok"] = bool(
+        checks["cwd_temp_umask"]["cwd_exists"]
+        and checks["cwd_temp_umask"]["temp_environment"]["ok"]
+        and checks["cwd_temp_umask"]["umask"] is not None
+    )
+
+    allowed_roots = _allowed_map_roots(
+        environment_payload=environment_payload,
+        node_payload=node_payload,
+    )
+    mapped_paths = _read_proc_self_maps_paths()
+    outside_mapped_paths = [
+        path for path in mapped_paths if not _path_under_any_root(path, allowed_roots)
+    ]
+    checks["proc_self_maps"] = {
+        "allowed_roots": allowed_roots,
+        "outside_paths": outside_mapped_paths[:20],
+        "outside_count": len(outside_mapped_paths),
+        "ok": len(outside_mapped_paths) == 0,
+    }
+
+    expected_gpu_policy = {}
+    if node_env_payload:
+        expected_gpu_policy = {
+            "cuda_visible_devices": node_env_payload.get("cuda_visible_devices"),
+            "visible_gpu_mapping": node_env_payload.get("visible_gpu_mapping"),
+        }
+    if expected_gpu_policy:
+        checks["gpu_visible_device_policy"] = _job_check_payload(
+            expected_gpu_policy,
+            _gpu_policy_live(),
+        )
+
+    diagnostics: dict[str, Any] = {
+        "compiled": compiled,
+        "checks": checks,
+    }
     job_contract_violations: set[str] = set()
     if not compiled:
         return {
@@ -1332,6 +1703,7 @@ class TransformationCache:
                         transformation_dict,
                         tf_dunder,
                         compilation_context=compilation_context,
+                        probe_context=probe_context,
                     )
                     job_validation = _normalize_job_validation_payload(job_validation)
                 job_contract_violations = job_validation["job_contract_violations"]
