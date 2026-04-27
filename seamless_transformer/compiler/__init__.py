@@ -17,6 +17,7 @@ from .cffi_wrapper import build_extension_cffi
 
 _BINARY_CACHE: dict[str, dict[str, bytes]] = {}
 _MODULE_CACHE: dict[str, ModuleType] = {}
+_MODULE_INFO_CACHE: dict[str, dict[str, Any]] = {}
 _SO_CACHE_DIR = tempfile.mkdtemp(prefix="seamless-compiled-modules-")
 
 
@@ -47,10 +48,21 @@ def build_compiled_module(
 ) -> ModuleType:
     """Build and import a compiled Python extension module."""
 
+    return get_compiled_module_info(module_definition, module_name=module_name)["module"]
+
+
+def get_compiled_module_info(
+    module_definition: dict,
+    *,
+    module_name: str | None = None,
+) -> dict[str, Any]:
+    """Build or retrieve a compiled module together with stable metadata."""
+
     completed = complete(module_definition)
     digest = _stable_digest(completed)
-    if digest in _MODULE_CACHE:
-        return _MODULE_CACHE[digest]
+    cached_info = _MODULE_INFO_CACHE.get(digest)
+    if cached_info is not None:
+        return cached_info
 
     if digest not in _BINARY_CACHE:
         _BINARY_CACHE[digest] = compile(completed)
@@ -67,7 +79,20 @@ def build_compiled_module(
     )
     module = _import_extension_module(module_name, so_bytes)
     _MODULE_CACHE[digest] = module
-    return module
+    info = {
+        "digest": digest,
+        "completed": deepcopy(completed),
+        "module": module,
+        "path": getattr(module, "__file__", None),
+        "module_name": module_name,
+    }
+    _MODULE_INFO_CACHE[digest] = info
+    return info
 
 
-__all__ = ["build_compiled_module", "complete", "compile"]
+__all__ = [
+    "build_compiled_module",
+    "get_compiled_module_info",
+    "complete",
+    "compile",
+]
