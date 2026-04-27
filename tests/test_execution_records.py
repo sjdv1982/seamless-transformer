@@ -436,6 +436,19 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
         "job_contract_violations": ["runpath_outside_conda_prefix"],
         "diagnostics": {"compiled": True, "origin": "jobserver"},
     }
+    record_runtime = {
+        "started_at": "2026-04-27T10:00:00Z",
+        "finished_at": "2026-04-27T10:00:03Z",
+        "wall_time_seconds": 3.0,
+        "cpu_user_seconds": 1.2,
+        "cpu_system_seconds": 0.4,
+        "memory_peak_bytes": 123456,
+        "hostname": "jobserver-worker-1",
+        "pid": 4321,
+        "process_started_at": "2026-04-27T09:00:00Z",
+        "worker_execution_index": 17,
+        "retry_count": 0,
+    }
 
     class _FakeJobserverRemote:
         async def run_transformation(self, *args, **kwargs):
@@ -445,6 +458,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
                 "probe_context": probe_context,
                 "compilation_context": compilation_context,
                 "job_validation": job_validation,
+                "record_runtime": record_runtime,
             }
 
     async def _unexpected_probe_context(*args, **kwargs):
@@ -503,6 +517,16 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     ]
     assert record["contract_violations"] == ["runpath_outside_conda_prefix"]
     assert record["validation_snapshot"] == "7" * 64
+    assert record["started_at"] == record_runtime["started_at"]
+    assert record["finished_at"] == record_runtime["finished_at"]
+    assert record["wall_time_seconds"] == record_runtime["wall_time_seconds"]
+    assert record["cpu_time_user_seconds"] == record_runtime["cpu_user_seconds"]
+    assert record["cpu_time_system_seconds"] == record_runtime["cpu_system_seconds"]
+    assert record["memory_peak_bytes"] == record_runtime["memory_peak_bytes"]
+    assert record["hostname"] == record_runtime["hostname"]
+    assert record["pid"] == record_runtime["pid"]
+    assert record["process_started_at"] == record_runtime["process_started_at"]
+    assert record["worker_execution_index"] == record_runtime["worker_execution_index"]
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
     assert record["output_total_bytes"] > 0
