@@ -88,6 +88,66 @@ def _affinity_count() -> int | None:
         return None
 
 
+def _read_text_file(path: str) -> str | None:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value = f.read().strip()
+    except Exception:
+        return None
+    return value or None
+
+
+def _cpuinfo_summary() -> dict[str, Any] | None:
+    text = _read_text_file("/proc/cpuinfo")
+    if not text:
+        return None
+    blocks = [block for block in text.split("\n\n") if block.strip()]
+    if not blocks:
+        return None
+    first: dict[str, str] = {}
+    for line in blocks[0].splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        first[key.strip()] = value.strip()
+    flags = first.get("flags") or first.get("Features")
+    return {
+        "model_name": first.get("model name") or first.get("Processor"),
+        "microcode": first.get("microcode"),
+        "flags": flags.split() if isinstance(flags, str) and flags else None,
+    }
+
+
+def _numa_topology() -> list[dict[str, Any]] | None:
+    sys_node = Path("/sys/devices/system/node")
+    if not sys_node.exists():
+        return None
+    result = []
+    for node_dir in sorted(sys_node.glob("node[0-9]*")):
+        cpulist = _read_text_file(str(node_dir / "cpulist"))
+        if cpulist is None:
+            continue
+        result.append({"node": node_dir.name, "cpulist": cpulist})
+    return result or None
+
+
+def _os_release() -> dict[str, str] | None:
+    text = _read_text_file("/etc/os-release")
+    if not text:
+        return None
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        result[key] = value.strip().strip('"')
+    return result or None
+
+
+def _kernel_setting(path: str) -> str | None:
+    return _read_text_file(path)
+
+
 def _cgroup_memory_limit_bytes() -> int | None:
     candidates = (
         "/sys/fs/cgroup/memory.max",
@@ -389,6 +449,7 @@ def _common_payload(bucket_kind: str) -> dict[str, Any]:
 def _build_node_payload(request: dict[str, Any]) -> dict[str, Any]:
     hostname = socket.gethostname()
     uname = platform.uname()
+    cpuinfo = _cpuinfo_summary()
     payload = _common_payload("node")
     payload.update(
         {
@@ -409,11 +470,21 @@ def _build_node_payload(request: dict[str, Any]) -> dict[str, Any]:
                 "byteorder": sys.byteorder,
             },
             "cpu": {
+                "model_name": None if cpuinfo is None else cpuinfo.get("model_name"),
+                "microcode": None if cpuinfo is None else cpuinfo.get("microcode"),
+                "flags": None if cpuinfo is None else cpuinfo.get("flags"),
                 "logical_cores": os.cpu_count(),
                 "affinity_cores": _affinity_count(),
             },
             "memory_total_bytes": _memory_total_bytes(),
+            "numa_topology": _numa_topology(),
             "gpu_inventory": _node_gpu_inventory(),
+            "distribution": _os_release(),
+            "transparent_hugepages": _kernel_setting(
+                "/sys/kernel/mm/transparent_hugepage/enabled"
+            ),
+            "aslr": _kernel_setting("/proc/sys/kernel/randomize_va_space"),
+            "overcommit_memory": _kernel_setting("/proc/sys/vm/overcommit_memory"),
         }
     )
     return payload

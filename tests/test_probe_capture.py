@@ -274,3 +274,52 @@ def test_node_gpu_inventory_uses_pynvml(monkeypatch):
         ],
     }
     assert state == {"init": 1, "shutdown": 1}
+
+
+def test_build_node_payload_includes_proc_and_sys_facts(monkeypatch):
+    monkeypatch.setattr(
+        probe_capture,
+        "_cpuinfo_summary",
+        lambda: {
+            "model_name": "AMD EPYC",
+            "microcode": "0x123",
+            "flags": ["avx2", "fma"],
+        },
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_numa_topology",
+        lambda: [{"node": "node0", "cpulist": "0-7"}],
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_node_gpu_inventory",
+        lambda: {"driver_version": "550.54", "gpus": []},
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_os_release",
+        lambda: {"ID": "ubuntu", "VERSION_ID": "24.04"},
+    )
+    monkeypatch.setattr(
+        probe_capture,
+        "_kernel_setting",
+        lambda path: {
+            "/sys/kernel/mm/transparent_hugepage/enabled": "always [madvise] never",
+            "/proc/sys/kernel/randomize_va_space": "2",
+            "/proc/sys/vm/overcommit_memory": "0",
+        }.get(path),
+    )
+
+    payload = probe_capture._build_node_payload({"label": "worker-1"})
+
+    assert payload["label"] == "worker-1"
+    assert payload["cpu"]["model_name"] == "AMD EPYC"
+    assert payload["cpu"]["microcode"] == "0x123"
+    assert payload["cpu"]["flags"] == ["avx2", "fma"]
+    assert payload["numa_topology"] == [{"node": "node0", "cpulist": "0-7"}]
+    assert payload["gpu_inventory"] == {"driver_version": "550.54", "gpus": []}
+    assert payload["distribution"] == {"ID": "ubuntu", "VERSION_ID": "24.04"}
+    assert payload["transparent_hugepages"] == "always [madvise] never"
+    assert payload["aslr"] == "2"
+    assert payload["overcommit_memory"] == "0"
