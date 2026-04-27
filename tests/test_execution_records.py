@@ -134,6 +134,7 @@ def test_record_mode_writes_execution_record(monkeypatch):
     monkeypatch.setattr(transformation_cache, "get_selected_cluster", lambda: None)
     monkeypatch.setattr(transformation_cache, "get_queue", lambda cluster=None: None)
     monkeypatch.setattr(transformation_cache, "get_node", lambda: None)
+    monkeypatch.setattr(transformation_cache, "_memory_peak_bytes", lambda: 654321)
     monkeypatch.setattr(
         transformation_cache,
         "ensure_record_bucket_preconditions",
@@ -193,6 +194,7 @@ def test_record_mode_writes_execution_record(monkeypatch):
     assert record["execution_envelope"]["active_tf_dunder_keys"] == ["__env__"]
     assert record["freshness"] == probe_context
     assert record["validation_snapshot"] == validation_snapshot
+    assert record["memory_peak_bytes"] == 654321
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
     assert record["output_total_bytes"] > 0

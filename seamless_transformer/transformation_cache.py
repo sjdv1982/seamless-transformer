@@ -11,6 +11,7 @@ import os
 import os as _os
 import platform
 import re
+import resource
 import shlex
 import shutil
 import socket
@@ -77,6 +78,19 @@ _COMPILED_VALIDATION_CACHE: dict[str, dict[str, Any]] = {}
 def _debug(msg: str) -> None:
     if _DEBUG:
         print(f"[transformation_cache] {msg}", flush=True)
+
+
+def _memory_peak_bytes() -> int | None:
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        peak = int(usage.ru_maxrss)
+    except Exception:
+        return None
+    if peak <= 0:
+        return None
+    if sys.platform.startswith("linux"):
+        return peak * 1024
+    return peak
 
 
 def _utcnow_iso() -> str:
@@ -1127,6 +1141,10 @@ class TransformationCache:
                     job_contract_violations=job_contract_violations,
                     job_validation_diagnostics=job_validation["diagnostics"],
                 )
+                record_runtime_metadata = dict(runtime_metadata or {})
+                record_runtime_metadata.setdefault(
+                    "memory_peak_bytes", _memory_peak_bytes()
+                )
                 record = build_execution_record(
                     transformation_dict,
                     tf_checksum=tf_checksum,
@@ -1143,7 +1161,7 @@ class TransformationCache:
                     job_contract_violations=job_contract_violations,
                     compilation_context=compilation_context,
                     validation_snapshot=validation_snapshot,
-                    runtime_metadata=runtime_metadata,
+                    runtime_metadata=record_runtime_metadata,
                 )
                 record["execution_envelope"]["scratch"] = bool(scratch)
                 record["input_total_bytes"] = input_total_bytes
