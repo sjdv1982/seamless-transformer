@@ -543,6 +543,44 @@ async def collect_job_validation(
     }
 
 
+async def collect_compilation_runtime_metadata(
+    transformation_dict: Dict[str, Any],
+    tf_dunder: Dict[str, Any] | None,
+) -> dict[str, Any]:
+    compiled = bool(
+        transformation_dict.get("__compiled__")
+        or (isinstance(tf_dunder, dict) and tf_dunder.get("__compiled__"))
+    )
+    if not compiled:
+        return {}
+
+    from seamless_transformer.compiler import get_compiled_module_info
+
+    code = await Checksum(transformation_dict.get("code")[2]).resolution("text")
+    header = _resolve_dunder_value(transformation_dict, tf_dunder, "__header__", "text")
+    compilation = _resolve_dunder_value(
+        transformation_dict, tf_dunder, "__compilation__", "plain"
+    )
+    objects = {}
+    objects_value = transformation_dict.get("objects")
+    if objects_value is not None and objects_value[2] is not None:
+        objects = await Checksum(objects_value[2]).resolution("plain")
+        if not isinstance(objects, dict):
+            objects = {}
+    module_definition = _module_definition_from_payload(
+        transformation_dict.get("__language__"),
+        code,
+        header,
+        objects,
+        compilation,
+    )
+    module_info = get_compiled_module_info(module_definition)
+    compilation_time_seconds = module_info.get("compilation_time_seconds")
+    if compilation_time_seconds is None:
+        return {}
+    return {"compilation_time_seconds": compilation_time_seconds}
+
+
 def _validation_snapshot_key(
     execution: str,
     probe_context: dict[str, Any] | None,
@@ -1145,6 +1183,12 @@ class TransformationCache:
                 record_runtime_metadata.setdefault(
                     "memory_peak_bytes", _memory_peak_bytes()
                 )
+                if "compilation_time_seconds" not in record_runtime_metadata:
+                    record_runtime_metadata.update(
+                        await collect_compilation_runtime_metadata(
+                            transformation_dict, tf_dunder
+                        )
+                    )
                 record = build_execution_record(
                     transformation_dict,
                     tf_checksum=tf_checksum,

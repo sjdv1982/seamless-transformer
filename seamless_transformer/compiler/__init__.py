@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import time
 from types import ModuleType
 from typing import Any
 
@@ -64,6 +65,7 @@ def get_compiled_module_info(
     if cached_info is not None:
         return cached_info
 
+    compile_started = time.perf_counter()
     if digest not in _BINARY_CACHE:
         _BINARY_CACHE[digest] = compile(completed)
     binary_objects = _BINARY_CACHE[digest]
@@ -85,6 +87,7 @@ def get_compiled_module_info(
         "module": module,
         "path": getattr(module, "__file__", None),
         "module_name": module_name,
+        "compilation_time_seconds": round(time.perf_counter() - compile_started, 6),
     }
     _MODULE_INFO_CACHE[digest] = info
     return info

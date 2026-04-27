@@ -304,6 +304,7 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
     result_checksum = _make_checksum(13, "mixed")
     tf_checksum = _make_checksum({"kind": "compiled-record-test"})
     compilation_context = "f" * 64
+    compilation_time_seconds = 2.5
     validation_snapshot = "8" * 64
     job_contract_violations = ["native_link_outside_conda_prefix"]
     captured_snapshot_kwargs = {}
@@ -367,6 +368,13 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
         ),
     )
     monkeypatch.setattr(
+        transformation_cache,
+        "collect_compilation_runtime_metadata",
+        lambda *args, **kwargs: asyncio.sleep(
+            0, result={"compilation_time_seconds": compilation_time_seconds}
+        ),
+    )
+    monkeypatch.setattr(
         transformation_cache, "run_transformation_dict", _fake_run_transformation_dict
     )
 
@@ -391,6 +399,7 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
     assert record["job_contract_violations"] == job_contract_violations
     assert record["contract_violations"] == job_contract_violations
     assert record["validation_snapshot"] == validation_snapshot
+    assert record["compilation_time_seconds"] == compilation_time_seconds
     assert captured_snapshot_kwargs["job_contract_violations"] == job_contract_violations
     assert captured_snapshot_kwargs["job_validation_diagnostics"] == {
         "compiled": True
@@ -445,6 +454,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
         "cpu_user_seconds": 1.2,
         "cpu_system_seconds": 0.4,
         "memory_peak_bytes": 123456,
+        "compilation_time_seconds": 1.75,
         "hostname": "jobserver-worker-1",
         "pid": 4321,
         "process_started_at": "2026-04-27T09:00:00Z",
@@ -525,6 +535,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     assert record["cpu_time_user_seconds"] == record_runtime["cpu_user_seconds"]
     assert record["cpu_time_system_seconds"] == record_runtime["cpu_system_seconds"]
     assert record["memory_peak_bytes"] == record_runtime["memory_peak_bytes"]
+    assert record["compilation_time_seconds"] == record_runtime["compilation_time_seconds"]
     assert record["hostname"] == record_runtime["hostname"]
     assert record["pid"] == record_runtime["pid"]
     assert record["process_started_at"] == record_runtime["process_started_at"]
