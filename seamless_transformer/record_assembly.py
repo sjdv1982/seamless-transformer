@@ -54,6 +54,7 @@ except Exception:  # pragma: no cover - fallback for editable/source-only instal
 
 _PROCESS_STARTED_AT = datetime.now(timezone.utc)
 _EXECUTION_RECORD_COUNTER = itertools.count(1)
+_COMPILATION_CONTEXT_CACHE: dict[str, str] = {}
 _VALIDATION_SNAPSHOT_COUNTS: dict[tuple, int] = {}
 _COMPILED_VALIDATION_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -285,6 +286,9 @@ async def build_compilation_context_checksum(
     )
     completed = complete(module_definition)
     compiled_module_digest = _stable_digest(completed)
+    cached_checksum = _COMPILATION_CONTEXT_CACHE.get(compiled_module_digest)
+    if cached_checksum is not None:
+        return cached_checksum
 
     objects_payload: dict[str, Any] = {}
     for name, obj in sorted(completed["objects"].items()):
@@ -323,7 +327,9 @@ async def build_compilation_context_checksum(
     written = await buffer.write()
     if not written:
         raise RuntimeError("Failed to write compilation context to the hashserver")
-    return buffer.get_checksum().hex()
+    checksum = buffer.get_checksum().hex()
+    _COMPILATION_CONTEXT_CACHE[compiled_module_digest] = checksum
+    return checksum
 
 
 def _allowlisted_library_name(name: str) -> bool:
@@ -1345,6 +1351,7 @@ async def compute_record_io_bytes(
 
 
 __all__ = [
+    "_COMPILATION_CONTEXT_CACHE",
     "_COMPILED_VALIDATION_CACHE",
     "_GpuMemorySampler",
     "_PROCESS_STARTED_AT",

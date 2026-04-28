@@ -824,6 +824,66 @@ def test_validation_snapshot_helper_honors_first_n_policy(monkeypatch):
     assert second is None
 
 
+def test_build_compilation_context_checksum_uses_digest_cache(monkeypatch):
+    monkeypatch.setattr(
+        record_assembly, "_COMPILATION_CONTEXT_CACHE", {}, raising=False
+    )
+    monkeypatch.setattr(record_assembly, "buffer_remote", _FakeBufferRemote())
+    monkeypatch.setattr(record_assembly.Buffer, "write", _fake_buffer_write)
+
+    code_checksum = _make_checksum("int demo(void) { return 1; }", "text")
+    header_checksum = _make_checksum("", "text")
+    compilation_checksum = _make_checksum({}, "plain")
+
+    import importlib
+
+    compile_module = importlib.import_module("seamless_transformer.compiler.compile")
+
+    monkeypatch.setattr(
+        compile_module,
+        "complete",
+        lambda module_definition: {
+            "target": "profile",
+            "objects": {
+                "demo": {
+                    "language": "c",
+                    "compiler_binary": "cc",
+                    "compile_mode": "object",
+                    "extension": ".c",
+                    "options": ["-O2"],
+                }
+            },
+        },
+    )
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        del kwargs
+        calls.append(cmd)
+        return SimpleNamespace(stdout="cc (GCC) 1.0\n")
+
+    monkeypatch.setattr(record_assembly.subprocess, "run", _fake_run)
+
+    transformation_dict = {
+        "__language__": "c",
+        "__compiled__": True,
+        "__header__": header_checksum.hex(),
+        "__compilation__": compilation_checksum.hex(),
+        "code": ("text", None, code_checksum.hex()),
+        "__output__": ("result", "mixed", None),
+    }
+
+    first = asyncio.run(
+        record_assembly.build_compilation_context_checksum(transformation_dict, {})
+    )
+    second = asyncio.run(
+        record_assembly.build_compilation_context_checksum(transformation_dict, {})
+    )
+
+    assert first == second
+    assert len(calls) == 1
+
+
 def test_collect_job_validation_reports_and_caches_native_linkage(monkeypatch, tmp_path):
     conda_prefix = tmp_path / "conda"
     conda_lib = conda_prefix / "lib"
