@@ -36,23 +36,6 @@ def _write_file(pinname, data, filemode):
         pinf.write(data)
 
 
-def _looks_like_deep_folder(data) -> bool:
-    # TODO: dirty! Anyway, why do we still have hash patterns???
-    if not isinstance(data, dict) or not data:
-        return False
-    for value in data.values():
-        try:
-            if len(value) != 64:
-                return False
-        except TypeError:
-            return False
-        try:
-            Checksum(value)
-        except Exception:
-            return False
-    return True
-
-
 def _is_shell_env_name(name: str) -> bool:
     if not name:
         return False
@@ -100,9 +83,7 @@ def write_bash_job(
                 continue
             elif FILESYSTEM[pin]["mode"] == "directory":
                 fs_entry = FILESYSTEM[pin]
-                deep = fs_entry.get("hash_pattern") == {"*": "##"}
-                if not deep:
-                    deep = _looks_like_deep_folder(v)
+                deep = fs_entry.get("celltype") == "deepfolder"
                 directory_pin, compression_suffix = strip_compression_suffix(pin)
                 write_to_directory(
                     directory_pin,

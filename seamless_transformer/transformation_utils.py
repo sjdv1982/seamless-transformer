@@ -8,7 +8,7 @@ from typing import Dict, Any
 from seamless import Buffer, Checksum
 
 
-DEEP_CELLTYPES = ("deepcell", "deepfolder")
+DEEP_CELLTYPES = ("deepcell", "deepfolder", "folder")
 TRANSFORMATION_CORE_KEYS = {"__language__", "__output__", "__as__", "__format__"}
 TRANSFORMATION_LOCAL_DUNDER_KEYS = {"__meta__", "__env__"}
 TRANSFORMATION_EXECUTION_DUNDER_KEYS = {
@@ -137,10 +137,10 @@ def unpack_deep_structure(structure, celltype: str):
         checksum = Checksum(value)
         buffer = checksum.resolve()
         assert isinstance(buffer, Buffer)
-        if celltype == "deepfolder":
-            pass
-        else:
+        if celltype == "deepcell":
             content = buffer.get_value("mixed")
+        else:
+            content = buffer.content
         return content
 
     return _convert(structure)

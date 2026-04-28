@@ -258,10 +258,6 @@ def direct_transformer_to_pretransformation(
 ) -> PreTransformation:
     """Create a PreTransformation instance for a direct transformer call."""
     result_celltype = celltypes["result"]
-    if result_celltype == "folder":
-        result_celltype = "deepfolder"
-    if result_celltype == "structured":
-        result_celltype = "mixed"
 
     outputpin = ("result", result_celltype, None)
 
@@ -292,22 +288,17 @@ def direct_transformer_to_pretransformation(
                 celltype = "plain"
             else:
                 celltype = "mixed"
-        if celltype == "folder":
-            celltype = "deepfolder"
 
         if celltype in ("cson", "yaml", "python"):
             raise NotImplementedError(pinname)
 
-        if celltype == "structured":
-            celltype = "mixed"
         if celltype == "module":
             pin = {"celltype": "plain", "subcelltype": "module"}
-        elif celltype == "deepfolder":
-            filesystem = {
-                "mode": "directory",
-                "optional": original_celltype == "folder",
+        elif celltype in ("deepfolder", "folder"):
+            pin = {
+                "celltype": celltype,
+                "filesystem": {"mode": "directory"},
             }
-            pin = {"celltype": "deepfolder", "filesystem": filesystem}
         elif celltype == "checksum":
             pin = {"celltype": "plain", "subcelltype": "checksum"}
         else:
@@ -335,6 +326,7 @@ def direct_transformer_to_pretransformation(
         if filesystem is not None:
             format_section.setdefault(pinname, {})
             format_section[pinname]["filesystem"] = deepcopy(filesystem)
+            format_section[pinname]["celltype"] = pin["celltype"]
 
     if format_section:
         pretransformation_dict["__format__"] = format_section

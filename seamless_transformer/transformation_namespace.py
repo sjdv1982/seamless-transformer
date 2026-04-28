@@ -13,7 +13,6 @@ from .code_manager import get_code_manager
 from .transformation_utils import (
     TRANSFORMATION_EXECUTION_DUNDER_KEYS,
     unpack_deep_structure,
-    is_deep_celltype,
 )
 
 
@@ -86,15 +85,29 @@ def _find_filesystem_path(
     return None, None
 
 
+def _to_checksum_dict(structure):
+    """Walk a deep structure and wrap each leaf hex string in Checksum (no resolution)."""
+    if structure is None:
+        return structure
+
+    def _convert(value):
+        if isinstance(value, dict):
+            return {k: _convert(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_convert(v) for v in value]
+        return Checksum(value)
+
+    return _convert(structure)
+
+
 def build_transformation_namespace_sync(
     transformation: Dict[str, Any],
-) -> Tuple[Any, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
     namespace = {
         "__name__": "transformer",
         "__package__": "transformer",
     }
     code = None
-    deep_structures_to_unpack: Dict[str, Tuple[Any, str]] = {}
     namespace["PINS"] = {}
     namespace["OUTPUTPIN"] = transformation["__output__"][1]
     meta = transformation.get("__meta__")
@@ -115,10 +128,9 @@ def build_transformation_namespace_sync(
                 continue
             fs_entry = dict(filesystem)
             fs_entry.setdefault("filesystem", False)
-            # TODO: why do we still have hash patterns???
-            hash_pattern = fmt.get("hash_pattern")
-            if hash_pattern is not None:
-                fs_entry["hash_pattern"] = hash_pattern
+            celltype_from_fmt = fmt.get("celltype")
+            if celltype_from_fmt is not None:
+                fs_entry["celltype"] = celltype_from_fmt
             FILESYSTEM[pinname] = fs_entry
     namespace["FILESYSTEM"] = FILESYSTEM
     read_folder_directories = _get_read_folder_directories()
@@ -267,16 +279,22 @@ def build_transformation_namespace_sync(
             code = value
             continue
 
-        target_celltype = celltype or "mixed"
-        if is_deep_celltype(celltype):
+        if celltype in ("deepcell", "deepfolder"):
             deep_structure = buffer.get_value("plain")
-            value = unpack_deep_structure(deep_structure, celltype)
+            value = _to_checksum_dict(deep_structure)
+            pinname_as = as_.get(pinname, pinname)
+            namespace["PINS"][pinname_as] = value
+            namespace[pinname_as] = value
+            continue
+        elif celltype == "folder":
+            deep_structure = buffer.get_value("plain")
+            value = unpack_deep_structure(deep_structure, "folder")
             pinname_as = as_.get(pinname, pinname)
             namespace["PINS"][pinname_as] = value
             namespace[pinname_as] = value
             continue
 
-        value = buffer.get_value(target_celltype)
+        value = buffer.get_value(celltype or "mixed")
 
         if (celltype, subcelltype) == ("plain", "module"):
             modules_to_build[pinname] = value
@@ -285,7 +303,7 @@ def build_transformation_namespace_sync(
             namespace["PINS"][pinname_as] = value
             namespace[pinname_as] = value
 
-    return code, namespace, modules_to_build, deep_structures_to_unpack
+    return code, namespace, modules_to_build
 
 
 __all__ = ["build_transformation_namespace_sync"]

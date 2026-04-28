@@ -28,7 +28,7 @@ def test_execute_bash_directory_input_deepfolder_contents():
             "data": {
                 "mode": "directory",
                 "filesystem": False,
-                "hash_pattern": {"*": "##"},
+                "celltype": "deepfolder",
             }
         },
         "bytes",

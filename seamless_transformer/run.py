@@ -141,7 +141,7 @@ def run_transformation_dict(
     )
 
     tf_namespace = build_transformation_namespace_sync(transformation)
-    code, namespace, modules_to_build, _ = tf_namespace
+    code, namespace, modules_to_build = tf_namespace
     language = transformation.get("__language__", "python")
     if language == "python" and isinstance(code, str) and len(code) == 64:
         # Defensive fallback: recover code text if a checksum hex string leaked through.
@@ -351,14 +351,8 @@ def get_transformation_inputs_output(
         inputs.append(pinname_as)
 
     outputpin = transformation["__output__"]
-    if len(outputpin) == 3:
-        outputname, output_celltype, output_subcelltype = outputpin
-    else:
-        outputname, output_celltype, output_subcelltype, hash_pattern = outputpin
-        if hash_pattern == {"*": "#"}:
-            output_celltype = "deepcell"
-        elif hash_pattern == {"*": "##"}:
-            output_celltype = "deepfolder"
+    assert len(outputpin) == 3, f"Expected 3-tuple __output__, got {len(outputpin)}-tuple"
+    outputname, output_celltype, output_subcelltype = outputpin
     return inputs, outputname, output_celltype, output_subcelltype
 
 
