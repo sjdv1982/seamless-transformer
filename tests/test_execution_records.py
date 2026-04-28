@@ -132,7 +132,7 @@ def test_record_mode_writes_execution_record(monkeypatch):
         transformation_cache.asyncio, "get_running_loop", lambda: _ImmediateLoop()
     )
     monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
-    monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(transformation_cache, "get_record_mode", lambda: True)
     monkeypatch.setattr(transformation_cache, "get_remote", lambda: None)
     monkeypatch.setattr(transformation_cache, "get_selected_cluster", lambda: None)
     monkeypatch.setattr(transformation_cache, "get_queue", lambda cluster=None: None)
@@ -232,7 +232,7 @@ def test_record_mode_requires_database_write_server(monkeypatch):
         transformation_cache.asyncio, "get_running_loop", lambda: _ImmediateLoop()
     )
     monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
-    monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(transformation_cache, "get_record_mode", lambda: True)
     monkeypatch.setattr(
         transformation_cache,
         "ensure_record_bucket_preconditions",
@@ -285,7 +285,7 @@ def test_record_probe_skips_execution_record_write(monkeypatch):
         transformation_cache.asyncio, "get_running_loop", lambda: _ImmediateLoop()
     )
     monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
-    monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(transformation_cache, "get_record_mode", lambda: True)
     monkeypatch.setattr(
         transformation_cache,
         "ensure_record_bucket_preconditions",
@@ -344,7 +344,7 @@ def test_minimal_record_written_when_record_mode_false(monkeypatch):
         transformation_cache.asyncio, "get_running_loop", lambda: _ImmediateLoop()
     )
     monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
-    monkeypatch.setattr(transformation_cache, "get_record", lambda: False)
+    monkeypatch.setattr(transformation_cache, "get_record_mode", lambda: False)
     monkeypatch.setattr(
         transformation_cache,
         "ensure_record_bucket_preconditions",
@@ -430,7 +430,7 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
         transformation_cache.asyncio, "get_running_loop", lambda: _ImmediateLoop()
     )
     monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
-    monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(transformation_cache, "get_record_mode", lambda: True)
     monkeypatch.setattr(
         transformation_cache,
         "ensure_record_bucket_preconditions",
@@ -562,7 +562,7 @@ def test_compiled_record_reports_native_link_contract_violation(monkeypatch, tmp
         transformation_cache.asyncio, "get_running_loop", lambda: _ImmediateLoop()
     )
     monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
-    monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(transformation_cache, "get_record_mode", lambda: True)
     monkeypatch.setattr(
         transformation_cache,
         "ensure_record_bucket_preconditions",
@@ -717,7 +717,7 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
         transformation_cache, "jobserver_remote", _FakeJobserverRemote()
     )
     monkeypatch.setattr(transformation_cache, "get_execution", lambda: "remote")
-    monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(transformation_cache, "get_record_mode", lambda: True)
     monkeypatch.setattr(transformation_cache, "get_remote", lambda: "jobserver")
     monkeypatch.setattr(transformation_cache, "get_selected_cluster", lambda: "demo")
     monkeypatch.setattr(transformation_cache, "get_queue", lambda cluster=None: "gpu")
@@ -812,7 +812,7 @@ def test_spawn_record_writes_single_execution_record(monkeypatch):
     monkeypatch.setattr(transformation_cache, "_buffer_writer", None)
     monkeypatch.setattr(transformation_cache, "jobserver_remote", None)
     monkeypatch.setattr(transformation_cache, "get_execution", lambda: "spawn")
-    monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(transformation_cache, "get_record_mode", lambda: True)
     monkeypatch.setattr(transformation_cache, "get_remote", lambda: None)
     monkeypatch.setattr(transformation_cache, "get_selected_cluster", lambda: None)
     monkeypatch.setattr(transformation_cache, "get_queue", lambda cluster=None: None)

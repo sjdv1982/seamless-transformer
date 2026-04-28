@@ -49,7 +49,6 @@ from seamless_config.select import (
     get_execution,
     get_node,
     get_queue,
-    get_record,
     get_remote,
     get_selected_cluster,
 )
@@ -156,7 +155,7 @@ class TransformationCache:
         """
         tf_checksum = Checksum(tf_checksum)
         self._remember_transformation_dunder(tf_checksum, tf_dunder)
-        record_mode = bool(get_record())
+        record_mode = get_record_mode()
         cached_result = self._transformation_cache.get(tf_checksum)
         if cached_result is not None:
             if require_value:
@@ -202,7 +201,6 @@ class TransformationCache:
                     return remote_result
 
         execution = "process" if force_local else get_execution()
-        record_probe = is_record_probe(transformation_dict, tf_dunder)
         meta = (
             transformation_dict.get("__meta__")
             if isinstance(transformation_dict, dict)
@@ -210,7 +208,6 @@ class TransformationCache:
         )
         if isinstance(meta, dict) and meta.get("local") is True:
             execution = "process"
-        remote_target = _resolve_remote_target(execution)
         if record_mode:
             if database_remote is None or not database_remote.has_write_server():
                 raise RuntimeError(
@@ -261,11 +258,15 @@ class TransformationCache:
                 scratch=scratch,
             )
             if isinstance(result_checksum, dict):
-                probe_context = result_checksum.get("probe_context")
-                compilation_context = result_checksum.get("compilation_context")
-                job_validation_payload = result_checksum.get("job_validation")
-                runtime_metadata = result_checksum.get("record_runtime")
-                result_checksum = result_checksum.get("result_checksum")
+                remote_job_written = result_checksum.get("remote_job_written")
+                if isinstance(remote_job_written, str):
+                    result_checksum = remote_job_written
+                else:
+                    probe_context = result_checksum.get("probe_context")
+                    compilation_context = result_checksum.get("compilation_context")
+                    job_validation_payload = result_checksum.get("job_validation")
+                    runtime_metadata = result_checksum.get("record_runtime")
+                    result_checksum = result_checksum.get("result_checksum")
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
                 if remote_job_dir is not None:
@@ -361,6 +362,7 @@ class TransformationCache:
             await database_remote.set_transformation_result(
                 tf_checksum, result_checksum
             )
+            record_probe = is_record_probe(transformation_dict, tf_dunder)
             if not record_probe:
                 record_runtime_metadata = dict(runtime_metadata or {})
                 record_runtime_metadata.setdefault(
@@ -371,6 +373,7 @@ class TransformationCache:
                         "gpu_memory_peak_bytes", gpu_memory_peak_bytes
                     )
                 if record_mode:
+                    remote_target = _resolve_remote_target(execution)
                     if probe_context is None and (
                         execution != "remote" or remote_target != "jobserver"
                     ):
