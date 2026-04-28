@@ -7,6 +7,7 @@ import pytest
 
 from seamless import Buffer, Checksum
 
+import seamless_transformer.record_assembly as record_assembly
 import seamless_transformer.transformation_cache as transformation_cache
 from seamless_transformer.transformation_cache import TransformationCache
 
@@ -136,6 +137,10 @@ def test_record_mode_writes_execution_record(monkeypatch):
     monkeypatch.setattr(transformation_cache, "get_selected_cluster", lambda: None)
     monkeypatch.setattr(transformation_cache, "get_queue", lambda cluster=None: None)
     monkeypatch.setattr(transformation_cache, "get_node", lambda: None)
+    monkeypatch.setattr(record_assembly, "get_remote", lambda: None)
+    monkeypatch.setattr(record_assembly, "get_selected_cluster", lambda: None)
+    monkeypatch.setattr(record_assembly, "get_queue", lambda cluster=None: None)
+    monkeypatch.setattr(record_assembly, "get_node", lambda: None)
     monkeypatch.setattr(transformation_cache, "_memory_peak_bytes", lambda: 654321)
     monkeypatch.setattr(
         transformation_cache, "_process_create_time_epoch", lambda: 1234.5
@@ -633,6 +638,10 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     monkeypatch.setattr(transformation_cache, "get_selected_cluster", lambda: "demo")
     monkeypatch.setattr(transformation_cache, "get_queue", lambda cluster=None: "gpu")
     monkeypatch.setattr(transformation_cache, "get_node", lambda: None)
+    monkeypatch.setattr(record_assembly, "get_remote", lambda: "jobserver")
+    monkeypatch.setattr(record_assembly, "get_selected_cluster", lambda: "demo")
+    monkeypatch.setattr(record_assembly, "get_queue", lambda cluster=None: "gpu")
+    monkeypatch.setattr(record_assembly, "get_node", lambda: None)
     monkeypatch.setattr(
         transformation_cache,
         "ensure_record_bucket_preconditions",
@@ -724,6 +733,10 @@ def test_spawn_record_writes_single_execution_record(monkeypatch):
     monkeypatch.setattr(transformation_cache, "get_selected_cluster", lambda: None)
     monkeypatch.setattr(transformation_cache, "get_queue", lambda cluster=None: None)
     monkeypatch.setattr(transformation_cache, "get_node", lambda: None)
+    monkeypatch.setattr(record_assembly, "get_remote", lambda: None)
+    monkeypatch.setattr(record_assembly, "get_selected_cluster", lambda: None)
+    monkeypatch.setattr(record_assembly, "get_queue", lambda cluster=None: None)
+    monkeypatch.setattr(record_assembly, "get_node", lambda: None)
     monkeypatch.setattr(transformation_cache.worker, "has_spawned", lambda: True)
     monkeypatch.setattr(transformation_cache, "is_worker", lambda: False)
     monkeypatch.setattr(
@@ -764,7 +777,7 @@ def test_spawn_record_writes_single_execution_record(monkeypatch):
 
 def test_validation_snapshot_helper_honors_first_n_policy(monkeypatch):
     monkeypatch.setattr(
-        transformation_cache, "_VALIDATION_SNAPSHOT_COUNTS", {}, raising=False
+        record_assembly, "_VALIDATION_SNAPSHOT_COUNTS", {}, raising=False
     )
     monkeypatch.setenv("SEAMLESS_RECORD_VALIDATION_SNAPSHOT_LIMIT", "1")
     monkeypatch.setattr(transformation_cache, "buffer_remote", _FakeBufferRemote())
@@ -772,6 +785,10 @@ def test_validation_snapshot_helper_honors_first_n_policy(monkeypatch):
     monkeypatch.setattr(transformation_cache, "get_selected_cluster", lambda: None)
     monkeypatch.setattr(transformation_cache, "get_queue", lambda cluster=None: None)
     monkeypatch.setattr(transformation_cache, "get_node", lambda: None)
+    monkeypatch.setattr(record_assembly, "buffer_remote", _FakeBufferRemote())
+    monkeypatch.setattr(record_assembly, "get_selected_cluster", lambda: None)
+    monkeypatch.setattr(record_assembly, "get_queue", lambda cluster=None: None)
+    monkeypatch.setattr(record_assembly, "get_node", lambda: None)
 
     probe_context = {
         "required_bucket_checksums": {
@@ -827,7 +844,7 @@ def test_collect_job_validation_reports_and_caches_native_linkage(monkeypatch, t
     monkeypatch.setenv("LD_LIBRARY_PATH", str(outside_dir))
     monkeypatch.setenv("LD_PRELOAD", str(outside_dir / "preload.so"))
     monkeypatch.setattr(
-        transformation_cache, "_COMPILED_VALIDATION_CACHE", {}, raising=False
+        record_assembly, "_COMPILED_VALIDATION_CACHE", {}, raising=False
     )
 
     import seamless_transformer.compiler as compiler
@@ -950,7 +967,7 @@ def test_collect_job_validation_adds_runtime_contract_diagnostics(monkeypatch):
     }
 
     monkeypatch.setattr(
-        transformation_cache,
+        record_assembly,
         "_determinant_env_live",
         lambda: {
             "PATH": "/env/bin",
@@ -961,17 +978,17 @@ def test_collect_job_validation_adds_runtime_contract_diagnostics(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        transformation_cache,
+        record_assembly,
         "_canonical_path_entries",
         lambda value: ["/env/bin"] if value is not None else [],
     )
     monkeypatch.setattr(
-        transformation_cache,
+        record_assembly,
         "_canonical_sys_path",
         lambda: ["/env/lib/python3.12/site-packages"],
     )
     monkeypatch.setattr(
-        transformation_cache,
+        record_assembly,
         "_filesystem_facts_live",
         lambda: {
             "cwd": {
@@ -985,20 +1002,20 @@ def test_collect_job_validation_adds_runtime_contract_diagnostics(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        transformation_cache,
+        record_assembly,
         "_read_proc_self_maps_paths",
         lambda: ["/env/lib/libpython3.12.so"],
     )
     monkeypatch.setattr(
-        transformation_cache,
+        record_assembly,
         "_gpu_policy_live",
         lambda: {
             "cuda_visible_devices": "0",
             "visible_gpu_mapping": [{"gpu_uuid": "GPU-1"}],
         },
     )
-    monkeypatch.setattr(transformation_cache, "_current_umask", lambda: 0o022)
-    monkeypatch.setattr(transformation_cache, "_system_library_roots", lambda: ("/usr/lib",))
+    monkeypatch.setattr(record_assembly, "_current_umask", lambda: 0o022)
+    monkeypatch.setattr(record_assembly, "_system_library_roots", lambda: ("/usr/lib",))
     monkeypatch.setenv("PATH", "/env/bin")
     monkeypatch.setenv("TMPDIR", "/tmp/runtime")
 
