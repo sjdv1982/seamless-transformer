@@ -432,6 +432,125 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
     assert record["output_total_bytes"] > 0
 
 
+def test_compiled_record_reports_native_link_contract_violation(monkeypatch, tmp_path):
+    cache = TransformationCache()
+    fake_database_remote = _FakeDatabaseRemote()
+    result_checksum = _make_checksum(17, "mixed")
+    tf_checksum = _make_checksum({"kind": "compiled-native-link-record-test"})
+    compilation_context = "e" * 64
+    validation_snapshot = "9" * 64
+    conda_prefix = tmp_path / "conda"
+    conda_lib = conda_prefix / "lib"
+    outside_dir = tmp_path / "outside"
+    module_dir = tmp_path / "module"
+    conda_lib.mkdir(parents=True)
+    outside_dir.mkdir()
+    module_dir.mkdir()
+    module_path = module_dir / "compiled-demo.so"
+    module_path.write_bytes(b"so")
+    (outside_dir / "libcustom.so").write_bytes(b"custom")
+
+    code_checksum = _make_checksum("int demo(void) { return 1; }", "text")
+    header_checksum = _make_checksum("", "text")
+    compilation_checksum = _make_checksum({}, "plain")
+
+    def _fake_run_transformation_dict(
+        transformation_dict,
+        tf_checksum_arg,
+        tf_dunder,
+        scratch,
+        require_value,
+    ):
+        del transformation_dict, tf_checksum_arg, tf_dunder, scratch, require_value
+        return result_checksum
+
+    monkeypatch.setenv("CONDA_PREFIX", str(conda_prefix))
+    monkeypatch.setattr(transformation_cache, "database_remote", fake_database_remote)
+    monkeypatch.setattr(transformation_cache, "buffer_remote", None)
+    monkeypatch.setattr(transformation_cache, "_buffer_writer", None)
+    monkeypatch.setattr(transformation_cache, "jobserver_remote", None)
+    monkeypatch.setattr(
+        transformation_cache.asyncio, "get_running_loop", lambda: _ImmediateLoop()
+    )
+    monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
+    monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(
+        transformation_cache,
+        "ensure_record_bucket_preconditions",
+        lambda *args, **kwargs: asyncio.sleep(
+            0,
+            result={
+                "required_bucket_labels": {},
+                "required_bucket_checksums": {},
+                "live_tokens": {},
+                "bucket_tokens": {},
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "build_compilation_context_checksum",
+        lambda *args, **kwargs: asyncio.sleep(0, result=compilation_context),
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "build_validation_snapshot_checksum",
+        lambda *args, **kwargs: asyncio.sleep(0, result=validation_snapshot),
+    )
+    monkeypatch.setattr(
+        transformation_cache, "run_transformation_dict", _fake_run_transformation_dict
+    )
+
+    import seamless_transformer.compiler as compiler
+
+    monkeypatch.setattr(
+        compiler,
+        "get_compiled_module_info",
+        lambda *args, **kwargs: {
+            "digest": "compiled-digest",
+            "path": str(module_path),
+        },
+    )
+
+    def _fake_readelf(cmd, **kwargs):
+        del cmd, kwargs
+        return SimpleNamespace(
+            stdout=(
+                " 0x000000000000000f (RPATH)              Library rpath: "
+                f"[{outside_dir}:{conda_lib}]\n"
+                " 0x000000000000001d (RUNPATH)            Library runpath: "
+                f"[{conda_lib}]\n"
+                " 0x0000000000000001 (NEEDED)             Shared library: "
+                "[libcustom.so]\n"
+            )
+        )
+
+    monkeypatch.setattr(transformation_cache.subprocess, "run", _fake_readelf)
+
+    result = asyncio.run(
+        cache.run(
+            {
+                "__language__": "c",
+                "__compiled__": True,
+                "__header__": header_checksum.hex(),
+                "__compilation__": compilation_checksum.hex(),
+                "code": ("text", None, code_checksum.hex()),
+                "__output__": ("result", "mixed", None),
+            },
+            tf_checksum=tf_checksum,
+            tf_dunder={},
+            scratch=False,
+            require_value=False,
+            force_local=True,
+        )
+    )
+
+    assert result == result_checksum
+    record = fake_database_remote.execution_records[0][2]
+    assert "native_link_outside_conda_prefix" in record["contract_violations"]
+    assert "native_link_outside_conda_prefix" in record["job_contract_violations"]
+
+
 def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     cache = TransformationCache()
     fake_database_remote = _FakeDatabaseRemote()
@@ -571,6 +690,76 @@ def test_remote_jobserver_record_uses_returned_probe_context(monkeypatch):
     assert record["input_total_bytes"] == 0
     assert isinstance(record["output_total_bytes"], int)
     assert record["output_total_bytes"] > 0
+
+
+def test_spawn_record_writes_single_execution_record(monkeypatch):
+    cache = TransformationCache()
+    fake_database_remote = _FakeDatabaseRemote()
+    result_checksum = _make_checksum(23, "mixed")
+    tf_checksum = _make_checksum({"kind": "spawn-record-test"})
+    probe_context = {
+        "required_bucket_labels": {},
+        "required_bucket_checksums": {},
+        "live_tokens": {},
+        "bucket_tokens": {},
+    }
+
+    async def _fake_dispatch_to_workers(
+        transformation_dict,
+        *,
+        tf_checksum,
+        tf_dunder,
+        scratch,
+    ):
+        del transformation_dict, tf_checksum, tf_dunder, scratch
+        return result_checksum
+
+    monkeypatch.setattr(transformation_cache, "database_remote", fake_database_remote)
+    monkeypatch.setattr(transformation_cache, "buffer_remote", None)
+    monkeypatch.setattr(transformation_cache, "_buffer_writer", None)
+    monkeypatch.setattr(transformation_cache, "jobserver_remote", None)
+    monkeypatch.setattr(transformation_cache, "get_execution", lambda: "spawn")
+    monkeypatch.setattr(transformation_cache, "get_record", lambda: True)
+    monkeypatch.setattr(transformation_cache, "get_remote", lambda: None)
+    monkeypatch.setattr(transformation_cache, "get_selected_cluster", lambda: None)
+    monkeypatch.setattr(transformation_cache, "get_queue", lambda cluster=None: None)
+    monkeypatch.setattr(transformation_cache, "get_node", lambda: None)
+    monkeypatch.setattr(transformation_cache.worker, "has_spawned", lambda: True)
+    monkeypatch.setattr(transformation_cache, "is_worker", lambda: False)
+    monkeypatch.setattr(
+        transformation_cache.worker,
+        "dispatch_to_workers",
+        _fake_dispatch_to_workers,
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "ensure_record_bucket_preconditions",
+        lambda *args, **kwargs: asyncio.sleep(0, result=probe_context),
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "build_validation_snapshot_checksum",
+        lambda *args, **kwargs: asyncio.sleep(0, result="8" * 64),
+    )
+
+    result = asyncio.run(
+        cache.run(
+            {
+                "__language__": "python",
+                "__output__": ("result", "mixed", None),
+            },
+            tf_checksum=tf_checksum,
+            tf_dunder={},
+            scratch=False,
+            require_value=False,
+            force_local=False,
+        )
+    )
+
+    assert result == result_checksum
+    assert len(fake_database_remote.execution_records) == 1
+    record = fake_database_remote.execution_records[0][2]
+    assert record["execution_mode"] == "spawn"
 
 
 def test_validation_snapshot_helper_honors_first_n_policy(monkeypatch):
