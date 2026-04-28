@@ -23,8 +23,14 @@ import time
 
 from seamless import Buffer, CacheMissError, Checksum, is_worker
 
+from . import record_utils as _record_utils
 from .remote_job import RemoteJobWritten, parse_remote_job_written
 from .probe_index import ensure_record_bucket_preconditions, is_record_probe
+from .record_utils import (
+    _memory_peak_bytes,
+    _process_create_time_epoch,
+    _utcnow_iso,
+)
 from .run import (
     _module_definition_from_payload,
     _resolve_dunder_value,
@@ -81,28 +87,13 @@ def _debug(msg: str) -> None:
         print(f"[transformation_cache] {msg}", flush=True)
 
 
-def _memory_peak_bytes() -> int | None:
-    try:
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        peak = int(usage.ru_maxrss)
-    except Exception:
-        return None
-    if peak <= 0:
-        return None
-    if sys.platform.startswith("linux"):
-        return peak * 1024
-    return peak
-
-
-def _process_create_time_epoch() -> float | None:
-    try:
-        import psutil
-    except Exception:
-        return None
-    try:
-        return float(psutil.Process().create_time())
-    except Exception:
-        return None
+def _resolve_remote_target(execution: str) -> str | None:
+    return _record_utils._resolve_remote_target(
+        execution,
+        get_remote=get_remote,
+        get_selected_cluster=get_selected_cluster,
+        check_remote_redundancy=check_remote_redundancy,
+    )
 
 
 class _GpuMemorySampler:
@@ -238,27 +229,6 @@ def stop_gpu_memory_sampler(sampler: _GpuMemorySampler | None) -> int | None:
     if sampler is None:
         return None
     return sampler.stop()
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
-
-
-def _resolve_remote_target(execution: str) -> str | None:
-    if execution != "remote":
-        return None
-    remote_target = get_remote()
-    if remote_target is not None:
-        return remote_target
-    cluster = get_selected_cluster()
-    if cluster is None:
-        return None
-    try:
-        return check_remote_redundancy(cluster)
-    except Exception:
-        return None
 
 
 def _validation_snapshot_limit() -> int:

@@ -26,6 +26,7 @@ from .transformation_utils import (
     resolve_env_checksum,
 )
 from .probe_index import ensure_record_bucket_preconditions_sync, is_record_probe
+from .record_runtime import get_record_mode
 from .execute_bash import execute_bash, write_bash_job
 
 PACK_DEEP_RESULTS = True
@@ -132,7 +133,7 @@ def run_transformation_dict(
         if not isinstance(env_dict, dict):
             env_dict = {}
 
-    if not is_record_probe(transformation, tf_dunder):
+    if get_record_mode() and not is_record_probe(transformation, tf_dunder):
         ensure_record_bucket_preconditions_sync(transformation, tf_dunder)
 
     inputs, output_name, output_celltype, output_subcelltype = (

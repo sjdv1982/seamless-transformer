@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from seamless import Checksum
+from seamless_transformer import record_utils
 from seamless_transformer.transformation_utils import resolve_env_checksum
 
 from seamless_config.cluster import get_cluster
@@ -51,15 +52,12 @@ def is_record_probe(
 
 
 def _resolve_remote_target(execution: str) -> str | None:
-    if execution != "remote":
-        return None
-    remote_target = get_remote()
-    if remote_target is not None:
-        return remote_target
-    cluster = get_selected_cluster()
-    if cluster is None:
-        return None
-    return check_remote_redundancy(cluster)
+    return record_utils._resolve_remote_target(
+        execution,
+        get_remote=get_remote,
+        get_selected_cluster=get_selected_cluster,
+        check_remote_redundancy=check_remote_redundancy,
+    )
 
 
 def _read_boot_id() -> str | None:
