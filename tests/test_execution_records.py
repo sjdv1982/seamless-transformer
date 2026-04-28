@@ -316,6 +316,90 @@ def test_record_probe_skips_execution_record_write(monkeypatch):
     assert fake_database_remote.execution_records == []
 
 
+def test_minimal_record_written_when_record_mode_false(monkeypatch):
+    cache = TransformationCache()
+    fake_database_remote = _FakeDatabaseRemote()
+    result_checksum = _make_checksum(15, "mixed")
+    tf_checksum = _make_checksum({"kind": "minimal-record-test"})
+
+    def _fake_run_transformation_dict(
+        transformation_dict,
+        tf_checksum_arg,
+        tf_dunder,
+        scratch,
+        require_value,
+    ):
+        del transformation_dict, tf_checksum_arg, tf_dunder, scratch, require_value
+        return result_checksum
+
+    async def _unexpected_probe_context(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("record: false should not probe for bucket preconditions")
+
+    monkeypatch.setattr(transformation_cache, "database_remote", fake_database_remote)
+    monkeypatch.setattr(transformation_cache, "buffer_remote", None)
+    monkeypatch.setattr(transformation_cache, "_buffer_writer", None)
+    monkeypatch.setattr(transformation_cache, "jobserver_remote", None)
+    monkeypatch.setattr(
+        transformation_cache.asyncio, "get_running_loop", lambda: _ImmediateLoop()
+    )
+    monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
+    monkeypatch.setattr(transformation_cache, "get_record", lambda: False)
+    monkeypatch.setattr(
+        transformation_cache,
+        "ensure_record_bucket_preconditions",
+        _unexpected_probe_context,
+    )
+    monkeypatch.setattr(transformation_cache, "_memory_peak_bytes", lambda: 111222)
+    monkeypatch.setattr(
+        transformation_cache, "start_gpu_memory_sampler", lambda pid=None: object()
+    )
+    monkeypatch.setattr(
+        transformation_cache, "stop_gpu_memory_sampler", lambda sampler: 333444
+    )
+    monkeypatch.setattr(
+        transformation_cache, "run_transformation_dict", _fake_run_transformation_dict
+    )
+
+    result = asyncio.run(
+        cache.run(
+            {
+                "__language__": "python",
+                "__output__": ("result", "mixed", None),
+            },
+            tf_checksum=tf_checksum,
+            tf_dunder={},
+            scratch=False,
+            require_value=False,
+            force_local=True,
+        )
+    )
+
+    assert result == result_checksum
+    assert len(fake_database_remote.execution_records) == 1
+    record = fake_database_remote.execution_records[0][2]
+    assert set(record) == {
+        "schema_version",
+        "tf_checksum",
+        "result_checksum",
+        "seamless_version",
+        "execution_mode",
+        "remote_target",
+        "wall_time_seconds",
+        "cpu_time_user_seconds",
+        "cpu_time_system_seconds",
+        "memory_peak_bytes",
+        "gpu_memory_peak_bytes",
+    }
+    assert record["schema_version"] == 1
+    assert record["tf_checksum"] == tf_checksum.hex()
+    assert record["result_checksum"] == result_checksum.hex()
+    assert record["execution_mode"] == "process"
+    assert record["remote_target"] is None
+    assert record["memory_peak_bytes"] == 111222
+    assert record["gpu_memory_peak_bytes"] == 333444
+
+
 def test_compiled_record_writes_compilation_context(monkeypatch):
     cache = TransformationCache()
     fake_database_remote = _FakeDatabaseRemote()

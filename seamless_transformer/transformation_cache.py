@@ -27,6 +27,7 @@ from .record_assembly import (
     _system_library_roots,
     build_compilation_context_checksum,
     build_execution_record,
+    build_minimal_execution_record,
     build_validation_snapshot_checksum,
     collect_compilation_runtime_metadata,
     collect_job_validation,
@@ -360,87 +361,104 @@ class TransformationCache:
             await database_remote.set_transformation_result(
                 tf_checksum, result_checksum
             )
-            if record_mode and not record_probe:
-                if probe_context is None and (
-                    execution != "remote" or remote_target != "jobserver"
-                ):
-                    probe_context = await ensure_record_bucket_preconditions(
-                        transformation_dict,
-                        tf_dunder,
-                        execution=execution,
-                    )
-                bucket_contract_violations = await load_bucket_contract_violations(
-                    probe_context
-                )
-                if compilation_context is None:
-                    compilation_context = await build_compilation_context_checksum(
-                        transformation_dict, tf_dunder
-                    )
-                if execution == "remote" and remote_target == "jobserver":
-                    job_validation = _normalize_job_validation_payload(
-                        job_validation_payload
-                    )
-                else:
-                    job_validation = await collect_job_validation(
-                        transformation_dict,
-                        tf_dunder,
-                        compilation_context=compilation_context,
-                        probe_context=probe_context,
-                    )
-                    job_validation = _normalize_job_validation_payload(job_validation)
-                job_contract_violations = job_validation["job_contract_violations"]
+            if not record_probe:
                 record_runtime_metadata = dict(runtime_metadata or {})
                 record_runtime_metadata.setdefault(
                     "memory_peak_bytes", _memory_peak_bytes()
-                )
-                record_runtime_metadata.setdefault(
-                    "process_create_time_epoch", _process_create_time_epoch()
                 )
                 if gpu_memory_peak_bytes is not None:
                     record_runtime_metadata.setdefault(
                         "gpu_memory_peak_bytes", gpu_memory_peak_bytes
                     )
-                if "compilation_time_seconds" not in record_runtime_metadata:
-                    record_runtime_metadata.update(
-                        await collect_compilation_runtime_metadata(
+                if record_mode:
+                    if probe_context is None and (
+                        execution != "remote" or remote_target != "jobserver"
+                    ):
+                        probe_context = await ensure_record_bucket_preconditions(
+                            transformation_dict,
+                            tf_dunder,
+                            execution=execution,
+                        )
+                    bucket_contract_violations = await load_bucket_contract_violations(
+                        probe_context
+                    )
+                    if compilation_context is None:
+                        compilation_context = await build_compilation_context_checksum(
                             transformation_dict, tf_dunder
                         )
+                    if execution == "remote" and remote_target == "jobserver":
+                        job_validation = _normalize_job_validation_payload(
+                            job_validation_payload
+                        )
+                    else:
+                        job_validation = await collect_job_validation(
+                            transformation_dict,
+                            tf_dunder,
+                            compilation_context=compilation_context,
+                            probe_context=probe_context,
+                        )
+                        job_validation = _normalize_job_validation_payload(
+                            job_validation
+                        )
+                    job_contract_violations = job_validation[
+                        "job_contract_violations"
+                    ]
+                    record_runtime_metadata.setdefault(
+                        "process_create_time_epoch", _process_create_time_epoch()
                     )
-                input_total_bytes, output_total_bytes = await compute_record_io_bytes(
-                    transformation_dict, result_checksum
-                )
-                validation_snapshot = await build_validation_snapshot_checksum(
-                    transformation_dict,
-                    tf_dunder,
-                    execution=execution,
-                    probe_context=probe_context,
-                    compilation_context=compilation_context,
-                    bucket_contract_violations=bucket_contract_violations,
-                    job_contract_violations=job_contract_violations,
-                    job_validation_diagnostics=job_validation["diagnostics"],
-                    runtime_metadata=record_runtime_metadata,
-                )
-                record = build_execution_record(
-                    transformation_dict,
-                    tf_checksum=tf_checksum,
-                    result_checksum=result_checksum,
-                    tf_dunder=tf_dunder,
-                    execution=execution,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    wall_time_seconds=wall_time_seconds,
-                    cpu_user_seconds=cpu_user_seconds,
-                    cpu_system_seconds=cpu_system_seconds,
-                    probe_context=probe_context,
-                    bucket_contract_violations=bucket_contract_violations,
-                    job_contract_violations=job_contract_violations,
-                    compilation_context=compilation_context,
-                    validation_snapshot=validation_snapshot,
-                    runtime_metadata=record_runtime_metadata,
-                )
-                record["execution_envelope"]["scratch"] = bool(scratch)
-                record["input_total_bytes"] = input_total_bytes
-                record["output_total_bytes"] = output_total_bytes
+                    if "compilation_time_seconds" not in record_runtime_metadata:
+                        record_runtime_metadata.update(
+                            await collect_compilation_runtime_metadata(
+                                transformation_dict, tf_dunder
+                            )
+                        )
+                    input_total_bytes, output_total_bytes = (
+                        await compute_record_io_bytes(
+                            transformation_dict, result_checksum
+                        )
+                    )
+                    validation_snapshot = await build_validation_snapshot_checksum(
+                        transformation_dict,
+                        tf_dunder,
+                        execution=execution,
+                        probe_context=probe_context,
+                        compilation_context=compilation_context,
+                        bucket_contract_violations=bucket_contract_violations,
+                        job_contract_violations=job_contract_violations,
+                        job_validation_diagnostics=job_validation["diagnostics"],
+                        runtime_metadata=record_runtime_metadata,
+                    )
+                    record = build_execution_record(
+                        transformation_dict,
+                        tf_checksum=tf_checksum,
+                        result_checksum=result_checksum,
+                        tf_dunder=tf_dunder,
+                        execution=execution,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        wall_time_seconds=wall_time_seconds,
+                        cpu_user_seconds=cpu_user_seconds,
+                        cpu_system_seconds=cpu_system_seconds,
+                        probe_context=probe_context,
+                        bucket_contract_violations=bucket_contract_violations,
+                        job_contract_violations=job_contract_violations,
+                        compilation_context=compilation_context,
+                        validation_snapshot=validation_snapshot,
+                        runtime_metadata=record_runtime_metadata,
+                    )
+                    record["execution_envelope"]["scratch"] = bool(scratch)
+                    record["input_total_bytes"] = input_total_bytes
+                    record["output_total_bytes"] = output_total_bytes
+                else:
+                    record = build_minimal_execution_record(
+                        tf_checksum=tf_checksum,
+                        result_checksum=result_checksum,
+                        execution=execution,
+                        wall_time_seconds=wall_time_seconds,
+                        cpu_user_seconds=cpu_user_seconds,
+                        cpu_system_seconds=cpu_system_seconds,
+                        runtime_metadata=record_runtime_metadata,
+                    )
                 await database_remote.set_execution_record(
                     tf_checksum, result_checksum, record
                 )
@@ -655,6 +673,7 @@ __all__ = [
     "recompute_from_transformation_checksum",
     "recompute_from_transformation_checksum_sync",
     "build_execution_record",
+    "build_minimal_execution_record",
     "build_validation_snapshot_checksum",
     "collect_compilation_runtime_metadata",
     "collect_job_validation",

@@ -1273,6 +1273,32 @@ def build_execution_record(
     }
 
 
+def build_minimal_execution_record(
+    *,
+    tf_checksum: Checksum,
+    result_checksum: Checksum,
+    execution: str,
+    wall_time_seconds: float,
+    cpu_user_seconds: float,
+    cpu_system_seconds: float,
+    runtime_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    runtime_metadata = dict(runtime_metadata or {})
+    return {
+        "schema_version": 1,
+        "tf_checksum": tf_checksum.hex(),
+        "result_checksum": result_checksum.hex(),
+        "seamless_version": _SEAMLESS_VERSION,
+        "execution_mode": execution,
+        "remote_target": _resolve_remote_target(execution),
+        "wall_time_seconds": wall_time_seconds,
+        "cpu_time_user_seconds": cpu_user_seconds,
+        "cpu_time_system_seconds": cpu_system_seconds,
+        "memory_peak_bytes": runtime_metadata.get("memory_peak_bytes"),
+        "gpu_memory_peak_bytes": runtime_metadata.get("gpu_memory_peak_bytes"),
+    }
+
+
 async def load_bucket_contract_violations(
     probe_context: dict[str, Any] | None,
 ) -> list[str]:
@@ -1368,6 +1394,7 @@ __all__ = [
     "_system_library_roots",
     "build_compilation_context_checksum",
     "build_execution_record",
+    "build_minimal_execution_record",
     "build_validation_snapshot_checksum",
     "collect_compilation_runtime_metadata",
     "collect_job_validation",
