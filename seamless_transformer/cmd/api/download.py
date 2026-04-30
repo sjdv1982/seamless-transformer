@@ -265,20 +265,11 @@ def _main(argv: list[str] | None = None) -> int:
 
     parser.add_argument(
         "files_directories_and_checksums",
-        nargs=argparse.REMAINDER,
+        nargs="+",
         help="files/directories/checksums that define the buffers to download",
     )
 
     args = parser.parse_args(argv)
-
-    if not len(args.files_directories_and_checksums):
-        print("At least one file, directory or checksum is required", file=sys.stderr)
-        parser.print_usage(file=sys.stderr)
-        return 1
-
-    for path in args.files_directories_and_checksums:
-        if path.startswith("-"):
-            err("Options must be specified before files/directories/checksums")
 
     set_header("seamless-download")
     verbosity = min(args.verbosity, 3)
