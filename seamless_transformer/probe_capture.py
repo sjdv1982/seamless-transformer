@@ -1424,7 +1424,11 @@ async def refresh_required_buckets(
     if not database_remote.has_read_server():
         raise RuntimeError("Bucket probing requires an active database read server")
 
-    plan = discover_probe_plan_sync(target_transformation_dict, target_tf_dunder)
+    plan = await asyncio.to_thread(
+        discover_probe_plan_sync,
+        target_transformation_dict,
+        target_tf_dunder,
+    )
     required_kinds = list(plan["required_kinds"])
     labels = dict(plan["labels"])
     live_tokens = dict(plan["live_tokens"])
@@ -1434,7 +1438,8 @@ async def refresh_required_buckets(
     refreshed_kinds: set[str] = set()
 
     async def _store_probe(bucket_kind: str, label: str, request: dict[str, Any]) -> None:
-        payload = capture_probe_payload_sync(
+        payload = await asyncio.to_thread(
+            capture_probe_payload_sync,
             target_transformation_dict,
             target_tf_dunder,
             request=request,

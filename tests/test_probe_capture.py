@@ -142,6 +142,63 @@ def test_refresh_required_buckets_updates_stale_base_and_composite(monkeypatch):
     assert [item["bucket_kind"] for item in result["reused"]] == ["node"]
 
 
+def test_refresh_required_buckets_runs_sync_probe_helpers_off_loop(monkeypatch):
+    plan = {
+        "required_kinds": ["node", "environment", "node_env"],
+        "labels": {
+            "node": "worker-1",
+            "environment": "python:/envs/seamless1",
+        },
+        "live_tokens": {
+            "node": {"hostname": "worker-1"},
+            "environment": {"sys_prefix": "/envs/seamless1"},
+        },
+        "hostname": "worker-1",
+        "cluster": None,
+        "remote_target": None,
+    }
+
+    def _assert_no_running_loop():
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        raise RuntimeError("sync probe helper ran inside the event loop")
+
+    def _fake_discover(_target_transformation, _target_tf_dunder):
+        _assert_no_running_loop()
+        return plan
+
+    def _fake_capture(_target_transformation, _target_tf_dunder, *, request):
+        _assert_no_running_loop()
+        return {
+            "bucket_kind": request["bucket_kind"],
+            "label": request["label"],
+            "node_checksum": request.get("node_checksum"),
+            "environment_checksum": request.get("environment_checksum"),
+        }
+
+    fake_db = _FakeDatabaseRemote({})
+    monkeypatch.setattr(probe_capture, "buffer_remote", _FakeBufferRemote())
+    monkeypatch.setattr(probe_capture, "database_remote", fake_db)
+    monkeypatch.setattr(probe_capture, "discover_probe_plan_sync", _fake_discover)
+    monkeypatch.setattr(probe_capture, "capture_probe_payload_sync", _fake_capture)
+    monkeypatch.setattr(probe_capture.Buffer, "write", _fake_buffer_write)
+
+    result = asyncio.run(
+        probe_capture.refresh_required_buckets(
+            {"__language__": "python", "__output__": ("result", "plain", None)},
+            {},
+        )
+    )
+
+    assert [item["bucket_kind"] for item in result["refreshed"]] == [
+        "node",
+        "environment",
+        "node_env",
+    ]
+
+
 def test_numpy_show_config_prefers_structured_mode(monkeypatch):
     fake_numpy = ModuleType("numpy")
 

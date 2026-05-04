@@ -69,7 +69,7 @@ def test_ensure_record_bucket_preconditions_process_success(monkeypatch):
         "__output__": ("result", "mixed", None),
         "__env__": env_checksum,
     }
-    monkeypatch.setattr(probe_index, "get_record", lambda: True)
+    monkeypatch.setattr(probe_index, "get_record_mode", lambda: True)
     monkeypatch.setattr(probe_index, "get_execution", lambda: "process")
     plan = probe_index.resolve_probe_plan(transformation_dict, {})
     monkeypatch.setattr(
@@ -157,7 +157,7 @@ def test_ensure_record_bucket_preconditions_process_missing_bucket(monkeypatch):
         "__language__": "python",
         "__output__": ("result", "mixed", None),
     }
-    monkeypatch.setattr(probe_index, "get_record", lambda: True)
+    monkeypatch.setattr(probe_index, "get_record_mode", lambda: True)
     monkeypatch.setattr(probe_index, "get_execution", lambda: "process")
     plan = probe_index.resolve_probe_plan(transformation_dict, {})
     probes = _make_process_probes(plan)
@@ -175,7 +175,7 @@ def test_ensure_record_bucket_preconditions_process_stale_bucket(monkeypatch):
         "__language__": "python",
         "__output__": ("result", "mixed", None),
     }
-    monkeypatch.setattr(probe_index, "get_record", lambda: True)
+    monkeypatch.setattr(probe_index, "get_record_mode", lambda: True)
     monkeypatch.setattr(probe_index, "get_execution", lambda: "process")
     plan = probe_index.resolve_probe_plan(transformation_dict, {})
     probes = _make_process_probes(plan)
@@ -192,7 +192,26 @@ def test_ensure_record_bucket_preconditions_process_stale_bucket(monkeypatch):
         probe_index.ensure_record_bucket_preconditions_sync(transformation_dict, {})
 
 
+def test_ensure_record_bucket_preconditions_uses_runtime_record_mode(monkeypatch):
+    class _NoReadDatabaseRemote:
+        def has_read_server(self):
+            return False
+
+    monkeypatch.setattr(probe_index, "get_record_mode", lambda: True)
+    monkeypatch.setattr(probe_index, "database_remote", _NoReadDatabaseRemote())
+
+    with pytest.raises(
+        probe_index.RecordBucketError,
+        match="Record mode requires an active database read server",
+    ):
+        probe_index.ensure_record_bucket_preconditions_sync(
+            {"__language__": "python", "__output__": ("result", "mixed", None)},
+            {},
+        )
+
+
 def test_run_transformation_dict_checks_bucket_preconditions(monkeypatch):
+    monkeypatch.setattr(run_module, "get_record_mode", lambda: True)
     monkeypatch.setattr(
         run_module,
         "ensure_record_bucket_preconditions_sync",
@@ -212,6 +231,7 @@ def test_run_transformation_dict_checks_bucket_preconditions(monkeypatch):
 def test_run_transformation_dict_skips_bucket_preconditions_for_record_probe(
     monkeypatch,
 ):
+    monkeypatch.setattr(run_module, "get_record_mode", lambda: True)
     monkeypatch.setattr(
         run_module,
         "ensure_record_bucket_preconditions_sync",
@@ -225,7 +245,6 @@ def test_run_transformation_dict_skips_bucket_preconditions_for_record_probe(
         lambda transformation: (
             "result = 7",
             {"PINS": {}, "OUTPUTPIN": "mixed", "FILESYSTEM": {}},
-            {},
             {},
         ),
     )
