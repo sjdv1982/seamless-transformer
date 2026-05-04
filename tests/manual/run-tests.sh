@@ -1,4 +1,6 @@
-for i in $(ls *.py | grep -v \.jupyter.py); do
+set -u -e
+
+for i in $(ls *.py | grep -v \.jupyter.py | grep -v '^exc-spawn.py$' | grep -v '^exc.py$'); do
     echo $i
     python $i
     echo DONE $i
