@@ -1,11 +1,12 @@
 - project: seamless-test
 - execution: remote
 - remote: daskserver
-# for pure-dask test:
-# - persistent: false
 # seamless.profile.yaml: define a cluster, e.g.
 # - cluster: local
 
+- stage pure-dask:
+    - persistent: false
+
 - stage fingertip:
-          - execution: process
-          - persistent: false
+    - execution: process
+    - persistent: false

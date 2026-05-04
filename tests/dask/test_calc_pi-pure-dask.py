@@ -3,7 +3,7 @@ import time
 
 import seamless.config
 
-seamless.config.init()
+seamless.config.set_stage("pure-dask")
 
 from distributed import as_completed, get_client
 

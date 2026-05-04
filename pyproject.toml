@@ -30,7 +30,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-compiled = ["cffi", "numpy", "seamless-signature"]
+compiled = ["cffi", "setuptools", "seamless-signature"]
 
 [project.urls]
 Homepage = "https://github.com/sjdv1982/seamless"
