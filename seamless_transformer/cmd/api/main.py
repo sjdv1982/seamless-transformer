@@ -527,7 +527,9 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         else:
             seamless.config.set_stage(stage, workdir=os.getcwd())
 
-    if len(command) == 0:
+    if len(command) == 0 and probe_mode:
+        command = ["true"]
+    elif len(command) == 0:
         parser.print_usage()  # TODO: add to usage message
         return 1
 
@@ -1131,7 +1133,7 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         try:
             summary = refresh_required_buckets_sync(
                 transformation_dict,
-                tf_dunder=tf_dunder,
+                target_tf_dunder=tf_dunder,
                 force=bool(args.force),
                 msg_func=msg,
             )

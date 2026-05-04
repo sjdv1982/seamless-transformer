@@ -64,6 +64,30 @@ def test_download_manual_destination_bypasses_seamless_config(monkeypatch, tmp_p
     assert captured["kwargs"]["existing_entry_policy"] == "skip"
 
 
+def test_download_output_option_after_checksum(monkeypatch, tmp_path):
+    source_directory = tmp_path / "buffers"
+    source_directory.mkdir()
+    checksum = _write_bufferdir_file(source_directory, b"payload")
+    target = tmp_path / "result.txt"
+
+    monkeypatch.setenv("SEAMLESS_MAX_DOWNLOAD_SIZE", "1 GB")
+
+    assert (
+        download_api._main(
+            [
+                "--destination",
+                str(source_directory),
+                checksum,
+                "--output",
+                str(target),
+                "--yes",
+            ]
+        )
+        is None
+    )
+    assert target.read_bytes() == b"payload"
+
+
 @pytest.mark.parametrize("flag", ["--project", "--stage"])
 def test_download_manual_destination_rejects_config_flags(monkeypatch, tmp_path, flag):
     source_directory = tmp_path / "buffers"

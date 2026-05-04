@@ -21,10 +21,10 @@ from seamless_config.select import (
     check_remote_redundancy,
     get_execution,
     get_queue,
-    get_record,
     get_remote,
     get_selected_cluster,
 )
+from seamless_transformer.record_runtime import get_record_mode
 
 try:
     from seamless_remote import database_remote
@@ -218,7 +218,7 @@ async def ensure_record_bucket_preconditions(
     execution: str | None = None,
     hostname: str | None = None,
 ) -> dict[str, Any] | None:
-    if not get_record():
+    if not get_record_mode():
         return None
     if database_remote is None or not database_remote.has_read_server():
         raise RecordBucketError("Record mode requires an active database read server")
