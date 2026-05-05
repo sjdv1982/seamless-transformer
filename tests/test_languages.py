@@ -21,7 +21,7 @@ def test_define_invalid_mode():
             "bad-mode",
             {
                 "compiler": "cc",
-                "mode": "package",
+                "mode": "nonsense",
                 "options": [],
                 "debug_options": [],
                 "profile_options": [],

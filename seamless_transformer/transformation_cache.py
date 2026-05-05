@@ -147,6 +147,7 @@ class TransformationCache:
         scratch: bool,
         require_value: bool,
         force_local: bool = False,
+        store_execution_record: bool = True,
     ) -> Checksum:
         """Run a transformation and return its result checksum.
 
@@ -363,7 +364,7 @@ class TransformationCache:
                 tf_checksum, result_checksum
             )
             record_probe = is_record_probe(transformation_dict, tf_dunder)
-            if not record_probe:
+            if store_execution_record and not record_probe:
                 record_runtime_metadata = dict(runtime_metadata or {})
                 record_runtime_metadata.setdefault(
                     "memory_peak_bytes", _memory_peak_bytes()
@@ -486,6 +487,7 @@ class TransformationCache:
         scratch: bool,
         require_value: bool,
         force_local: bool = False,
+        store_execution_record: bool = True,
     ) -> Checksum:
         tf_checksum = Checksum(tf_checksum)
         self._remember_transformation_dunder(tf_checksum, tf_dunder)
@@ -519,6 +521,7 @@ class TransformationCache:
                     scratch=scratch,
                     require_value=require_value,
                     force_local=force_local,
+                    store_execution_record=store_execution_record,
                 ),
                 loop,
             )
@@ -535,6 +538,7 @@ class TransformationCache:
                     scratch=scratch,
                     require_value=require_value,
                     force_local=force_local,
+                    store_execution_record=store_execution_record,
                 )
             )
         finally:
@@ -573,6 +577,7 @@ async def run(
     scratch: bool,
     require_value: bool,
     force_local: bool = False,
+    store_execution_record: bool = True,
 ) -> Checksum:
     return await get_transformation_cache().run(
         transformation_dict,
@@ -581,6 +586,7 @@ async def run(
         scratch=scratch,
         require_value=require_value,
         force_local=force_local,
+        store_execution_record=store_execution_record,
     )
 
 
@@ -592,6 +598,7 @@ def run_sync(
     scratch: bool,
     require_value: bool,
     force_local: bool = False,
+    store_execution_record: bool = True,
 ) -> Checksum:
     return get_transformation_cache().run_sync(
         transformation_dict,
@@ -600,6 +607,7 @@ def run_sync(
         scratch=scratch,
         require_value=require_value,
         force_local=force_local,
+        store_execution_record=store_execution_record,
     )
 
 
@@ -625,6 +633,7 @@ async def recompute_from_transformation_checksum(
         scratch=scratch,
         require_value=require_value,
         force_local=True,
+        store_execution_record=False,
     )
 
 
@@ -650,6 +659,7 @@ def recompute_from_transformation_checksum_sync(
         scratch=scratch,
         require_value=require_value,
         force_local=True,
+        store_execution_record=False,
     )
 
 
