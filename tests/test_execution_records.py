@@ -400,6 +400,64 @@ def test_minimal_record_written_when_record_mode_false(monkeypatch):
     assert record["gpu_memory_peak_bytes"] == 333444
 
 
+def test_execution_record_write_can_be_skipped(monkeypatch):
+    cache = TransformationCache()
+    fake_database_remote = _FakeDatabaseRemote()
+    result_checksum = _make_checksum(15, "mixed")
+    tf_checksum = _make_checksum({"kind": "minimal-record-test"})
+
+    def _fake_run_transformation_dict(
+        transformation_dict,
+        tf_checksum_arg,
+        tf_dunder,
+        scratch,
+        require_value,
+    ):
+        del transformation_dict, tf_checksum_arg, tf_dunder, scratch, require_value
+        return result_checksum
+
+    monkeypatch.setattr(transformation_cache, "database_remote", fake_database_remote)
+    monkeypatch.setattr(transformation_cache, "buffer_remote", None)
+    monkeypatch.setattr(transformation_cache, "_buffer_writer", None)
+    monkeypatch.setattr(transformation_cache, "jobserver_remote", None)
+    monkeypatch.setattr(
+        transformation_cache.asyncio, "get_running_loop", lambda: _ImmediateLoop()
+    )
+    monkeypatch.setattr(transformation_cache, "get_execution", lambda: "process")
+    monkeypatch.setattr(transformation_cache, "get_record_mode", lambda: False)
+    monkeypatch.setattr(transformation_cache, "_memory_peak_bytes", lambda: 111222)
+    monkeypatch.setattr(
+        transformation_cache, "start_gpu_memory_sampler", lambda pid=None: object()
+    )
+    monkeypatch.setattr(
+        transformation_cache, "stop_gpu_memory_sampler", lambda sampler: 333444
+    )
+    monkeypatch.setattr(
+        transformation_cache, "run_transformation_dict", _fake_run_transformation_dict
+    )
+
+    result = asyncio.run(
+        cache.run(
+            {
+                "__language__": "python",
+                "__output__": ("result", "mixed", None),
+            },
+            tf_checksum=tf_checksum,
+            tf_dunder={},
+            scratch=True,
+            require_value=False,
+            force_local=True,
+            store_execution_record=False,
+        )
+    )
+
+    assert result == result_checksum
+    assert fake_database_remote.transformation_results == [
+        (tf_checksum.hex(), result_checksum.hex())
+    ]
+    assert fake_database_remote.execution_records == []
+
+
 def test_compiled_record_writes_compilation_context(monkeypatch):
     cache = TransformationCache()
     fake_database_remote = _FakeDatabaseRemote()
