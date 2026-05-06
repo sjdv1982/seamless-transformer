@@ -64,3 +64,21 @@ def test_main_seamless_cache_env_bypasses_config_requirement(monkeypatch):
 
     assert cmd_main._main() == 1
     assert called is False
+
+
+def test_main_remote_clients_env_bypasses_config_requirement(monkeypatch):
+    called = False
+
+    def fake_require_config_file(workdir):
+        nonlocal called
+        called = True
+        raise AssertionError(
+            "config detection should be skipped when remote clients are inherited"
+        )
+
+    monkeypatch.setenv("SEAMLESS_REMOTE_CLIENTS", '{"database": [], "buffer": []}')
+    monkeypatch.setattr(cmd_main, "_require_config_file", fake_require_config_file)
+    monkeypatch.setattr(sys, "argv", ["seamless-run"])
+
+    assert cmd_main._main() == 1
+    assert called is False

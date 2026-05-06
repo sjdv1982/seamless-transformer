@@ -138,6 +138,10 @@ def _require_config_file(workdir: str) -> None:
     )
 
 
+def _has_remote_clients_env() -> bool:
+    return os.environ.get("SEAMLESS_REMOTE_CLIENTS") is not None
+
+
 def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> int:
     if probe_mode is None:
         prog = pathlib.Path(sys.argv[0]).name
@@ -501,8 +505,9 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
 
     local_mode = args.local
     cache_mode = get_seamless_cache() is not None
+    remote_clients_env = _has_remote_clients_env()
 
-    if not cache_mode:
+    if not cache_mode and not remote_clients_env:
         try:
             _require_config_file(os.getcwd())
         except ValueError as exc:
