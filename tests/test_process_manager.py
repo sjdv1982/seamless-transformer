@@ -13,6 +13,10 @@ PROJECT_ROOT = os.path.dirname(TESTS_DIR)
 import pytest
 
 from seamless_transformer.process import ChildChannel, MemoryPayload, ProcessManager
+from seamless_transformer.worker import (
+    _owner_task_cancelled,
+    _worker_manager_executor_workers,
+)
 
 
 def run(coro):
@@ -27,6 +31,17 @@ def make_manager(data_store: Dict[str, bytes]) -> ProcessManager:
     return ProcessManager(
         provider,
     )
+
+
+def test_worker_manager_executor_has_room_for_pipe_readers() -> None:
+    assert _worker_manager_executor_workers(1) == 32
+    assert _worker_manager_executor_workers(40) == 88
+
+
+def test_processing_owner_task_is_alive_without_direct_waiter() -> None:
+    assert not _owner_task_cancelled("processing", False)
+    assert _owner_task_cancelled("released", True)
+    assert _owner_task_cancelled(None, True)
 
 
 def test_bidirectional_requests_and_shared_memory() -> None:

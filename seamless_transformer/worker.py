@@ -245,6 +245,8 @@ def _owner_task_cancelled(state: str | None, who_wants: bool | None) -> bool:
         return True
     if state in ("released", "forgotten", "erred", "cancelled"):
         return True
+    if state == "processing":
+        return False
     if who_wants is False:
         return True
     return False
@@ -370,6 +372,10 @@ class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
         t.daemon = True
         t.start()
         self._threads.add(t)
+
+
+def _worker_manager_executor_workers(worker_count: int) -> int:
+    return max(32, worker_count * 2 + 8)
 
 
 _DASK_DELEGATE_MAX_WORKERS = min(64, (os.cpu_count() or 1) * 4)
@@ -741,7 +747,10 @@ class _WorkerManager:
             target=self._loop_runner, args=(self.loop,), daemon=True
         )
         self._thread.start()
-        self._executor = _DaemonThreadPoolExecutor(thread_name_prefix="worker-manager")
+        executor_workers = _worker_manager_executor_workers(worker_count)
+        self._executor = _DaemonThreadPoolExecutor(
+            max_workers=executor_workers, thread_name_prefix="worker-manager"
+        )
         self.loop.call_soon_threadsafe(self.loop.set_default_executor, self._executor)
         self._manager = ProcessManager(
             _memory_provider,
