@@ -14,7 +14,7 @@ def get_file_mapping(
     argtypes: dict[str, Any],
     mapping_mode: str,
     working_directory: str,
-) -> tuple[dict[str, str], dict[str, str]]:
+) -> dict[str, Any]:
     """Map files inside the transformation to files on disk.
 
     Arguments:
