@@ -35,6 +35,7 @@ class Endpoint:
         self._name = name or f"endpoint-{id(self):x}"
         self._pending: Dict[int, asyncio.Future[Any]] = {}
         self._handlers: Dict[str, Callable[[Any], Any]] = {}
+        self._event_handlers: Dict[str, Callable[[Any], Any]] = {}
         self._request_counter = itertools.count(1)
         self._send_lock = asyncio.Lock()
         self._closed = False
@@ -47,6 +48,17 @@ class Endpoint:
 
     def remove_request_handler(self, op: str) -> None:
         self._handlers.pop(op, None)
+
+    def add_event_handler(self, op: str, handler: Callable[[Any], Any]) -> None:
+        self._event_handlers[op] = handler
+
+    def remove_event_handler(self, op: str) -> None:
+        self._event_handlers.pop(op, None)
+
+    async def notify(self, op: str, payload: Any = None) -> None:
+        if self._closed:
+            raise ConnectionClosed(f"{self._name} is closed")
+        await self._send({"kind": "event", "op": op, "payload": payload})
 
     async def request(
         self, op: str, payload: Any = None, *, timeout: Optional[float] = None
@@ -123,6 +135,15 @@ class Endpoint:
             else:
                 future.set_exception(RuntimeError(message.get("error", "error")))
             return
+        if kind == "event":
+            op = message.get("op")
+            handler = self._event_handlers.get(op)
+            if handler is None:
+                return
+            task = self._loop.create_task(self._process_event(op, message.get("payload")))
+            self._request_tasks.add(task)
+            task.add_done_callback(self._request_tasks.discard)
+            return
         if kind != "request":
             self._logger.warning("%s received unknown message: %s", self._name, message)
             return
@@ -135,6 +156,15 @@ class Endpoint:
         task = self._loop.create_task(self._process_request(request_id, op, payload))
         self._request_tasks.add(task)
         task.add_done_callback(self._request_tasks.discard)
+
+    async def _process_event(self, op: str, payload: Any) -> None:
+        handler = self._event_handlers.get(op)
+        if not handler:
+            return
+        try:
+            await run_handler(handler, payload)
+        except Exception:  # pragma: no cover - best effort notification path
+            self._logger.debug("Event handler %s on %s failed", op, self._name, exc_info=True)
 
     async def _process_request(self, request_id: Any, op: str, payload: Any) -> None:
         handler = self._handlers.get(op)
@@ -249,6 +279,12 @@ class ChildChannel:
 
     def add_request_handler(self, op: str, handler: Callable[[Any], Any]) -> None:
         self._endpoint.add_request_handler(op, handler)
+
+    def add_event_handler(self, op: str, handler: Callable[[Any], Any]) -> None:
+        self._endpoint.add_event_handler(op, handler)
+
+    async def notify(self, op: str, payload: Any = None) -> None:
+        await self._endpoint.notify(op, payload)
 
     async def request(
         self, op: str, payload: Any = None, *, timeout: Optional[float] = None

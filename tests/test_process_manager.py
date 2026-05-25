@@ -48,6 +48,10 @@ def test_bidirectional_requests_and_shared_memory() -> None:
     run(_test_bidirectional_requests_and_shared_memory())
 
 
+def test_child_notifications_reach_parent_without_response() -> None:
+    run(_test_child_notifications_reach_parent_without_response())
+
+
 async def _test_bidirectional_requests_and_shared_memory() -> None:
     data = {"payload": (b"abc123" * 16)}
     manager = make_manager(data)
@@ -65,6 +69,29 @@ async def _test_bidirectional_requests_and_shared_memory() -> None:
         assert result == 42
         shared = await worker.request("shared-len", {"key": "payload"})
         assert shared == len(data["payload"])
+    finally:
+        await manager.aclose()
+
+
+async def _test_child_notifications_reach_parent_without_response() -> None:
+    data: Dict[str, bytes] = {}
+    manager = make_manager(data)
+    seen: List[Any] = []
+    event = asyncio.Event()
+    try:
+
+        async def on_note(_handle, payload):
+            seen.append(payload)
+            event.set()
+
+        manager.add_parent_event_handler("note", on_note)
+        worker = await manager.start_worker(
+            name="events", initializer=event_child_initializer
+        )
+        await worker.wait_until_ready()
+        assert await worker.request("emit", {"value": 17}) == "sent"
+        await asyncio.wait_for(event.wait(), timeout=2.0)
+        assert seen == [{"value": 17}]
     finally:
         await manager.aclose()
 
@@ -142,6 +169,14 @@ async def shared_child_initializer(channel: ChildChannel) -> None:
         return size
 
     channel.add_request_handler("use-memory", handle_use_memory)
+
+
+async def event_child_initializer(channel: ChildChannel) -> None:
+    async def handle_emit(payload: Dict[str, Any]) -> str:
+        await channel.notify("note", payload)
+        return "sent"
+
+    channel.add_request_handler("emit", handle_emit)
 
 
 async def crashing_child_initializer(channel: ChildChannel) -> None:

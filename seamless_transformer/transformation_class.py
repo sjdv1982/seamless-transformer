@@ -181,6 +181,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._transformation_checksum: Optional[Checksum] = None
         self._constructed = False
         self._scratch = False
+        self._streaming = False
 
         self._evaluator_sync = evaluator_sync
         self._evaluator_async = evaluator_async
@@ -210,6 +211,14 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     @scratch.setter
     def scratch(self, value: bool) -> None:
         self._scratch = value
+
+    @property
+    def streaming(self) -> bool:
+        return self._streaming
+
+    @streaming.setter
+    def streaming(self, value: bool) -> None:
+        self._streaming = bool(value)
 
     @property
     def allow_input_fingertip(self) -> bool:

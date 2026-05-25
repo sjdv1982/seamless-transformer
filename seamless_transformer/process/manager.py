@@ -105,6 +105,7 @@ class ProcessManager:
         self._logger = logging.getLogger(__name__)
         self._closing = False
         self._parent_handlers: Dict[str, Callable[[ProcessHandle, Any], Any]] = {}
+        self._parent_event_handlers: Dict[str, Callable[[ProcessHandle, Any], Any]] = {}
         self.add_parent_handler("__worker_ready__", self._handle_worker_ready)
         self.add_parent_handler("shm_incref", self._handle_incref)
         self.add_parent_handler("shm_decref", self._handle_decref)
@@ -139,6 +140,14 @@ class ProcessManager:
         for handle in self._handles.values():
             if handle.endpoint:
                 self._bind_parent_handler(handle, op, handler)
+
+    def add_parent_event_handler(
+        self, op: str, handler: Callable[[ProcessHandle, Any], Any]
+    ) -> None:
+        self._parent_event_handlers[op] = handler
+        for handle in self._handles.values():
+            if handle.endpoint:
+                self._bind_parent_event_handler(handle, op, handler)
 
     async def aclose(self) -> None:
         if self._closing:
@@ -185,6 +194,8 @@ class ProcessManager:
         endpoint = Endpoint(parent_conn, loop=self.loop, name=f"parent[{handle.name}]")
         for op, handler in self._parent_handlers.items():
             self._bind_parent_handler(handle, op, handler, endpoint)
+        for op, handler in self._parent_event_handlers.items():
+            self._bind_parent_event_handler(handle, op, handler, endpoint)
         handle.assign_runtime(process, endpoint)
         handle.closing = False
         handle.restarting = False
@@ -207,6 +218,22 @@ class ProcessManager:
             return await run_handler(_handler, _handle, payload)
 
         actual_endpoint.add_request_handler(op, wrapper)
+
+    def _bind_parent_event_handler(
+        self,
+        handle: ProcessHandle,
+        op: str,
+        handler: Callable[[ProcessHandle, Any], Any],
+        endpoint: Optional[Endpoint] = None,
+    ) -> None:
+        actual_endpoint = endpoint or handle.endpoint
+        if not actual_endpoint:
+            return
+
+        async def wrapper(payload: Any, *, _handle=handle, _handler=handler) -> Any:
+            return await run_handler(_handler, _handle, payload)
+
+        actual_endpoint.add_event_handler(op, wrapper)
 
     async def _watch_endpoint(self, handle: ProcessHandle) -> None:
         endpoint = handle.endpoint

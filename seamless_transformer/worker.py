@@ -15,6 +15,7 @@ Would be a seamless-core (buffer cache) feature.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import os
 import threading
@@ -42,6 +43,12 @@ from .process import ChildChannel, ProcessManager, ConnectionClosed
 from .process.manager import ProcessError
 from .remote_job import parse_remote_job_written
 from .run import run_transformation_dict
+from .stream_capture import (
+    DEFAULT_MAX_PAYLOAD_BYTES,
+    DEFAULT_MIN_INTERVAL_SECONDS,
+    _StreamingTap,
+)
+from .stream_tqdm import install_tqdm_patch
 
 _DASK_AVAILABLE_ENV = "SEAMLESS_DASK_AVAILABLE"
 _ALLOW_REMOTE_CLIENTS_ENV = "SEAMLESS_ALLOW_REMOTE_CLIENTS_IN_WORKER"
@@ -58,6 +65,12 @@ _quiet = False
 _DEBUG_SHUTDOWN = bool(os.environ.get("SEAMLESS_DEBUG_SHUTDOWN"))
 _DELEGATION_REFUSED = "_DELEGATION_REFUSED"
 _LOCAL_BUFFERS: Dict[str, bytes] = {}
+_STREAM_THROTTLE = {
+    "max_payload": DEFAULT_MAX_PAYLOAD_BYTES,
+    "min_interval": DEFAULT_MIN_INTERVAL_SECONDS,
+}
+_ACTIVE_STREAM_TAPS: "weakref.WeakSet[_StreamingTap]" = weakref.WeakSet()
+_ACTIVE_STREAM_TAPS_LOCK = threading.RLock()
 
 
 # Throttle how many concurrent tasks a single worker can handle.
@@ -90,6 +103,43 @@ _bump_nofile_limit()
 def _memory_provider(_key: str) -> None:
     # Shared memory registry is unused for the worker pool.
     return None
+
+
+def get_stream_throttle() -> dict[str, float | int]:
+    return dict(_STREAM_THROTTLE)
+
+
+def update_stream_throttle(params: Dict[str, Any]) -> None:
+    max_payload = params.get("max_payload", params.get("max_payload_bytes"))
+    min_interval = params.get("min_interval", params.get("min_interval_seconds"))
+    if max_payload is None:
+        max_payload = _STREAM_THROTTLE["max_payload"]
+    if min_interval is None:
+        min_interval = _STREAM_THROTTLE["min_interval"]
+    try:
+        max_payload = max(1, min(10240, int(max_payload)))
+    except Exception:
+        max_payload = _STREAM_THROTTLE["max_payload"]
+    try:
+        min_interval = max(0.05, float(min_interval))
+    except Exception:
+        min_interval = _STREAM_THROTTLE["min_interval"]
+    _STREAM_THROTTLE["max_payload"] = max_payload
+    _STREAM_THROTTLE["min_interval"] = min_interval
+    with _ACTIVE_STREAM_TAPS_LOCK:
+        taps = list(_ACTIVE_STREAM_TAPS)
+    for tap in taps:
+        try:
+            tap.update_throttle(max_payload=max_payload, min_interval=min_interval)
+        except Exception:
+            pass
+
+
+def _ignore_stream_notify_result(future: _cf.Future) -> None:
+    try:
+        future.exception()
+    except Exception:
+        pass
 
 
 @dataclass
@@ -558,6 +608,12 @@ def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
 def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
     from . import SeamlessStreamTransformationError
 
+    streaming = bool(payload.get("streaming", False))
+    owner_dask_key = _normalize_owner_dask_key(payload.get("owner_dask_key"))
+    stream_throttle = payload.get("stream_throttle")
+    if isinstance(stream_throttle, dict):
+        update_stream_throttle(stream_throttle)
+
     stdout_buffer = io.BytesIO()
     stderr_buffer = io.BytesIO()
     stdout_wrapper = io.TextIOWrapper(
@@ -566,10 +622,52 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
     stderr_wrapper = io.TextIOWrapper(
         stderr_buffer, encoding="utf-8", write_through=True
     )
+    active_taps: list[_StreamingTap] = []
+    tqdm_context = contextlib.nullcontext()
+    if streaming and owner_dask_key:
+
+        def notify_parent(message: Dict[str, Any]) -> None:
+            try:
+                channel, loop = _require_child_channel()
+            except Exception:
+                return
+            message = dict(message)
+            message["owner_dask_key"] = owner_dask_key
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    channel.notify("stream_chunk", message), loop
+                )
+                future.add_done_callback(_ignore_stream_notify_result)
+            except Exception:
+                pass
+
+        throttle = get_stream_throttle()
+        stdout_stream = _StreamingTap(
+            stream_name="stdout",
+            sink=stdout_wrapper,
+            notifier=notify_parent,
+            max_payload=int(throttle["max_payload"]),
+            min_interval=float(throttle["min_interval"]),
+        )
+        stderr_stream = _StreamingTap(
+            stream_name="stderr",
+            sink=stderr_wrapper,
+            notifier=notify_parent,
+            max_payload=int(throttle["max_payload"]),
+            min_interval=float(throttle["min_interval"]),
+        )
+        active_taps = [stdout_stream, stderr_stream]
+        with _ACTIVE_STREAM_TAPS_LOCK:
+            for tap in active_taps:
+                _ACTIVE_STREAM_TAPS.add(tap)
+        tqdm_context = install_tqdm_patch(notify_parent)
+    else:
+        stdout_stream = stdout_wrapper
+        stderr_stream = stderr_wrapper
     previous_stdout = sys.stdout
     previous_stderr = sys.stderr
-    sys.stdout = stdout_wrapper
-    sys.stderr = stderr_wrapper
+    sys.stdout = stdout_stream
+    sys.stderr = stderr_stream
     try:
 
         def _format_request_exc(exc: BaseException) -> str:
@@ -577,14 +675,24 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
                 return str(exc)
             return _format_pruned_exec_traceback()
 
-        result = _execute_transformation_impl(payload, _format_request_exc)
+        with tqdm_context:
+            result = _execute_transformation_impl(payload, _format_request_exc)
     finally:
         try:
-            stdout_wrapper.flush()
-            stderr_wrapper.flush()
+            stdout_stream.flush()
+            stderr_stream.flush()
         finally:
             sys.stdout = previous_stdout
             sys.stderr = previous_stderr
+            for tap in active_taps:
+                try:
+                    tap.close()
+                except Exception:
+                    pass
+            if active_taps:
+                with _ACTIVE_STREAM_TAPS_LOCK:
+                    for tap in active_taps:
+                        _ACTIVE_STREAM_TAPS.discard(tap)
             try:
                 stdout_wrapper.detach()
             except Exception:
@@ -726,6 +834,7 @@ async def _child_initializer(channel: ChildChannel) -> None:
 
     channel.add_request_handler("execute_transformation", handle_execute)
     channel.add_request_handler("quiet", handle_quiet)
+    channel.add_event_handler("stream_throttle", update_stream_throttle)
     if not channel.ready_notified:
         try:
             await channel.notify_ready({"role": "worker"})
@@ -769,6 +878,7 @@ class _WorkerManager:
         self._delegate_cleanup_task: asyncio.Task | None = None
         self._delegate_owner_cancelled: Dict[str, float] = {}
         self._delegate_owner_by_handle: Dict[str, str] = {}
+        self._stream_handlers: Dict[str, Callable[[Dict[str, Any]], None]] = {}
 
         init_future = asyncio.run_coroutine_threadsafe(
             self._async_init(worker_count), self.loop
@@ -803,6 +913,7 @@ class _WorkerManager:
         self._manager.add_parent_handler(
             "call_transformer_proxy", self._handle_call_transformer_proxy
         )
+        self._manager.add_parent_event_handler("stream_chunk", self._handle_stream_chunk)
         for idx in range(worker_count):
             handle = await self._manager.start_worker(name=f"worker-{idx + 1}")
             self._handles.append(handle)
@@ -810,6 +921,17 @@ class _WorkerManager:
             self._limits[handle.name] = asyncio.Semaphore(TRANSFORMATION_THROTTLE)
         await asyncio.gather(*(h.wait_until_ready() for h in self._handles))
         self._delegate_cleanup_task = asyncio.create_task(self._delegate_cleanup_loop())
+
+    def _handle_stream_chunk(self, _handle, payload: Dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        owner_key = _normalize_owner_dask_key(payload.get("owner_dask_key"))
+        if owner_key is None:
+            return
+        handler = self._stream_handlers.get(owner_key)
+        if handler is None:
+            return
+        handler(payload)
 
     def close(self, *, wait: bool = False) -> None:
         if _DEBUG_SHUTDOWN:
@@ -904,91 +1026,138 @@ class _WorkerManager:
         enforce_limit: bool = True,
         owner_dask_key: str | None = None,
         owner_dask_priority: int | None = None,
+        streaming: bool = False,
+        dask_worker: Any = None,
     ) -> Checksum | str:
         await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
+        stream_topic = (
+            f"seamless-stream-{owner_dask_key}"
+            if streaming and owner_dask_key
+            else None
+        )
+
+        def _forward_stream_chunk(message: Dict[str, Any]) -> None:
+            if stream_topic is None:
+                return
+            chunk = dict(message)
+            chunk.pop("owner_dask_key", None)
+            throttle = get_stream_throttle()
+            text = chunk.get("text")
+            if isinstance(text, str):
+                encoded = text.encode("utf-8", errors="replace")
+                max_payload = int(throttle["max_payload"])
+                if len(encoded) > max_payload:
+                    dropped = len(encoded) - max_payload
+                    encoded = encoded[-max_payload:]
+                    chunk["text"] = encoded.decode("utf-8", errors="replace")
+                    chunk["truncated_head_bytes"] = (
+                        int(chunk.get("truncated_head_bytes") or 0) + dropped
+                    )
+            try:
+                if dask_worker is not None:
+                    dask_worker.log_event(stream_topic, chunk)
+                    return
+            except Exception:
+                pass
+            try:
+                import distributed
+
+                distributed.get_worker().log_event(stream_topic, chunk)
+            except Exception:
+                pass
+
+        if stream_topic is not None:
+            self._stream_handlers[owner_dask_key] = _forward_stream_chunk
         retry_attempts = 0
         max_retries = max(1, len(self._handles) * 3)
-        while True:
-            handles_sorted = sorted(
-                self._handles,
-                key=lambda h: (self._load.get(h.name, 0), h.name),
-            )
-            handle = None
-            limit: asyncio.Semaphore | None = None
-            acquired = False
-            # Prefer an available semaphore; if all are saturated, wait until one frees up.
-            while handle is None:
-                for candidate in handles_sorted:
-                    cand_limit = self._limits.get(candidate.name)
-                    if (
-                        not enforce_limit
-                        or cand_limit is None
-                        or not cand_limit.locked()
-                    ):
-                        handle = candidate
-                        limit = cand_limit
-                        break
-                if handle is None:
-                    await asyncio.sleep(0.01)
-            if bool(os.environ.get("SEAMLESS_DEBUG_TRANSFORMATION")):
-                if not hasattr(self, "_debug_handles_printed"):
+        try:
+            while True:
+                handles_sorted = sorted(
+                    self._handles,
+                    key=lambda h: (self._load.get(h.name, 0), h.name),
+                )
+                handle = None
+                limit: asyncio.Semaphore | None = None
+                acquired = False
+                # Prefer an available semaphore; if all are saturated, wait until one frees up.
+                while handle is None:
+                    for candidate in handles_sorted:
+                        cand_limit = self._limits.get(candidate.name)
+                        if (
+                            not enforce_limit
+                            or cand_limit is None
+                            or not cand_limit.locked()
+                        ):
+                            handle = candidate
+                            limit = cand_limit
+                            break
+                    if handle is None:
+                        await asyncio.sleep(0.01)
+                if bool(os.environ.get("SEAMLESS_DEBUG_TRANSFORMATION")):
+                    if not hasattr(self, "_debug_handles_printed"):
+                        print(
+                            f"[dispatch] handles={[h.name for h in self._handles]}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        self._debug_handles_printed = True
                     print(
-                        f"[dispatch] handles={[h.name for h in self._handles]}",
+                        f"[dispatch] selecting {getattr(handle, 'name', '?')} "
+                        f"load={self._load.get(getattr(handle, 'name', None), 0)}",
                         file=sys.stderr,
                         flush=True,
                     )
-                    self._debug_handles_printed = True
-                print(
-                    f"[dispatch] selecting {getattr(handle, 'name', '?')} "
-                    f"load={self._load.get(getattr(handle, 'name', None), 0)}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            await handle.wait_until_ready()
-            if enforce_limit and limit is not None:
-                await limit.acquire()
-                acquired = True
+                await handle.wait_until_ready()
+                if enforce_limit and limit is not None:
+                    await limit.acquire()
+                    acquired = True
 
-            self._load[handle.name] = self._load.get(handle.name, 0) + 1
-            if owner_dask_key:
-                self._delegate_owner_by_handle[handle.name] = owner_dask_key
-            retry = False
-            result: Checksum | str | None = None
-            try:
-                payload = {
-                    "transformation_dict": transformation_dict,
-                    "tf_checksum": Checksum(tf_checksum),
-                    "tf_dunder": tf_dunder,
-                    "scratch": scratch,
-                }
-                if owner_dask_key is not None:
-                    payload["owner_dask_key"] = owner_dask_key
-                if owner_dask_priority is not None:
-                    payload["owner_dask_priority"] = owner_dask_priority
-                result = await handle.request("execute_transformation", payload)
-            except ProcessError:
-                retry = True
-                retry_attempts += 1
+                self._load[handle.name] = self._load.get(handle.name, 0) + 1
+                if owner_dask_key:
+                    self._delegate_owner_by_handle[handle.name] = owner_dask_key
+                retry = False
+                result: Checksum | str | None = None
                 try:
-                    handle.ready_event.clear()
-                except Exception:
-                    pass
-                if retry_attempts >= max_retries:
-                    raise
-            finally:
-                self._load[handle.name] = max(0, self._load.get(handle.name, 0) - 1)
-                if (
-                    owner_dask_key
-                    and self._delegate_owner_by_handle.get(handle.name)
-                    == owner_dask_key
-                ):
-                    self._delegate_owner_by_handle.pop(handle.name, None)
-                if acquired and limit is not None:
-                    limit.release()
-            if not retry:
-                assert result is not None
-                return result
-            await asyncio.sleep(0.05)
+                    payload = {
+                        "transformation_dict": transformation_dict,
+                        "tf_checksum": Checksum(tf_checksum),
+                        "tf_dunder": tf_dunder,
+                        "scratch": scratch,
+                    }
+                    if owner_dask_key is not None:
+                        payload["owner_dask_key"] = owner_dask_key
+                    if owner_dask_priority is not None:
+                        payload["owner_dask_priority"] = owner_dask_priority
+                    if stream_topic is not None:
+                        payload["streaming"] = True
+                        payload["stream_throttle"] = get_stream_throttle()
+                    result = await handle.request("execute_transformation", payload)
+                except ProcessError:
+                    retry = True
+                    retry_attempts += 1
+                    try:
+                        handle.ready_event.clear()
+                    except Exception:
+                        pass
+                    if retry_attempts >= max_retries:
+                        raise
+                finally:
+                    self._load[handle.name] = max(0, self._load.get(handle.name, 0) - 1)
+                    if (
+                        owner_dask_key
+                        and self._delegate_owner_by_handle.get(handle.name)
+                        == owner_dask_key
+                    ):
+                        self._delegate_owner_by_handle.pop(handle.name, None)
+                    if acquired and limit is not None:
+                        limit.release()
+                if not retry:
+                    assert result is not None
+                    return result
+                await asyncio.sleep(0.05)
+        finally:
+            if stream_topic is not None and owner_dask_key is not None:
+                self._stream_handlers.pop(owner_dask_key, None)
 
     async def run_transformation_async(
         self,
@@ -998,7 +1167,16 @@ class _WorkerManager:
         scratch: bool,
         owner_dask_key: str | None = None,
         owner_dask_priority: int | None = None,
+        streaming: bool = False,
     ) -> Checksum | str:
+        dask_worker = None
+        if streaming:
+            try:
+                import distributed
+
+                dask_worker = distributed.get_worker()
+            except Exception:
+                dask_worker = None
         fut = asyncio.run_coroutine_threadsafe(
             self._dispatch(
                 transformation_dict,
@@ -1008,6 +1186,8 @@ class _WorkerManager:
                 enforce_limit=True,
                 owner_dask_key=owner_dask_key,
                 owner_dask_priority=owner_dask_priority,
+                streaming=streaming,
+                dask_worker=dask_worker,
             ),
             self.loop,
         )
@@ -1021,7 +1201,16 @@ class _WorkerManager:
         scratch: bool,
         owner_dask_key: str | None = None,
         owner_dask_priority: int | None = None,
+        streaming: bool = False,
     ) -> Checksum | str:
+        dask_worker = None
+        if streaming:
+            try:
+                import distributed
+
+                dask_worker = distributed.get_worker()
+            except Exception:
+                dask_worker = None
         fut = asyncio.run_coroutine_threadsafe(
             self._dispatch(
                 transformation_dict,
@@ -1031,6 +1220,8 @@ class _WorkerManager:
                 enforce_limit=True,
                 owner_dask_key=owner_dask_key,
                 owner_dask_priority=owner_dask_priority,
+                streaming=streaming,
+                dask_worker=dask_worker,
             ),
             self.loop,
         )
@@ -2225,6 +2416,7 @@ async def dispatch_to_workers(
     scratch: bool,
     owner_dask_key: str | None = None,
     owner_dask_priority: int | None = None,
+    streaming: bool = False,
 ) -> Checksum | str:
     manager = _require_manager()
     return await manager.run_transformation_async(
@@ -2234,6 +2426,7 @@ async def dispatch_to_workers(
         scratch,
         owner_dask_key=owner_dask_key,
         owner_dask_priority=owner_dask_priority,
+        streaming=streaming,
     )
 
 
