@@ -277,6 +277,34 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             self._constructed = True
         return self._transformation_checksum
 
+    async def is_cached_async(self) -> bool:
+        """Return whether this transformation is present in the database cache."""
+        await self.construction()
+        if self._transformation_checksum is None:
+            if self._exception is not None:
+                raise TransformationError(
+                    "Transformation construction returned an exception:\n"
+                    + self._exception
+                )
+            raise TransformationError("Transformation has not been constructed")
+        from .transformation_cache import is_cached
+
+        return await is_cached(self._transformation_checksum)
+
+    def is_cached(self) -> bool:
+        """Return whether this transformation is present in the database cache."""
+        self.construct()
+        if self._transformation_checksum is None:
+            if self._exception is not None:
+                raise TransformationError(
+                    "Transformation construction returned an exception:\n"
+                    + self._exception
+                )
+            raise TransformationError("Transformation has not been constructed")
+        from .transformation_cache import is_cached_sync
+
+        return is_cached_sync(self._transformation_checksum)
+
     def _evaluate(self) -> Checksum | None:
         if self._evaluated:
             return self._result_checksum

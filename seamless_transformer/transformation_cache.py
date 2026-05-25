@@ -590,6 +590,55 @@ async def run(
     )
 
 
+async def is_cached(tf_checksum: Checksum | str) -> bool:
+    """Return whether a transformation checksum is present in the database cache."""
+    if database_remote is None:
+        raise RuntimeError(
+            "Transformation.is_cached() requires seamless-remote to be installed"
+        )
+    if not database_remote.has_read_server():
+        raise RuntimeError(
+            "Transformation.is_cached() requires seamless.config.init() "
+            "and an active database read server"
+        )
+    result = await database_remote.get_transformation_result(Checksum(tf_checksum))
+    return result is not None
+
+
+def is_cached_sync(tf_checksum: Checksum | str) -> bool:
+    """Synchronous wrapper for database cache lookup."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        raise RuntimeError(
+            "Cannot block on is_cached() from within the running event loop. "
+            "Use 'await tf.is_cached_async()' instead."
+        )
+
+    new_loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(new_loop)
+        return new_loop.run_until_complete(is_cached(tf_checksum))
+    finally:
+        if _close_all_clients is not None:
+            try:
+                _close_all_clients()
+            except Exception:
+                pass
+        asyncio.set_event_loop(None)
+        try:
+            new_loop.run_until_complete(new_loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        try:
+            new_loop.run_until_complete(new_loop.shutdown_default_executor())
+        except Exception:
+            pass
+        new_loop.close()
+
+
 def run_sync(
     transformation_dict: Dict[str, Any],
     *,
@@ -681,6 +730,8 @@ __all__ = [
     "TransformationCache",
     "build_compilation_context_checksum",
     "get_transformation_cache",
+    "is_cached",
+    "is_cached_sync",
     "run",
     "run_sync",
     "recompute_from_transformation_checksum",
