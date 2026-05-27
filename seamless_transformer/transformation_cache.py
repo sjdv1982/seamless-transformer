@@ -37,6 +37,7 @@ from .record_assembly import (
     stop_gpu_memory_sampler,
 )
 from .record_runtime import get_record_mode
+from . import replay_runtime
 from .record_utils import (
     _memory_peak_bytes,
     _process_create_time_epoch,
@@ -87,6 +88,22 @@ def _resolve_remote_target(execution: str) -> str | None:
         get_selected_cluster=get_selected_cluster,
         check_remote_redundancy=check_remote_redundancy,
     )
+
+
+def _is_replay_driver(transformation_dict: Dict[str, Any]) -> bool:
+    meta = (
+        transformation_dict.get("__meta__")
+        if isinstance(transformation_dict, dict)
+        else None
+    )
+    return isinstance(meta, dict) and bool(meta.get("driver"))
+
+
+def _replay_checksum(checksum: Checksum) -> str:
+    try:
+        return checksum.hex()
+    except AttributeError:
+        return str(checksum)
 
 
 async def _await_buffer_writer(checksum: Checksum) -> None:
@@ -157,7 +174,23 @@ class TransformationCache:
         tf_checksum = Checksum(tf_checksum)
         self._remember_transformation_dunder(tf_checksum, tf_dunder)
         record_mode = get_record_mode()
+        replay_active = replay_runtime.active()
+        replay_driver = _is_replay_driver(transformation_dict)
+        if replay_active:
+            replay_runtime.cache_lookup(
+                _replay_checksum(tf_checksum),
+                is_driver=replay_driver,
+                transformation_dict=transformation_dict,
+                tf_dunder=tf_dunder,
+                script_position=None,
+            )
         cached_result = self._transformation_cache.get(tf_checksum)
+        if (
+            replay_active
+            and replay_driver
+            and replay_runtime.config().driver_cache == "bypass"
+        ):
+            cached_result = None
         if cached_result is not None:
             if require_value:
                 try:
@@ -166,6 +199,22 @@ class TransformationCache:
                     cached_result = None
             if cached_result is not None:
                 _debug(f"cache hit {tf_checksum.hex()}")
+                if replay_active:
+                    replay_runtime.emit(
+                        {
+                            "event": "cache_hit",
+                            "tf_checksum": _replay_checksum(tf_checksum),
+                            "is_driver": replay_driver,
+                            "result_checksum": _replay_checksum(cached_result),
+                        }
+                    )
+                    if replay_driver:
+                        replay_runtime.emit(
+                            {
+                                "event": "driver_short_circuited",
+                                "tf_checksum": _replay_checksum(tf_checksum),
+                            }
+                        )
                 if scratch:
                     cached_result.tempref(scratch=True)
                 else:
@@ -180,6 +229,12 @@ class TransformationCache:
         if not force_local and database_remote is not None and not is_worker():
             _debug(f"query remote db for {tf_checksum.hex()}")
             remote_result = await database_remote.get_transformation_result(tf_checksum)
+            if (
+                replay_active
+                and replay_driver
+                and replay_runtime.config().driver_cache == "bypass"
+            ):
+                remote_result = None
             _debug(f"remote db result {remote_result}")
             if remote_result is not None:
                 if require_value:
@@ -192,6 +247,22 @@ class TransformationCache:
                         remote_result = None
                 if remote_result is not None:
                     _debug("using remote result")
+                    if replay_active:
+                        replay_runtime.emit(
+                            {
+                                "event": "cache_hit",
+                                "tf_checksum": _replay_checksum(tf_checksum),
+                                "is_driver": replay_driver,
+                                "result_checksum": _replay_checksum(remote_result),
+                            }
+                        )
+                        if replay_driver:
+                            replay_runtime.emit(
+                                {
+                                    "event": "driver_short_circuited",
+                                    "tf_checksum": _replay_checksum(tf_checksum),
+                                }
+                            )
                     if scratch:
                         remote_result.tempref(scratch=True)
                     else:
@@ -214,6 +285,16 @@ class TransformationCache:
                 raise RuntimeError(
                     "Record mode requires an active database write server"
                 )
+        if replay_active and not replay_driver:
+            replay_runtime.emit(
+                {
+                    "event": "unexpected_miss",
+                    "tf_checksum": _replay_checksum(tf_checksum),
+                    "script_position": None,
+                    "driver_context": replay_runtime.driver_context(),
+                    "diff": None,
+                }
+            )
         _debug(
             f"execution={execution} has_spawned()={worker.has_spawned()} is_worker={is_worker()}"
         )
@@ -226,6 +307,12 @@ class TransformationCache:
         runtime_metadata = None
         gpu_memory_peak_bytes = None
         if execution == "remote" and not force_local:
+            if replay_active:
+                replay_runtime.remote_dispatch(
+                    "jobserver",
+                    {"tf_checksum": _replay_checksum(tf_checksum)},
+                    script_position=None,
+                )
             # NOTE: this branch is only hit if no seamless Dask client has been defined
             if jobserver_remote is None:
                 raise RuntimeError(
@@ -312,6 +399,13 @@ class TransformationCache:
             _debug("running transformation in-process")
             loop = asyncio.get_running_loop()
             gpu_sampler = start_gpu_memory_sampler()
+            token = None
+            if replay_active:
+                replay_runtime.transformation_started(
+                    _replay_checksum(tf_checksum), is_driver=replay_driver
+                )
+                if replay_driver:
+                    token = replay_runtime.push_driver(_replay_checksum(tf_checksum))
             try:
                 result_checksum = await loop.run_in_executor(
                     None,
@@ -323,6 +417,8 @@ class TransformationCache:
                     require_value,
                 )
             finally:
+                if token is not None:
+                    replay_runtime.pop_driver(token)
                 gpu_memory_peak_bytes = stop_gpu_memory_sampler(gpu_sampler)
             remote_job_dir = parse_remote_job_written(result_checksum)
             if remote_job_dir is not None:
@@ -360,11 +456,21 @@ class TransformationCache:
             result_checksum.tempref()
 
         if database_remote is not None and not is_worker():
-            await database_remote.set_transformation_result(
-                tf_checksum, result_checksum
-            )
+            if replay_active:
+                replay_runtime.emit(
+                    {
+                        "event": "write_blocked",
+                        "target": "database",
+                        "tf_checksum": _replay_checksum(tf_checksum),
+                        "result_checksum": _replay_checksum(result_checksum),
+                    }
+                )
+            else:
+                await database_remote.set_transformation_result(
+                    tf_checksum, result_checksum
+                )
             record_probe = is_record_probe(transformation_dict, tf_dunder)
-            if store_execution_record and not record_probe:
+            if (not replay_active) and store_execution_record and not record_probe:
                 record_runtime_metadata = dict(runtime_metadata or {})
                 record_runtime_metadata.setdefault(
                     "memory_peak_bytes", _memory_peak_bytes()
@@ -475,6 +581,13 @@ class TransformationCache:
             tf_checksum, result_checksum, tf_dunder=tf_dunder
         )
         await _await_buffer_writer(result_checksum)
+        if replay_active:
+            replay_runtime.transformation_finished(
+                _replay_checksum(tf_checksum),
+                is_driver=replay_driver,
+                observed_cost_ms=int(wall_time_seconds * 1000),
+                cache_hit=False,
+            )
 
         return result_checksum
 
@@ -491,7 +604,15 @@ class TransformationCache:
     ) -> Checksum:
         tf_checksum = Checksum(tf_checksum)
         self._remember_transformation_dunder(tf_checksum, tf_dunder)
+        replay_active = replay_runtime.active()
+        replay_driver = _is_replay_driver(transformation_dict)
         cached_result = self._transformation_cache.get(tf_checksum)
+        if (
+            replay_active
+            and replay_driver
+            and replay_runtime.config().driver_cache == "bypass"
+        ):
+            cached_result = None
         if cached_result is not None:
             if require_value:
                 try:
@@ -499,6 +620,15 @@ class TransformationCache:
                 except CacheMissError:
                     cached_result = None
             if cached_result is not None:
+                if replay_active:
+                    replay_runtime.emit(
+                        {
+                            "event": "cache_hit",
+                            "tf_checksum": _replay_checksum(tf_checksum),
+                            "is_driver": replay_driver,
+                            "result_checksum": _replay_checksum(cached_result),
+                        }
+                    )
                 self._register_transformation_result(
                     tf_checksum, cached_result, tf_dunder=tf_dunder
                 )
