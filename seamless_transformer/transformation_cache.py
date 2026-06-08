@@ -148,6 +148,7 @@ class TransformationCache:
         require_value: bool,
         force_local: bool = False,
         store_execution_record: bool = True,
+        strict_dunder: bool = False,
     ) -> Checksum:
         """Run a transformation and return its result checksum.
 
@@ -257,6 +258,7 @@ class TransformationCache:
                 tf_checksum=tf_checksum,
                 tf_dunder=tf_dunder,
                 scratch=scratch,
+                strict_dunder=strict_dunder,
             )
             if isinstance(result_checksum, dict):
                 remote_job_written = result_checksum.get("remote_job_written")
@@ -281,6 +283,7 @@ class TransformationCache:
                 tf_checksum=tf_checksum,
                 tf_dunder=tf_dunder,
                 scratch=scratch,
+                strict_dunder=strict_dunder,
             )
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
@@ -296,6 +299,7 @@ class TransformationCache:
                 tf_checksum=tf_checksum,
                 tf_dunder=tf_dunder,
                 scratch=scratch,
+                strict_dunder=strict_dunder,
             )
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
@@ -488,6 +492,7 @@ class TransformationCache:
         require_value: bool,
         force_local: bool = False,
         store_execution_record: bool = True,
+        strict_dunder: bool = False,
     ) -> Checksum:
         tf_checksum = Checksum(tf_checksum)
         self._remember_transformation_dunder(tf_checksum, tf_dunder)
@@ -522,6 +527,7 @@ class TransformationCache:
                     require_value=require_value,
                     force_local=force_local,
                     store_execution_record=store_execution_record,
+                    strict_dunder=strict_dunder,
                 ),
                 loop,
             )
@@ -539,6 +545,7 @@ class TransformationCache:
                     require_value=require_value,
                     force_local=force_local,
                     store_execution_record=store_execution_record,
+                    strict_dunder=strict_dunder,
                 )
             )
         finally:
@@ -578,6 +585,7 @@ async def run(
     require_value: bool,
     force_local: bool = False,
     store_execution_record: bool = True,
+    strict_dunder: bool = False,
 ) -> Checksum:
     return await get_transformation_cache().run(
         transformation_dict,
@@ -587,6 +595,7 @@ async def run(
         require_value=require_value,
         force_local=force_local,
         store_execution_record=store_execution_record,
+        strict_dunder=strict_dunder,
     )
 
 
@@ -648,6 +657,7 @@ def run_sync(
     require_value: bool,
     force_local: bool = False,
     store_execution_record: bool = True,
+    strict_dunder: bool = False,
 ) -> Checksum:
     return get_transformation_cache().run_sync(
         transformation_dict,
@@ -657,6 +667,7 @@ def run_sync(
         require_value=require_value,
         force_local=force_local,
         store_execution_record=store_execution_record,
+        strict_dunder=strict_dunder,
     )
 
 

@@ -8,21 +8,17 @@ from typing import Any, Dict, Optional
 from seamless import Buffer, Checksum, is_worker
 
 from .code_manager import CodeManager, get_code_manager
+from .transformation_utils import (
+    TRANSFORMATION_DERIVED_DUNDER_KEYS,
+    TRANSFORMATION_LOAD_BEARING_DUNDER_KEYS,
+    TRANSFORMATION_ORTHOGONAL_DUNDER_KEYS,
+)
 
 
-NON_CHECKSUM_ITEMS = (
-    "__output__",
-    "__language__",
-    "__meta__",
-    "__env__",
-    "__format__",
-    "__code_text__",
-    "__code_checksum__",
-    "__compiled__",
-    "__compilation__",
-    "__record_probe__",
-    "__schema__",
-    "__header__",
+TRANSFORMATION_DUNDER_ITEMS = (
+    TRANSFORMATION_LOAD_BEARING_DUNDER_KEYS
+    | TRANSFORMATION_ORTHOGONAL_DUNDER_KEYS
+    | TRANSFORMATION_DERIVED_DUNDER_KEYS
 )
 
 
@@ -59,7 +55,7 @@ class PreTransformation:
             return self._pretransformation_dict
 
         for argname in list(self._pretransformation_dict.keys()):
-            if argname in NON_CHECKSUM_ITEMS:
+            if argname in TRANSFORMATION_DUNDER_ITEMS:
                 continue
             celltype, subcelltype, value = self._pretransformation_dict[argname]
             prepared_value = self._prepare_pin_value(argname, value, celltype)
@@ -111,7 +107,7 @@ class PreTransformation:
         upstream_dependencies = upstream_dependencies or {}
         for argname in list(self._pretransformation_dict.keys()):
             raw_value = self._pretransformation_dict[argname]
-            if argname in NON_CHECKSUM_ITEMS:
+            if argname in TRANSFORMATION_DUNDER_ITEMS:
                 tf_dict[argname] = raw_value
                 continue
             celltype, subcelltype, value = raw_value

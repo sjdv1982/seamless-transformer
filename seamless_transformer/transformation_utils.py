@@ -9,54 +9,54 @@ from seamless import Buffer, Checksum
 
 
 DEEP_CELLTYPES = ("deepcell", "deepfolder", "folder")
-TRANSFORMATION_CORE_KEYS = {"__language__", "__output__", "__as__", "__format__"}
-TRANSFORMATION_LOCAL_DUNDER_KEYS = {"__meta__", "__env__"}
-TRANSFORMATION_EXECUTION_DUNDER_KEYS = {
-    "__compiled__",
+TRANSFORMATION_LOAD_BEARING_DUNDER_KEYS = {
+    "__language__",
+    "__output__",
+    "__as__",
+    "__format__",
+    "__schema__",
+}
+TRANSFORMATION_ORTHOGONAL_DUNDER_KEYS = {
+    "__meta__",
+    "__env__",
     "__compilation__",
     "__record_probe__",
-    "__schema__",
-    "__header__",
+    "__code_checksum__",
+    "__code_text__",
+    "__compilers__",
+    "__languages__",
 }
+TRANSFORMATION_DERIVED_DUNDER_KEYS = {
+    "__compiled__",
+    "__header__",
+    "__deps__",
+}
+# Backward-compatible export names used by older modules. "Core" now means
+# checksum-defining dunders; "execution" means dunders carried outside identity.
+TRANSFORMATION_CORE_KEYS = TRANSFORMATION_LOAD_BEARING_DUNDER_KEYS
+TRANSFORMATION_LOCAL_DUNDER_KEYS = {"__meta__", "__env__"}
+TRANSFORMATION_EXECUTION_DUNDER_KEYS = (
+    TRANSFORMATION_ORTHOGONAL_DUNDER_KEYS | TRANSFORMATION_DERIVED_DUNDER_KEYS
+)
 
 
 def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
-    """Serialize a transformation dict into a Buffer."""
+    """Serialize the checksum-defining payload of a transformation dict."""
 
     assert isinstance(transformation, dict)
     result: Dict[str, Any] = {}
     for key, value in transformation.items():
-        if key in TRANSFORMATION_CORE_KEYS:
+        if key in TRANSFORMATION_LOAD_BEARING_DUNDER_KEYS:
             result[key] = value
             continue
-        if key in TRANSFORMATION_LOCAL_DUNDER_KEYS:
-            result[key] = value
+        if key in TRANSFORMATION_ORTHOGONAL_DUNDER_KEYS:
             continue
-        if key in TRANSFORMATION_EXECUTION_DUNDER_KEYS:
-            continue
-        if key in (
-            "__compilers__",
-            "__languages__",
-        ):
-            continue
-        if key in (
-            "__code_checksum__",
-            "__code_text__",  # keep out of the checksum-defining payload
-        ):
-            # TODO:
-            # __code_checksum__ is not really part of the transformation dict
-            #   two transformations with the same "code" but different __code_checksum__
-            #   have a different syntactic Python source buffer but the same AST (semantic buffer)
-            #   (this is the case for code after whitespace reformatting)
-            #     => __code_checksum__ must go to tf_dunder and be stripped from tf_get_buffer
-            #   HOWEVER: this will break linecache tracebacks for spawn and jobserver
-            #     (which surely must already be the case for nested transformations: test needed)
-            #   => sem2syn needs to be added to database.
-            #           Keep a per-client cache list of all written sem2syn, but otherwise do a blocking await
-            #      Maybe setup sem2syn messaging between spawn process and main, but probably YAGNI
+        if key in TRANSFORMATION_DERIVED_DUNDER_KEYS:
             continue
         if key.startswith("META__"):
             continue
+        if key.startswith("__"):
+            raise ValueError(f"Unknown transformation dunder key: {key}")
 
         celltype, subcelltype, checksum = value
         if isinstance(checksum, Checksum):
@@ -67,15 +67,12 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
 
 
 def extract_tf_dunder(transformation: Dict[str, Any]) -> Dict[str, Any]:
-    """Return execution-only dunder payload for worker/jobserver transport."""
+    """Return non-identity dunder payload for worker/jobserver transport."""
 
     return {
         key: deepcopy(value)
         for key, value in transformation.items()
-        if key.startswith("__")
-        and key not in TRANSFORMATION_CORE_KEYS
-        and key not in TRANSFORMATION_LOCAL_DUNDER_KEYS
-        and not key.startswith("__code")
+        if key in TRANSFORMATION_EXECUTION_DUNDER_KEYS
     }
 
 
@@ -85,10 +82,7 @@ def extract_job_dunder(transformation: Dict[str, Any]) -> Dict[str, Any]:
     return {
         key: deepcopy(value)
         for key, value in transformation.items()
-        if key.startswith("__")
-        and key not in TRANSFORMATION_CORE_KEYS
-        and key != "__env__"
-        and not key.startswith("__code")
+        if key in TRANSFORMATION_EXECUTION_DUNDER_KEYS and key != "__env__"
     }
 
 
@@ -176,5 +170,8 @@ __all__ = [
     "is_deep_celltype",
     "unpack_deep_structure",
     "pack_deep_structure",
+    "TRANSFORMATION_LOAD_BEARING_DUNDER_KEYS",
+    "TRANSFORMATION_ORTHOGONAL_DUNDER_KEYS",
+    "TRANSFORMATION_DERIVED_DUNDER_KEYS",
     "TRANSFORMATION_EXECUTION_DUNDER_KEYS",
 ]

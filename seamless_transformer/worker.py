@@ -901,6 +901,7 @@ class _WorkerManager:
         tf_dunder: Dict[str, Any],
         scratch: bool,
         *,
+        strict_dunder: bool = False,
         enforce_limit: bool = True,
         owner_dask_key: str | None = None,
         owner_dask_priority: int | None = None,
@@ -960,6 +961,7 @@ class _WorkerManager:
                     "tf_checksum": Checksum(tf_checksum),
                     "tf_dunder": tf_dunder,
                     "scratch": scratch,
+                    "strict_dunder": bool(strict_dunder),
                 }
                 if owner_dask_key is not None:
                     payload["owner_dask_key"] = owner_dask_key
@@ -996,6 +998,7 @@ class _WorkerManager:
         tf_checksum: Checksum,
         tf_dunder: Dict[str, Any],
         scratch: bool,
+        strict_dunder: bool = False,
         owner_dask_key: str | None = None,
         owner_dask_priority: int | None = None,
     ) -> Checksum | str:
@@ -1005,6 +1008,7 @@ class _WorkerManager:
                 tf_checksum,
                 tf_dunder,
                 scratch,
+                strict_dunder=strict_dunder,
                 enforce_limit=True,
                 owner_dask_key=owner_dask_key,
                 owner_dask_priority=owner_dask_priority,
@@ -1019,6 +1023,7 @@ class _WorkerManager:
         tf_checksum: Checksum,
         tf_dunder: Dict[str, Any],
         scratch: bool,
+        strict_dunder: bool = False,
         owner_dask_key: str | None = None,
         owner_dask_priority: int | None = None,
     ) -> Checksum | str:
@@ -1028,6 +1033,7 @@ class _WorkerManager:
                 tf_checksum,
                 tf_dunder,
                 scratch,
+                strict_dunder=strict_dunder,
                 enforce_limit=True,
                 owner_dask_key=owner_dask_key,
                 owner_dask_priority=owner_dask_priority,
@@ -1365,6 +1371,7 @@ class _WorkerManager:
             tf_checksum = Checksum(payload["tf_checksum"])
             tf_dunder = payload.get("tf_dunder", {}) or {}
             scratch = bool(payload.get("scratch", False))
+            strict_dunder = bool(payload.get("strict_dunder", False))
             driver_context = _driver_flag_from_tf_dunder(tf_dunder)
             if not driver_context:
                 driver_context = bool(payload.get("driver_context", False))
@@ -1418,6 +1425,7 @@ class _WorkerManager:
                             scratch=scratch,
                             require_value=False,
                             allow_input_fingertip=allow_input_fingertip,
+                            strict_dunder=strict_dunder,
                         )
                         dep_checksums = _dependency_checksums_from_tf_dunder(tf_dunder)
                         inputs: Dict[str, TransformationInputSpec] = {}
@@ -1669,6 +1677,7 @@ class _WorkerManager:
             tf_checksum = Checksum(payload["tf_checksum"])
             tf_dunder = payload.get("tf_dunder", {}) or {}
             scratch = bool(payload.get("scratch", False))
+            strict_dunder = bool(payload.get("strict_dunder", False))
             driver_context = _driver_flag_from_tf_dunder(tf_dunder)
             if not driver_context:
                 driver_context = bool(payload.get("driver_context", False))
@@ -1713,6 +1722,7 @@ class _WorkerManager:
                     tf_dunder=tf_dunder,
                     scratch=scratch,
                     require_value=False,
+                    strict_dunder=strict_dunder,
                 )
 
                 permission_denied = object()
@@ -2223,6 +2233,7 @@ async def dispatch_to_workers(
     tf_checksum: Checksum,
     tf_dunder: Dict[str, Any],
     scratch: bool,
+    strict_dunder: bool = False,
     owner_dask_key: str | None = None,
     owner_dask_priority: int | None = None,
 ) -> Checksum | str:
@@ -2232,6 +2243,7 @@ async def dispatch_to_workers(
         tf_checksum,
         tf_dunder,
         scratch,
+        strict_dunder=strict_dunder,
         owner_dask_key=owner_dask_key,
         owner_dask_priority=owner_dask_priority,
     )
@@ -2243,12 +2255,14 @@ async def forward_to_parent(
     tf_checksum: Checksum,
     tf_dunder: Dict[str, Any],
     scratch: bool,
+    strict_dunder: bool = False,
 ) -> Checksum | str:
     payload = {
         "transformation_dict": transformation_dict,
         "tf_checksum": Checksum(tf_checksum),
         "tf_dunder": tf_dunder,
         "scratch": scratch,
+        "strict_dunder": bool(strict_dunder),
     }
     owner_dask_key = _get_current_owner_dask_key()
     if owner_dask_key is not None:

@@ -158,6 +158,8 @@ def build_transformation_namespace_sync(
             "__code_text__",
         ):
             continue
+        if pinname.startswith("__"):
+            continue
 
         celltype, subcelltype, checksum_value = transformation[pinname]
         if checksum_value is None:

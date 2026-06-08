@@ -162,52 +162,36 @@ async def _resolve_deferred_value_async(prepared_value):
     return await checksum.fingertip("mixed")
 
 
-def _install_deferred_validation(
-    tf: Transformation,
-    pre_transformation,
+def _deferred_validation_hooks(
     deferred_validations: "list[tuple[str, Any, bool]]",
-) -> None:
+) -> tuple[Any, Any]:
     """Run _validate_native_numpy_value after deferred inputs are materialized.
 
-    The checks run after prepare_transformation has replaced Transformation/
-    Checksum pins with concrete hex checksums, so the resolved buffer carries
-    the value actually supplied to the compiled runner.
+    The hooks run after the transformation factory has replaced Transformation/
+    Checksum pins with concrete hex checksums in its frozen prepared payload, so
+    the resolved buffer carries the value actually supplied to the compiled
+    runner.
     """
 
-    original_sync = tf._constructor_sync
-    original_async = tf._constructor_async
-    pretransformation_dict = pre_transformation.pretransformation_dict
-
-    def _run_validations_sync():
+    def _run_validations_sync(prepared_transformation):
         for name, dtype_spec, is_array in deferred_validations:
-            pin = pretransformation_dict.get(name)
+            pin = prepared_transformation.get(name)
             if pin is None:
                 continue
             prepared_value = pin[2]
             value = _resolve_deferred_value(prepared_value)
             _validate_native_numpy_value(name, value, dtype_spec, is_array)
 
-    async def _run_validations_async():
+    async def _run_validations_async(prepared_transformation):
         for name, dtype_spec, is_array in deferred_validations:
-            pin = pretransformation_dict.get(name)
+            pin = prepared_transformation.get(name)
             if pin is None:
                 continue
             prepared_value = pin[2]
             value = await _resolve_deferred_value_async(prepared_value)
             _validate_native_numpy_value(name, value, dtype_spec, is_array)
 
-    def wrapped_sync(transformation_obj):
-        result = original_sync(transformation_obj)
-        _run_validations_sync()
-        return result
-
-    async def wrapped_async(transformation_obj):
-        result = await original_async(transformation_obj)
-        await _run_validations_async()
-        return result
-
-    tf._constructor_sync = wrapped_sync
-    tf._constructor_async = wrapped_async
+    return _run_validations_sync, _run_validations_async
 
 
 class MetaVars:
@@ -640,15 +624,21 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
             env=self._environment._to_lowlevel(),
             language=self.language,
         )
+        post_prepare_sync = None
+        post_prepare_async = None
+        if deferred_validations:
+            post_prepare_sync, post_prepare_async = _deferred_validation_hooks(
+                deferred_validations
+            )
         tf = transformation_from_pretransformation(
             pre_transformation,
             upstream_dependencies=deps,
             meta=meta,
             scratch=self.scratch,
             tf_dunder={},
+            post_prepare_sync=post_prepare_sync,
+            post_prepare_async=post_prepare_async,
         )
-        if deferred_validations:
-            _install_deferred_validation(tf, pre_transformation, deferred_validations)
         return tf
 
 
