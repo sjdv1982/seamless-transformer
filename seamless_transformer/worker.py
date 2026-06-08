@@ -769,6 +769,8 @@ class _WorkerManager:
         self._delegate_cleanup_task: asyncio.Task | None = None
         self._delegate_owner_cancelled: Dict[str, float] = {}
         self._delegate_owner_by_handle: Dict[str, str] = {}
+        self._active_dispatches: Dict[str, set[_cf.Future]] = {}
+        self._active_dispatch_lock = threading.RLock()
 
         init_future = asyncio.run_coroutine_threadsafe(
             self._async_init(worker_count), self.loop
@@ -1015,7 +1017,12 @@ class _WorkerManager:
             ),
             self.loop,
         )
-        return await asyncio.wrap_future(fut)
+        tf_checksum_hex = Checksum(tf_checksum).hex()
+        self._remember_active_dispatch(tf_checksum_hex, fut)
+        try:
+            return await asyncio.wrap_future(fut)
+        finally:
+            self._forget_active_dispatch(tf_checksum_hex, fut)
 
     def run_transformation_sync(
         self,
@@ -1040,7 +1047,36 @@ class _WorkerManager:
             ),
             self.loop,
         )
-        return fut.result()
+        tf_checksum_hex = Checksum(tf_checksum).hex()
+        self._remember_active_dispatch(tf_checksum_hex, fut)
+        try:
+            return fut.result()
+        finally:
+            self._forget_active_dispatch(tf_checksum_hex, fut)
+
+    def _remember_active_dispatch(self, tf_checksum_hex: str, fut: _cf.Future) -> None:
+        with self._active_dispatch_lock:
+            self._active_dispatches.setdefault(tf_checksum_hex, set()).add(fut)
+
+    def _forget_active_dispatch(self, tf_checksum_hex: str, fut: _cf.Future) -> None:
+        with self._active_dispatch_lock:
+            futures = self._active_dispatches.get(tf_checksum_hex)
+            if not futures:
+                return
+            futures.discard(fut)
+            if not futures:
+                self._active_dispatches.pop(tf_checksum_hex, None)
+
+    def cancel_by_checksum(self, tf_checksum: Checksum | str) -> bool:
+        tf_checksum_hex = Checksum(tf_checksum).hex()
+        with self._active_dispatch_lock:
+            futures = list(self._active_dispatches.pop(tf_checksum_hex, set()))
+        canceled = False
+        for fut in futures:
+            if fut.done():
+                continue
+            canceled = fut.cancel() or canceled
+        return canceled
 
     async def _store_delegate_entry(self, token: str, entry: Dict[str, Any]) -> None:
         if self._delegate_lock is None:
@@ -2225,6 +2261,15 @@ def get_throttle_load() -> tuple[int, int]:
         current = getattr(limit, "_value", TRANSFORMATION_THROTTLE)
         used += max(0, TRANSFORMATION_THROTTLE - int(current))  # type: ignore[attr-defined]
     return used, total
+
+
+def cancel_by_checksum(tf_checksum: Checksum | str) -> bool:
+    """Cancel active spawn/worker-pool dispatches for a transformation checksum."""
+
+    manager = _worker_manager
+    if manager is None:
+        return False
+    return manager.cancel_by_checksum(tf_checksum)
 
 
 async def dispatch_to_workers(

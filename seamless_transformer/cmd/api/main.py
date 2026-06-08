@@ -12,9 +12,11 @@ import traceback
 import threading
 import logging
 import functools
+import signal
 import time
 import pathlib
 import warnings
+from contextlib import contextmanager
 
 import seamless
 import seamless.config
@@ -48,7 +50,7 @@ from seamless_transformer.remote_job import REMOTE_JOB_META_KEY, RemoteJobWritte
 
 from seamless_transformer.environment import Environment
 from seamless.checksum.json_ import json_dumps_bytes
-from seamless_transformer.transformation_cache import run_sync
+from seamless_transformer.transformation_cache import get_transformation_cache, run_sync
 from seamless_transformer.transformation_utils import (
     extract_job_dunder,
     extract_tf_dunder,
@@ -69,6 +71,36 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 CONFIG_FILENAMES = ("seamless.yaml", "seamless.profile.yaml")
+
+
+@contextmanager
+def _cancel_current_on_termination(tf_checksum: Checksum | str):
+    tf_checksum = Checksum(tf_checksum)
+    old_sigint = signal.getsignal(signal.SIGINT)
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+    canceled = False
+
+    def _cancel_once():
+        nonlocal canceled
+        if canceled:
+            return
+        canceled = True
+        get_transformation_cache().cancel_by_checksum(tf_checksum)
+
+    def _terminate(_signum, _frame):
+        _cancel_once()
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _terminate)
+    signal.signal(signal.SIGTERM, _terminate)
+    try:
+        yield
+    except KeyboardInterrupt:
+        _cancel_once()
+        raise
+    finally:
+        signal.signal(signal.SIGINT, old_sigint)
+        signal.signal(signal.SIGTERM, old_sigterm)
 
 
 def _parse_scoped_value(value: str, label: str) -> tuple[str, str | None]:
@@ -1319,12 +1351,16 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
             result_fingertip = False
         if result_targets:
             result_fingertip = True
-        result_checksum = run_transformation(
-            transformation_dict,
-            undo=args.undo,
-            fingertip=result_fingertip,
-            scratch=args.scratch,
-        )
+        with _cancel_current_on_termination(transformation_checksum):
+            result_checksum = run_transformation(
+                transformation_dict,
+                undo=args.undo,
+                fingertip=result_fingertip,
+                scratch=args.scratch,
+            )
+    except KeyboardInterrupt:
+        print(f"Canceled transformation {transformation_checksum}", file=sys.stderr)
+        return 130
     except Exception:
         traceback.print_exc(limit=0)
         return 1

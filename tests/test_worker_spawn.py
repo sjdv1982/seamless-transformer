@@ -1,8 +1,11 @@
+import concurrent.futures
 import os
 
 import pytest
 
+from seamless import Checksum
 from seamless.transformer import direct, delayed, has_spawned, spawn
+from seamless_transformer import worker
 from seamless_transformer.worker import _DaemonThreadPoolExecutor
 
 
@@ -66,3 +69,17 @@ def test_daemon_thread_pool_executor_executes_tasks():
         assert threads and all(thread.daemon for thread in threads)
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_worker_manager_cancel_by_checksum_cancels_active_dispatches():
+    manager = worker._WorkerManager.__new__(worker._WorkerManager)
+    manager._active_dispatches = {}
+    manager._active_dispatch_lock = worker.threading.RLock()
+    checksum = Checksum("6" * 64)
+    future = concurrent.futures.Future()
+
+    manager._remember_active_dispatch(checksum.hex(), future)
+
+    assert manager.cancel_by_checksum(checksum) is True
+    assert future.cancelled()
+    assert manager._active_dispatches == {}

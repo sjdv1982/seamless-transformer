@@ -6,7 +6,9 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 import sys
+from contextlib import contextmanager
 from typing import Any
 
 import seamless
@@ -15,7 +17,7 @@ from seamless import CacheMissError, Checksum
 
 from seamless_transformer.cmd.file_load import read_checksum_file
 from seamless_transformer.remote_job import RemoteJobWritten
-from seamless_transformer.transformation_cache import run_sync
+from seamless_transformer.transformation_cache import get_transformation_cache, run_sync
 from seamless_transformer.transformation_utils import extract_tf_dunder
 
 try:
@@ -74,6 +76,35 @@ def _configure_logging(*, debug: bool, verbose: bool) -> None:
         level = logging.ERROR
     logging.getLogger("seamless").setLevel(level)
     logging.getLogger("seamless_transformer").setLevel(level)
+
+
+@contextmanager
+def _cancel_current_on_termination(tf_checksum: Checksum):
+    old_sigint = signal.getsignal(signal.SIGINT)
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+    canceled = False
+
+    def _cancel_once():
+        nonlocal canceled
+        if canceled:
+            return
+        canceled = True
+        get_transformation_cache().cancel_by_checksum(tf_checksum)
+
+    def _terminate(_signum, _frame):
+        _cancel_once()
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _terminate)
+    signal.signal(signal.SIGTERM, _terminate)
+    try:
+        yield
+    except KeyboardInterrupt:
+        _cancel_once()
+        raise
+    finally:
+        signal.signal(signal.SIGINT, old_sigint)
+        signal.signal(signal.SIGTERM, old_sigterm)
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -188,16 +219,20 @@ def _main(argv: list[str] | None = None) -> int:
 
     tf_dunder = extract_tf_dunder(transformation_dict)
     try:
-        result_checksum = run_sync(
-            transformation_dict,
-            tf_checksum=checksum,
-            tf_dunder=tf_dunder,
-            scratch=bool(args.scratch),
-            require_value=False,
-            strict_dunder=bool(args.strict_dunder),
-        )
+        with _cancel_current_on_termination(checksum):
+            result_checksum = run_sync(
+                transformation_dict,
+                tf_checksum=checksum,
+                tf_dunder=tf_dunder,
+                scratch=bool(args.scratch),
+                require_value=False,
+                strict_dunder=bool(args.strict_dunder),
+            )
         if result_checksum is None:
             raise RuntimeError("Result checksum unavailable")
+    except KeyboardInterrupt:
+        print(f"Canceled transformation {checksum.hex()}", file=sys.stderr)
+        return 130
     except RemoteJobWritten:
         return 0
     except Exception as exc:

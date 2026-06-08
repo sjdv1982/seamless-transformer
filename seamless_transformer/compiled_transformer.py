@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from seamless import Checksum, ensure_open
+from seamless import Buffer, Checksum, ensure_open
 
 from .environment import Environment
 from .pretransformation import compiled_transformer_to_pretransformation
@@ -162,6 +162,45 @@ async def _resolve_deferred_value_async(prepared_value):
     return await checksum.fingertip("mixed")
 
 
+def _checksum_hex(value, celltype: str) -> str:
+    buffer = Buffer(value, celltype)
+    checksum = buffer.get_checksum()
+    buffer.tempref()
+    return checksum.hex()
+
+
+def _validate_derived_compiled_dunders(prepared_transformation, *, header: str) -> None:
+    """Validate caller-supplied derived compiled support before checksuming.
+
+    ``__compiled__`` and ``__header__`` are derived/eliminable: they are carried
+    for execution compatibility but excluded from transformation identity. If a
+    caller or legacy path supplied them, they must agree with the schema-derived
+    compiled state before they are discarded from the immutable definition.
+    """
+
+    supplied_compiled = prepared_transformation.get("__compiled__")
+    if supplied_compiled is not None and supplied_compiled is not True:
+        raise ValueError(
+            "Compiled transformation supplied __compiled__ must be True"
+        )
+
+    supplied_header = prepared_transformation.get("__header__")
+    if supplied_header is None:
+        return
+    expected_header = _checksum_hex(header, "text")
+    try:
+        supplied_header = Checksum(supplied_header).hex()
+    except Exception as exc:
+        raise ValueError(
+            "Compiled transformation supplied __header__ is not a valid checksum"
+        ) from exc
+    if supplied_header != expected_header:
+        raise ValueError(
+            "Compiled transformation supplied __header__ does not match the "
+            "schema-generated header"
+        )
+
+
 def _deferred_validation_hooks(
     deferred_validations: "list[tuple[str, Any, bool]]",
 ) -> tuple[Any, Any]:
@@ -192,6 +231,31 @@ def _deferred_validation_hooks(
             _validate_native_numpy_value(name, value, dtype_spec, is_array)
 
     return _run_validations_sync, _run_validations_async
+
+
+def _compose_post_prepare_hooks(*sync_hooks):
+    hooks = [hook for hook in sync_hooks if hook is not None]
+    if not hooks:
+        return None
+
+    def _run(prepared_transformation):
+        for hook in hooks:
+            hook(prepared_transformation)
+
+    return _run
+
+
+def _compose_post_prepare_async_hooks(always_sync_hook, async_hook):
+    if always_sync_hook is None and async_hook is None:
+        return None
+
+    async def _run(prepared_transformation):
+        if always_sync_hook is not None:
+            always_sync_hook(prepared_transformation)
+        if async_hook is not None:
+            await async_hook(prepared_transformation)
+
+    return _run
 
 
 class MetaVars:
@@ -612,10 +676,11 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
         meta = deepcopy(self._meta)
         meta.setdefault("metavars", self._metavars.to_dict())
         objects, compilation = self._compiled_payloads()
+        header = self.header
         pre_transformation = compiled_transformer_to_pretransformation(
             code=self._code_text,
             schema_text=self._schema_text,
-            header=self.header,
+            header=header,
             compilation=compilation,
             objects=objects,
             meta=meta,
@@ -624,12 +689,21 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
             env=self._environment._to_lowlevel(),
             language=self.language,
         )
-        post_prepare_sync = None
-        post_prepare_async = None
+        deferred_prepare_sync = None
+        deferred_prepare_async = None
         if deferred_validations:
-            post_prepare_sync, post_prepare_async = _deferred_validation_hooks(
+            deferred_prepare_sync, deferred_prepare_async = _deferred_validation_hooks(
                 deferred_validations
             )
+        derived_dunder_validation = lambda prepared: _validate_derived_compiled_dunders(
+            prepared, header=header
+        )
+        post_prepare_sync = _compose_post_prepare_hooks(
+            derived_dunder_validation, deferred_prepare_sync
+        )
+        post_prepare_async = _compose_post_prepare_async_hooks(
+            derived_dunder_validation, deferred_prepare_async
+        )
         tf = transformation_from_pretransformation(
             pre_transformation,
             upstream_dependencies=deps,
