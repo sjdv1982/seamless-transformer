@@ -207,6 +207,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._cancelled = False
         self._cancel_requested = False
         self._cancel_message = "Transformation was canceled"
+        self._strict_dunder = False
         self._meta = deepcopy(meta) if isinstance(meta, dict) else {}
         self._meta_view = _readonly_recursive(self._meta)
         self._destructor = destructor
@@ -1015,6 +1016,8 @@ def transformation_from_pretransformation(
     meta: dict,
     scratch: bool,
     tf_dunder: dict | None = None,
+    post_prepare_sync=None,
+    post_prepare_async=None,
 ) -> Transformation[T]:
     """Build a Transformation from a PreTransformation"""
     from .transformation_cache import run_sync, run
@@ -1090,6 +1093,8 @@ def transformation_from_pretransformation(
         if transformation_obj.exception is not None:
             raise RuntimeError(transformation_obj.exception)
         prepared_execution_dict = _prepared_dict_with_dependencies(transformation_obj)
+        if post_prepare_sync is not None:
+            post_prepare_sync(prepared_execution_dict)
         prepared_tf_dunder = _collect_tf_dunder(prepared_execution_dict)
         tf_buffer = tf_get_buffer(prepared_execution_dict)
         tf_checksum = tf_buffer.get_checksum()
@@ -1098,10 +1103,20 @@ def transformation_from_pretransformation(
         return tf_checksum
 
     async def constructor_async(transformation_obj):
+        nonlocal prepared_execution_dict, prepared_tf_dunder
         await transformation_obj._run_dependencies_async(require_value=True)
         if transformation_obj.exception is not None:
             raise RuntimeError(transformation_obj.exception)
-        return constructor_sync(transformation_obj)
+        prepared_execution_dict = _prepared_dict_with_dependencies(transformation_obj)
+        if post_prepare_async is not None:
+            await post_prepare_async(prepared_execution_dict)
+        elif post_prepare_sync is not None:
+            post_prepare_sync(prepared_execution_dict)
+        prepared_tf_dunder = _collect_tf_dunder(prepared_execution_dict)
+        tf_buffer = tf_get_buffer(prepared_execution_dict)
+        tf_checksum = tf_buffer.get_checksum()
+        tf_buffer.tempref()
+        return tf_checksum
 
     def evaluator_sync(
         transformation_obj: Transformation, require_value: bool

@@ -340,6 +340,8 @@ def get_transformation_inputs_output(
             "__code_text__",
         ):
             continue
+        if pinname.startswith("__"):
+            continue
         if pinname == "code":
             continue
         if pinname == "objects":

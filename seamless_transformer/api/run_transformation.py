@@ -120,6 +120,16 @@ def _main(argv: list[str] | None = None) -> int:
         default=False,
         action="store_true",
     )
+    parser.add_argument(
+        "--strict",
+        dest="strict_dunder",
+        help=(
+            "Require this execution envelope instead of latching onto an active "
+            "same-checksum submission with different dunders."
+        ),
+        default=False,
+        action="store_true",
+    )
     parser.add_argument("--output", help="Output file (default: stdout)")
 
     # TODO: --dunder, --undo, --global-info need new-codebase support.
@@ -184,6 +194,7 @@ def _main(argv: list[str] | None = None) -> int:
             tf_dunder=tf_dunder,
             scratch=bool(args.scratch),
             require_value=False,
+            strict_dunder=bool(args.strict_dunder),
         )
         if result_checksum is None:
             raise RuntimeError("Result checksum unavailable")
