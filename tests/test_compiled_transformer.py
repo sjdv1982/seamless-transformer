@@ -3,6 +3,7 @@ import builtins
 import numpy as np
 import pytest
 
+import seamless_transformer.compiled_transformer as compiled_module
 from seamless_transformer import CompiledObject, CompiledTransformer
 from seamless_transformer.transformation_class import Transformation
 
@@ -135,3 +136,47 @@ def test_incomplete_transformer_and_objects():
     obj.code = "subroutine helper()\nend subroutine\n"
     tf.objects.append(obj)
     assert tf.objects[0].language == "fortran"
+
+
+def test_compiled_rejects_mismatched_supplied_header(monkeypatch):
+    original = compiled_module.compiled_transformer_to_pretransformation
+
+    def tampered_pretransformation(*args, **kwargs):
+        pre = original(*args, **kwargs)
+        pre.pretransformation_dict["__header__"] = "0" * 64
+        return pre
+
+    monkeypatch.setattr(
+        compiled_module,
+        "compiled_transformer_to_pretransformation",
+        tampered_pretransformation,
+    )
+    tf = CompiledTransformer("c")
+    tf.schema = SCALAR_SCHEMA
+    tf.code = "int transform(int a, int b, int *result) { return 0; }"
+    result = tf(a=1, b=2)
+
+    assert result.construct() is None
+    assert "supplied __header__ does not match" in result.exception
+
+
+def test_compiled_rejects_mismatched_supplied_compiled_flag(monkeypatch):
+    original = compiled_module.compiled_transformer_to_pretransformation
+
+    def tampered_pretransformation(*args, **kwargs):
+        pre = original(*args, **kwargs)
+        pre.pretransformation_dict["__compiled__"] = False
+        return pre
+
+    monkeypatch.setattr(
+        compiled_module,
+        "compiled_transformer_to_pretransformation",
+        tampered_pretransformation,
+    )
+    tf = CompiledTransformer("c")
+    tf.schema = SCALAR_SCHEMA
+    tf.code = "int transform(int a, int b, int *result) { return 0; }"
+    result = tf(a=1, b=2)
+
+    assert result.construct() is None
+    assert "supplied __compiled__ must be True" in result.exception

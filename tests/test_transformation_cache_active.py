@@ -161,3 +161,38 @@ def test_cancel_by_checksum_makes_strict_resubmission_possible(monkeypatch):
 
     asyncio.run(main())
     assert len(calls) == 2
+
+
+def test_cancel_by_checksum_releases_owner_before_backend_finishes(monkeypatch):
+    cache = TransformationCache()
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_run(*_args):
+        started.set()
+        assert release.wait(5)
+        return _checksum("8")
+
+    monkeypatch.setattr(transformation_cache, "run_transformation_dict", fake_run)
+
+    async def main():
+        tf_checksum = _checksum("7")
+        task = asyncio.create_task(
+            cache.run(
+                {"code": "return 1"},
+                tf_checksum=tf_checksum,
+                tf_dunder={"__meta__": {"local": True}},
+                scratch=False,
+                require_value=False,
+                force_local=True,
+            )
+        )
+        try:
+            await asyncio.to_thread(started.wait, 5)
+            assert cache.cancel_by_checksum(tf_checksum) is True
+            with pytest.raises(TransformationCancelledError):
+                await asyncio.wait_for(task, timeout=0.5)
+        finally:
+            release.set()
+
+    asyncio.run(main())

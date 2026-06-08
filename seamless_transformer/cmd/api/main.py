@@ -76,19 +76,30 @@ CONFIG_FILENAMES = ("seamless.yaml", "seamless.profile.yaml")
 @contextmanager
 def _cancel_current_on_termination(tf_checksum: Checksum | str):
     tf_checksum = Checksum(tf_checksum)
+    old_sigint = signal.getsignal(signal.SIGINT)
     old_sigterm = signal.getsignal(signal.SIGTERM)
+    canceled = False
+
+    def _cancel_once():
+        nonlocal canceled
+        if canceled:
+            return
+        canceled = True
+        get_transformation_cache().cancel_by_checksum(tf_checksum)
 
     def _terminate(_signum, _frame):
-        get_transformation_cache().cancel_by_checksum(tf_checksum)
+        _cancel_once()
         raise KeyboardInterrupt
 
+    signal.signal(signal.SIGINT, _terminate)
     signal.signal(signal.SIGTERM, _terminate)
     try:
         yield
     except KeyboardInterrupt:
-        get_transformation_cache().cancel_by_checksum(tf_checksum)
+        _cancel_once()
         raise
     finally:
+        signal.signal(signal.SIGINT, old_sigint)
         signal.signal(signal.SIGTERM, old_sigterm)
 
 

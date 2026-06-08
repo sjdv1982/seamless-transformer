@@ -113,6 +113,45 @@ def _dunder_envelope_checksum(
     return Buffer(payload, "plain").get_checksum().hex()
 
 
+async def _await_with_active_cancellation(awaitable, active_submission):
+    """Await backend work, but let checksum cancellation release the owner wait."""
+
+    if active_submission is None:
+        return await awaitable
+
+    work_future = asyncio.ensure_future(awaitable)
+    cancel_future = asyncio.wrap_future(active_submission.future)
+    cancel_future.add_done_callback(_retrieve_future_exception)
+    try:
+        done, _pending = await asyncio.wait(
+            {work_future, cancel_future}, return_when=asyncio.FIRST_COMPLETED
+        )
+    except asyncio.CancelledError:
+        work_future.cancel()
+        cancel_future.cancel()
+        raise
+    if cancel_future in done:
+        work_future.cancel()
+        try:
+            await work_future
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        return cancel_future.result()
+
+    return work_future.result()
+
+
+def _retrieve_future_exception(future) -> None:
+    try:
+        future.exception()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
+
 async def _await_buffer_writer(checksum: Checksum) -> None:
     if _buffer_writer is None:
         return
@@ -308,19 +347,33 @@ class TransformationCache:
 
     def cancel_by_checksum(self, tf_checksum: Checksum | str) -> bool:
         tf_checksum = Checksum(tf_checksum)
+        canceled = False
         with self._active_lock:
             active = self._active_submissions.pop(tf_checksum, None)
-        if active is None or active.future.done():
-            return False
-        active.canceled = True
-        active.future.set_exception(
-            TransformationCancelledError("Transformation was canceled")
-        )
+        if active is not None and not active.future.done():
+            active.canceled = True
+            active.future.set_exception(
+                TransformationCancelledError("Transformation was canceled")
+            )
+            canceled = True
         try:
-            worker.cancel_by_checksum(tf_checksum)
+            canceled = worker.cancel_by_checksum(tf_checksum) or canceled
         except Exception:
             pass
-        return True
+        try:
+            from seamless_dask.transformer_client import get_seamless_dask_client
+        except Exception:
+            dask_client = None
+        else:
+            dask_client = get_seamless_dask_client()
+        if dask_client is not None:
+            cancel = getattr(dask_client, "cancel_by_checksum", None)
+            if callable(cancel):
+                try:
+                    canceled = bool(cancel(tf_checksum)) or canceled
+                except Exception:
+                    pass
+        return canceled
 
     def transformation_status(self, tf_checksum: Checksum | str) -> str:
         tf_checksum = Checksum(tf_checksum)
@@ -405,12 +458,15 @@ class TransformationCache:
             buffer_writer.flush()
             ### /NOTE
 
-            result_checksum = await jobserver_remote.run_transformation(
-                transformation_dict,
-                tf_checksum=tf_checksum,
-                tf_dunder=tf_dunder,
-                scratch=scratch,
-                strict_dunder=strict_dunder,
+            result_checksum = await _await_with_active_cancellation(
+                jobserver_remote.run_transformation(
+                    transformation_dict,
+                    tf_checksum=tf_checksum,
+                    tf_dunder=tf_dunder,
+                    scratch=scratch,
+                    strict_dunder=strict_dunder,
+                ),
+                active_submission,
             )
             if isinstance(result_checksum, dict):
                 remote_job_written = result_checksum.get("remote_job_written")
@@ -430,12 +486,15 @@ class TransformationCache:
             result_checksum = Checksum(result_checksum)
         elif worker.has_spawned() and not is_worker() and not force_local:
             _debug("dispatching transformation to worker pool")
-            result_checksum = await worker.dispatch_to_workers(
-                transformation_dict,
-                tf_checksum=tf_checksum,
-                tf_dunder=tf_dunder,
-                scratch=scratch,
-                strict_dunder=strict_dunder,
+            result_checksum = await _await_with_active_cancellation(
+                worker.dispatch_to_workers(
+                    transformation_dict,
+                    tf_checksum=tf_checksum,
+                    tf_dunder=tf_dunder,
+                    scratch=scratch,
+                    strict_dunder=strict_dunder,
+                ),
+                active_submission,
             )
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
@@ -446,12 +505,15 @@ class TransformationCache:
         elif is_worker() and not force_local:
             assert not worker.has_spawned()
             _debug("forwarding transformation request to parent")
-            result_checksum = await worker.forward_to_parent(
-                transformation_dict,
-                tf_checksum=tf_checksum,
-                tf_dunder=tf_dunder,
-                scratch=scratch,
-                strict_dunder=strict_dunder,
+            result_checksum = await _await_with_active_cancellation(
+                worker.forward_to_parent(
+                    transformation_dict,
+                    tf_checksum=tf_checksum,
+                    tf_dunder=tf_dunder,
+                    scratch=scratch,
+                    strict_dunder=strict_dunder,
+                ),
+                active_submission,
             )
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
@@ -469,14 +531,17 @@ class TransformationCache:
             loop = asyncio.get_running_loop()
             gpu_sampler = start_gpu_memory_sampler()
             try:
-                result_checksum = await loop.run_in_executor(
-                    None,
-                    run_transformation_dict,
-                    transformation_dict,
-                    tf_checksum,
-                    tf_dunder,
-                    scratch,
-                    require_value,
+                result_checksum = await _await_with_active_cancellation(
+                    loop.run_in_executor(
+                        None,
+                        run_transformation_dict,
+                        transformation_dict,
+                        tf_checksum,
+                        tf_dunder,
+                        scratch,
+                        require_value,
+                    ),
+                    active_submission,
                 )
             finally:
                 gpu_memory_peak_bytes = stop_gpu_memory_sampler(gpu_sampler)
