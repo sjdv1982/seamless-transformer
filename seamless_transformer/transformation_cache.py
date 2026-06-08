@@ -3,10 +3,13 @@
 from typing import Any, Dict
 
 import asyncio
+import concurrent.futures
 from copy import deepcopy
+from dataclasses import dataclass
 import os
 import subprocess
 import time
+import threading
 
 from seamless import Buffer, CacheMissError, Checksum, is_worker
 
@@ -89,6 +92,27 @@ def _resolve_remote_target(execution: str) -> str | None:
     )
 
 
+@dataclass
+class _ActiveSubmission:
+    envelope_checksum: str
+    future: concurrent.futures.Future
+    canceled: bool = False
+
+
+class TransformationCancelledError(RuntimeError):
+    pass
+
+
+def _dunder_envelope_checksum(
+    tf_dunder: Dict[str, Any] | None, *, scratch: bool
+) -> str:
+    payload = {
+        "tf_dunder": deepcopy(tf_dunder) if isinstance(tf_dunder, dict) else {},
+        "scratch": bool(scratch),
+    }
+    return Buffer(payload, "plain").get_checksum().hex()
+
+
 async def _await_buffer_writer(checksum: Checksum) -> None:
     if _buffer_writer is None:
         return
@@ -105,6 +129,8 @@ class TransformationCache:
         self._transformation_cache: dict[Checksum, Checksum] = {}
         self._rev_transformation_cache: dict[Checksum, set[Checksum]] = {}
         self._transformation_dunder_cache: dict[Checksum, Dict[str, Any]] = {}
+        self._active_submissions: dict[Checksum, _ActiveSubmission] = {}
+        self._active_lock = threading.RLock()
 
     def _remember_transformation_dunder(
         self, tf_checksum: Checksum, tf_dunder: Dict[str, Any] | None
@@ -202,6 +228,132 @@ class TransformationCache:
                     )
                     return remote_result
 
+        return await self._run_active_or_execute(
+            transformation_dict,
+            tf_checksum=tf_checksum,
+            tf_dunder=tf_dunder,
+            scratch=scratch,
+            require_value=require_value,
+            force_local=force_local,
+            store_execution_record=store_execution_record,
+            strict_dunder=strict_dunder,
+            record_mode=record_mode,
+        )
+
+    async def _run_active_or_execute(
+        self,
+        transformation_dict: Dict[str, Any],
+        *,
+        tf_checksum: Checksum,
+        tf_dunder,
+        scratch: bool,
+        require_value: bool,
+        force_local: bool,
+        store_execution_record: bool,
+        strict_dunder: bool,
+        record_mode: bool,
+    ) -> Checksum:
+        envelope_checksum = _dunder_envelope_checksum(tf_dunder, scratch=scratch)
+        active: _ActiveSubmission
+        owner = False
+        with self._active_lock:
+            active = self._active_submissions.get(tf_checksum)
+            if active is not None and active.future.done():
+                self._active_submissions.pop(tf_checksum, None)
+                active = None
+            if active is not None:
+                if strict_dunder and active.envelope_checksum != envelope_checksum:
+                    raise RuntimeError(
+                        "Transformation "
+                        f"{tf_checksum.hex()} is already running with a different "
+                        "dunder envelope; wait for it to finish or cancel it "
+                        "before strict re-submission"
+                    )
+            else:
+                active = _ActiveSubmission(
+                    envelope_checksum=envelope_checksum,
+                    future=concurrent.futures.Future(),
+                )
+                self._active_submissions[tf_checksum] = active
+                owner = True
+
+        if not owner:
+            return await asyncio.wrap_future(active.future)
+
+        try:
+            result = await self._run_uncached(
+                transformation_dict,
+                tf_checksum=tf_checksum,
+                tf_dunder=tf_dunder,
+                scratch=scratch,
+                require_value=require_value,
+                force_local=force_local,
+                store_execution_record=store_execution_record,
+                strict_dunder=strict_dunder,
+                record_mode=record_mode,
+                active_submission=active,
+            )
+        except BaseException as exc:
+            if not active.future.done():
+                active.future.set_exception(exc)
+            raise
+        else:
+            if not active.future.done():
+                active.future.set_result(result)
+            return result
+        finally:
+            with self._active_lock:
+                if self._active_submissions.get(tf_checksum) is active:
+                    self._active_submissions.pop(tf_checksum, None)
+
+    def cancel_by_checksum(self, tf_checksum: Checksum | str) -> bool:
+        tf_checksum = Checksum(tf_checksum)
+        with self._active_lock:
+            active = self._active_submissions.pop(tf_checksum, None)
+        if active is None or active.future.done():
+            return False
+        active.canceled = True
+        active.future.set_exception(
+            TransformationCancelledError("Transformation was canceled")
+        )
+        try:
+            worker.cancel_by_checksum(tf_checksum)
+        except Exception:
+            pass
+        return True
+
+    def transformation_status(self, tf_checksum: Checksum | str) -> str:
+        tf_checksum = Checksum(tf_checksum)
+        with self._active_lock:
+            active = self._active_submissions.get(tf_checksum)
+        if active is None:
+            return "not-running"
+        if active.canceled:
+            return "canceled"
+        if not active.future.done():
+            return "running"
+        try:
+            active.future.result()
+        except TransformationCancelledError:
+            return "canceled"
+        except Exception:
+            return "failed"
+        return "done"
+
+    async def _run_uncached(
+        self,
+        transformation_dict: Dict[str, Any],
+        *,
+        tf_checksum: Checksum,
+        tf_dunder,
+        scratch: bool,
+        require_value: bool,
+        force_local: bool,
+        store_execution_record: bool,
+        strict_dunder: bool,
+        record_mode: bool,
+        active_submission: _ActiveSubmission | None = None,
+    ) -> Checksum:
         execution = "process" if force_local else get_execution()
         meta = (
             transformation_dict.get("__meta__")
@@ -358,6 +510,9 @@ class TransformationCache:
             except Exception:
                 _debug("result resolution failed; will continue")
 
+        if active_submission is not None and active_submission.canceled:
+            raise TransformationCancelledError("Transformation was canceled")
+
         if scratch:
             result_checksum.tempref(scratch=True)
         else:
@@ -474,6 +629,9 @@ class TransformationCache:
             #     buffer_cache.guarantee_buffer_info(
             #         result_checksum, output_celltype, sync_to_remote=True
             #     )
+
+        if active_submission is not None and active_submission.canceled:
+            raise TransformationCancelledError("Transformation was canceled")
 
         self._register_transformation_result(
             tf_checksum, result_checksum, tf_dunder=tf_dunder

@@ -287,6 +287,18 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         was_incomplete = not self._evaluated
 
         transitioned = self._cancel_local_futures()
+        if self._transformation_checksum is not None:
+            try:
+                from .transformation_cache import get_transformation_cache
+
+                transitioned = (
+                    get_transformation_cache().cancel_by_checksum(
+                        self._transformation_checksum
+                    )
+                    or transitioned
+                )
+            except Exception:
+                pass
         if recursive:
             for dep in self._upstream_dependencies.values():
                 try:
@@ -317,6 +329,18 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         was_incomplete = not self._evaluated
 
         transitioned = self._cancel_local_futures()
+        if self._transformation_checksum is not None:
+            try:
+                from .transformation_cache import get_transformation_cache
+
+                transitioned = (
+                    get_transformation_cache().cancel_by_checksum(
+                        self._transformation_checksum
+                    )
+                    or transitioned
+                )
+            except Exception:
+                pass
         if recursive:
             for dep in self._upstream_dependencies.values():
                 try:

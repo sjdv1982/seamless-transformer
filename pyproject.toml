@@ -43,6 +43,7 @@ seamless-probe = "seamless_transformer.cmd.api.main:probe_main"
 seamless-upload = "seamless_transformer.cmd.api.upload:main"
 seamless-download = "seamless_transformer.cmd.api.download:main"
 seamless-run-transformation = "seamless_transformer.api.run_transformation:main"
+seamless-cancel = "seamless_transformer.api.cancel:main"
 seamless-queue = "seamless_transformer.api.queue:main"
 seamless-queue-finish = "seamless_transformer.api.queue:finish"
 
