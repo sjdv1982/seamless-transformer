@@ -8,6 +8,7 @@ import threading
 import traceback
 import concurrent.futures as _cf
 from copy import deepcopy
+from types import MappingProxyType
 from typing import Any, Dict, Generic, Optional, TYPE_CHECKING, TypeVar
 
 from seamless import Checksum, Buffer, ensure_open, is_worker
@@ -39,6 +40,20 @@ def _format_exception(exc: BaseException) -> str:
     if isinstance(exc, ValueError) and "fromhex" in str(exc):
         return traceback.format_exc().strip("\n") + "\n"
     return traceback.format_exc(limit=0).strip("\n") + "\n"
+
+
+def _readonly_recursive(value):
+    if isinstance(value, dict):
+        return MappingProxyType(
+            {key: _readonly_recursive(deepcopy(item)) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_readonly_recursive(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_readonly_recursive(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_readonly_recursive(item) for item in value)
+    return deepcopy(value)
 
 
 T = TypeVar("T")
@@ -173,6 +188,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         meta=None,
         pretransformation: "PreTransformation | None" = None,
         tf_dunder: dict | None = None,
+        scratch: bool = False,
+        definition_payload_template: dict[str, Any] | None = None,
     ) -> None:
         self._result_celltype = result_celltype
         self._upstream_dependencies = (upstream_dependencies or {}).copy()
@@ -180,20 +197,133 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._constructor_async = constructor_async
         self._transformation_checksum: Optional[Checksum] = None
         self._constructed = False
-        self._scratch = False
+        self._scratch = bool(scratch)
 
         self._evaluator_sync = evaluator_sync
         self._evaluator_async = evaluator_async
         self._result_checksum: Optional[Checksum] = None
         self._evaluated = False
         self._exception = None
-        self._meta = meta
+        self._cancelled = False
+        self._cancel_requested = False
+        self._cancel_message = "Transformation was canceled"
+        self._meta = deepcopy(meta) if isinstance(meta, dict) else {}
+        self._meta_view = _readonly_recursive(self._meta)
         self._destructor = destructor
         self._pretransformation = pretransformation
-        self._tf_dunder = tf_dunder or {}
+        self._tf_dunder = deepcopy(tf_dunder) if isinstance(tf_dunder, dict) else {}
+        self._definition_payload_template = (
+            deepcopy(definition_payload_template)
+            if isinstance(definition_payload_template, dict)
+            else None
+        )
         self._dask_futures: TransformationFutures | None = None
         self._computation_task: Optional[asyncio.Task] = None
         self._computation_future: Optional[asyncio.Future] = None
+
+    def _mark_cancelled(self, message: str | None = None) -> None:
+        self._cancelled = True
+        self._cancel_requested = True
+        if message is not None:
+            self._cancel_message = message
+        self._exception = self._cancel_message
+        self._result_checksum = None
+        self._evaluated = True
+        self._constructed = True
+        self._computation_task = None
+        self._computation_future = None
+        self._dask_futures = None
+
+    def _release_dask_futures(self, *, cancel: bool) -> bool:
+        futures = getattr(self, "_dask_futures", None)
+        if futures is None:
+            return False
+        client = None
+        try:
+            client = self._dask_client()
+        except Exception:
+            client = None
+        if client is not None:
+            release = getattr(client, "release_transformation_futures", None)
+            if callable(release):
+                try:
+                    release(futures, cancel=cancel)
+                except Exception:
+                    pass
+        self._dask_futures = None
+        return True
+
+    def _cancel_local_futures(self) -> bool:
+        transitioned = False
+        task = self._computation_task
+        if task is not None and not task.done():
+            task.cancel()
+            transitioned = True
+        future = self._computation_future
+        if future is not None:
+            try:
+                if not future.done():
+                    future.cancel()
+                    transitioned = True
+            except Exception:
+                pass
+        if self._release_dask_futures(cancel=True):
+            transitioned = True
+        return transitioned
+
+    async def cancel_async(self, *, recursive: bool = False) -> bool:
+        """Cancel this transformation promise.
+
+        Cancellation is terminal for this Python object. Already-running CPU work
+        may continue outside Python's control, but its result is detached from
+        this promise.
+        """
+
+        if self._cancelled:
+            return False
+        if self._evaluated and self._result_checksum is not None:
+            return False
+        was_incomplete = not self._evaluated
+
+        transitioned = self._cancel_local_futures()
+        if recursive:
+            for dep in self._upstream_dependencies.values():
+                try:
+                    transitioned = (
+                        await dep.cancel_async(recursive=True)
+                    ) or transitioned
+                except Exception:
+                    pass
+
+        task = self._computation_task
+        if task is not None:
+            try:
+                await task
+            except asyncio.CancelledError:
+                transitioned = True
+            except Exception:
+                pass
+        self._mark_cancelled()
+        return bool(transitioned or was_incomplete)
+
+    def cancel(self, *, recursive: bool = False) -> bool:
+        """Cancel this transformation promise."""
+
+        if self._cancelled:
+            return False
+        if self._evaluated and self._result_checksum is not None:
+            return False
+        was_incomplete = not self._evaluated
+
+        transitioned = self._cancel_local_futures()
+        if recursive:
+            for dep in self._upstream_dependencies.values():
+                try:
+                    transitioned = dep.cancel(recursive=True) or transitioned
+                except Exception:
+                    pass
+        self._mark_cancelled()
+        return bool(transitioned or was_incomplete)
 
     def _prefer_local_execution(self) -> bool:
         try:
@@ -209,7 +339,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     @scratch.setter
     def scratch(self, value: bool) -> None:
-        self._scratch = value
+        raise TransformationError("Transformation definition is immutable")
 
     @property
     def allow_input_fingertip(self) -> bool:
@@ -227,6 +357,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         In case of failure, set .exception and return None
         """
         ensure_open("transformation construct")
+        if self._cancelled:
+            return None
         if self._constructed:
             return self._transformation_checksum
         try:
@@ -255,6 +387,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         In case of failure, set .exception and return None
         """
         ensure_open("transformation construction")
+        if self._cancelled:
+            return None
         if self._constructed:
             return self._transformation_checksum
         try:
@@ -306,6 +440,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         return is_cached_sync(self._transformation_checksum)
 
     def _evaluate(self) -> Checksum | None:
+        if self._cancelled:
+            return None
         if self._evaluated:
             return self._result_checksum
         self.construct()
@@ -344,6 +480,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             self._exception = _format_exception(exc)
 
     async def _evaluation(self, require_value: bool) -> Checksum | None:
+        if self._cancelled:
+            return None
         if self._evaluated:
             if require_value:
                 await self._ensure_result_value()
@@ -421,28 +559,11 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     @property
     def meta(self):
-        return self._meta
+        return self._meta_view
 
     @meta.setter
     def meta(self, meta):
-        if self._meta is None:
-            self._meta = {}
-        self._meta.update(meta)
-        for k in list(self._meta.keys()):
-            if self._meta[k] is None:
-                self._meta.pop(k)
-        pretransformation = getattr(self, "_pretransformation", None)
-        if pretransformation is not None:
-            try:
-                if self._meta:
-                    pretransformation.pretransformation_dict["__meta__"] = deepcopy(
-                        self._meta
-                    )
-                else:
-                    pretransformation.pretransformation_dict.pop("__meta__", None)
-            except Exception:
-                pass
-        return self._meta
+        raise TransformationError("Transformation definition is immutable")
 
     def _verify_sync(self, task_loop0, err_msg: str, jupyter_err_msg: str):
         task_loops: dict[str | None, Any] = {None: task_loop0}
@@ -513,6 +634,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     def _compute(self, api_origin: str) -> Checksum | None:
         ensure_open("transformation compute")
+        if self._cancelled:
+            return None
         if self._evaluated:
             return self._result_checksum
         if self._computation_task is None and self._computation_future is None:
@@ -624,6 +747,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         (If only the checksum is available, the transformation will be recomputed.)
         """
         ensure_open("transformation computation")
+        if self._cancelled:
+            return None
         if _dask_available() and not self._prefer_local_execution():
             if self._computation_task is not None:
                 await self._computation_task
@@ -674,6 +799,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     ) -> "Transformation[T]":
         """Ensure the computation task is scheduled; return self for chaining."""
         ensure_open("transformation start")
+        if self._cancelled:
+            return self
         for _depname, dep in self._upstream_dependencies.items():
             dep.start()
         if _dask_available() and not self._prefer_local_execution():
@@ -750,6 +877,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     @property
     def result_checksum(self) -> Checksum:
+        if self._cancelled:
+            raise TransformationError(self._cancel_message)
         if self._transformation_checksum is None:
             if self._exception is not None:
                 raise TransformationError(
@@ -794,9 +923,13 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         return buf.get_value(self.celltype)
 
     async def _run(self) -> T:
-        await self.computation(require_value=False)
-        checksum = self.result_checksum  # Will raise an exception if there is one
-        return await checksum.fingertip(self.celltype)
+        try:
+            await self.computation(require_value=False)
+            checksum = self.result_checksum  # Will raise an exception if there is one
+            return await checksum.fingertip(self.celltype)
+        except asyncio.CancelledError:
+            self._mark_cancelled()
+            raise
 
     def task(self) -> asyncio.Task[T]:
         """Create a Task Run the transformation and returns the result,
@@ -831,6 +964,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         raise NotImplementedError("transformation logs are not ported in this codebase")
 
     def clear_exception(self) -> None:
+        if self._cancelled:
+            return
         self._exception = None
         if self._constructed and self._transformation_checksum is None:
             self._constructed = False
@@ -840,6 +975,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     @property
     def status(self) -> str:
         try:
+            if self._cancelled:
+                return "Status: canceled"
             if self._exception is not None:
                 return "Status: exception"
             if self._evaluated:
@@ -880,21 +1017,28 @@ def transformation_from_pretransformation(
     tf_dunder: dict | None = None,
 ) -> Transformation[T]:
     """Build a Transformation from a PreTransformation"""
-    from .transformation_utils import tf_get_buffer
     from .transformation_cache import run_sync, run
 
-    tf_dunder = tf_dunder or {}
+    explicit_tf_dunder = deepcopy(tf_dunder) if isinstance(tf_dunder, dict) else {}
+    frozen_payload_template, frozen_dependencies = (
+        pre_transformation.build_partial_transformation(upstream_dependencies)
+    )
+    frozen_payload_template = deepcopy(frozen_payload_template)
+    frozen_dependencies = dict(frozen_dependencies)
+    frozen_meta = deepcopy(meta) if isinstance(meta, dict) else {}
+    prepared_execution_dict: dict[str, Any] | None = None
+    prepared_tf_dunder: dict[str, Any] = {}
 
-    def _collect_tf_dunder() -> dict[str, Any]:
-        dunder = extract_tf_dunder(pre_transformation.pretransformation_dict)
-        if tf_dunder:
-            dunder.update(deepcopy(tf_dunder))
+    def _collect_tf_dunder(transformation_dict: dict[str, Any]) -> dict[str, Any]:
+        dunder = extract_tf_dunder(transformation_dict)
+        if explicit_tf_dunder:
+            dunder.update(deepcopy(explicit_tf_dunder))
         meta_payload: dict[str, Any] = {}
         existing_meta = dunder.get("__meta__")
         if isinstance(existing_meta, dict):
             meta_payload.update(existing_meta)
-        if isinstance(meta, dict):
-            meta_payload.update(meta)
+        if frozen_meta:
+            meta_payload.update(frozen_meta)
         try:
             from .run import is_driver_context
         except Exception:
@@ -906,6 +1050,23 @@ def transformation_from_pretransformation(
         if meta_payload:
             dunder["__meta__"] = deepcopy(meta_payload)
         return dunder
+
+    def _prepared_dict_with_dependencies(
+        transformation_obj: "Transformation",
+    ) -> dict[str, Any]:
+        transformation_dict = deepcopy(frozen_payload_template)
+        for pinname, dep in transformation_obj._upstream_dependencies.items():
+            if dep.exception is not None:
+                msg = f"Dependency '{pinname}' has an exception:\n{dep.exception}"
+                raise RuntimeError(msg)
+            celltype, subcelltype, _value = transformation_dict[pinname]
+            result_checksum = dep.result_checksum
+            transformation_dict[pinname] = (
+                celltype,
+                subcelltype,
+                result_checksum.hex(),
+            )
+        return transformation_dict
 
     def _inject_dependency_dunder(
         transformation_obj: "Transformation", base_dunder: dict[str, Any]
@@ -924,17 +1085,15 @@ def transformation_from_pretransformation(
         return payload
 
     def constructor_sync(transformation_obj):  # pylint: disable=unused-argument
-        nonlocal tf_dunder
+        nonlocal prepared_execution_dict, prepared_tf_dunder
         transformation_obj._run_dependencies()
         if transformation_obj.exception is not None:
             raise RuntimeError(transformation_obj.exception)
-        pre_transformation.prepare_transformation()
-        tf_dunder = _collect_tf_dunder()
-        tf_buffer = tf_get_buffer(pre_transformation.pretransformation_dict)
+        prepared_execution_dict = _prepared_dict_with_dependencies(transformation_obj)
+        prepared_tf_dunder = _collect_tf_dunder(prepared_execution_dict)
+        tf_buffer = tf_get_buffer(prepared_execution_dict)
         tf_checksum = tf_buffer.get_checksum()
         tf_buffer.tempref()
-        ### tf_dunder = extract_dunder(pre_transformation.pretransformation_dict)
-        # TODO: populate tf_dunder from transformation metadata if needed
 
         return tf_checksum
 
@@ -947,10 +1106,14 @@ def transformation_from_pretransformation(
     def evaluator_sync(
         transformation_obj: Transformation, require_value: bool
     ) -> Checksum:
+        if prepared_execution_dict is None:
+            raise TransformationError("Transformation has not been constructed")
         scratch = transformation_obj.scratch
-        tf_dunder_payload = _inject_dependency_dunder(transformation_obj, tf_dunder)
+        tf_dunder_payload = _inject_dependency_dunder(
+            transformation_obj, prepared_tf_dunder
+        )
         return run_sync(
-            pre_transformation.pretransformation_dict,
+            deepcopy(prepared_execution_dict),
             tf_checksum=transformation_obj.transformation_checksum,
             tf_dunder=tf_dunder_payload,
             scratch=scratch,
@@ -958,10 +1121,14 @@ def transformation_from_pretransformation(
         )
 
     async def evaluator_async(transformation_obj, require_value: bool) -> Checksum:
+        if prepared_execution_dict is None:
+            raise TransformationError("Transformation has not been constructed")
         scratch = transformation_obj.scratch
-        tf_dunder_payload = _inject_dependency_dunder(transformation_obj, tf_dunder)
+        tf_dunder_payload = _inject_dependency_dunder(
+            transformation_obj, prepared_tf_dunder
+        )
         return await run(
-            pre_transformation.pretransformation_dict,
+            deepcopy(prepared_execution_dict),
             tf_checksum=transformation_obj.transformation_checksum,
             tf_dunder=tf_dunder_payload,
             scratch=scratch,
@@ -977,13 +1144,14 @@ def transformation_from_pretransformation(
         constructor_async,
         evaluator_sync,
         evaluator_async,
-        upstream_dependencies=upstream_dependencies,
-        meta=meta,
+        upstream_dependencies=frozen_dependencies,
+        meta=frozen_meta,
         destructor=destructor,
         pretransformation=pre_transformation,
-        tf_dunder=tf_dunder,
+        tf_dunder=explicit_tf_dunder,
+        scratch=scratch,
+        definition_payload_template=frozen_payload_template,
     )
-    tf.scratch = scratch
     return tf
 
 
