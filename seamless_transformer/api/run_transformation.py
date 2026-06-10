@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -17,7 +18,11 @@ from seamless import CacheMissError, Checksum
 
 from seamless_transformer.cmd.file_load import read_checksum_file
 from seamless_transformer.remote_job import RemoteJobWritten
-from seamless_transformer.transformation_cache import get_transformation_cache, run_sync
+from seamless_transformer.transformation_cache import get_transformation_cache
+from seamless_transformer.transformation_class import (
+    compute_transformation_sync,
+    transformation_from_dict,
+)
 from seamless_transformer.transformation_utils import extract_tf_dunder
 
 try:
@@ -47,6 +52,32 @@ def _parse_checksum(checksum_arg: str) -> Checksum:
             raise ValueError(f"Invalid checksum file '{checksum_arg}'")
         return Checksum(checksum_hex)
     return Checksum(checksum_arg)
+
+
+def _read_dunder_file(path: str) -> dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as handle:
+        dunder = json.load(handle)
+    if not isinstance(dunder, dict):
+        raise TypeError(f"Dunder file '{path}' does not contain a JSON object")
+    return dunder
+
+
+def _default_dunder_path(checksum_arg: str) -> str | None:
+    if not checksum_arg.endswith(".CHECKSUM") or not os.path.exists(checksum_arg):
+        return None
+    candidate = os.path.join(os.path.dirname(checksum_arg), "dunder.json")
+    if os.path.exists(candidate):
+        return candidate
+    return None
+
+
+def _load_dunder(checksum_arg: str, dunder_arg: str | None) -> dict[str, Any]:
+    dunder_path = (
+        dunder_arg if dunder_arg is not None else _default_dunder_path(checksum_arg)
+    )
+    if dunder_path is None:
+        return {}
+    return _read_dunder_file(dunder_path)
 
 
 def _resolve_transformation_dict(checksum: Checksum) -> dict[str, Any]:
@@ -163,8 +194,15 @@ def _main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", help="Output file (default: stdout)")
 
-    # TODO: --dunder, --undo, --global-info need new-codebase support.
-    # parser.add_argument("--dunder", help="Dunder file with transformation metadata")
+    parser.add_argument(
+        "--dunder",
+        help=(
+            "Dunder JSON file with transformation metadata. Defaults to "
+            "dunder.json next to a checksum file, if present."
+        ),
+    )
+
+    # TODO: --undo, --global-info need new-codebase support.
     # parser.add_argument("--undo", action="store_true", default=False)
     # parser.add_argument("--global-info", dest="global_info")
 
@@ -200,6 +238,7 @@ def _main(argv: list[str] | None = None) -> int:
     try:
         checksum = _parse_checksum(args.checksum)
         transformation_dict = _resolve_transformation_dict(checksum)
+        dunder = _load_dunder(args.checksum, args.dunder)
     except Exception as exc:
         import traceback
 
@@ -218,15 +257,18 @@ def _main(argv: list[str] | None = None) -> int:
         transformation_dict["__meta__"] = meta
 
     tf_dunder = extract_tf_dunder(transformation_dict)
+    tf_dunder.update(dunder)
     try:
         with _cancel_current_on_termination(checksum):
-            result_checksum = run_sync(
+            transformation = transformation_from_dict(
                 transformation_dict,
-                tf_checksum=checksum,
                 tf_dunder=tf_dunder,
                 scratch=bool(args.scratch),
-                require_value=False,
                 strict_dunder=bool(args.strict_dunder),
+            )
+            result_checksum = compute_transformation_sync(
+                transformation,
+                require_value=False,
             )
         if result_checksum is None:
             raise RuntimeError("Result checksum unavailable")

@@ -189,6 +189,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         pretransformation: "PreTransformation | None" = None,
         tf_dunder: dict | None = None,
         scratch: bool = False,
+        strict_dunder: bool = False,
         definition_payload_template: dict[str, Any] | None = None,
     ) -> None:
         self._result_celltype = result_celltype
@@ -207,7 +208,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._cancelled = False
         self._cancel_requested = False
         self._cancel_message = "Transformation was canceled"
-        self._strict_dunder = False
+        self._strict_dunder = bool(strict_dunder)
         self._meta = deepcopy(meta) if isinstance(meta, dict) else {}
         self._meta_view = _readonly_recursive(self._meta)
         self._destructor = destructor
@@ -1040,6 +1041,7 @@ def transformation_from_pretransformation(
     meta: dict,
     scratch: bool,
     tf_dunder: dict | None = None,
+    strict_dunder: bool = False,
     post_prepare_sync=None,
     post_prepare_async=None,
 ) -> Transformation[T]:
@@ -1157,6 +1159,7 @@ def transformation_from_pretransformation(
             tf_dunder=tf_dunder_payload,
             scratch=scratch,
             require_value=require_value,
+            strict_dunder=bool(transformation_obj._strict_dunder),
         )
 
     async def evaluator_async(transformation_obj, require_value: bool) -> Checksum:
@@ -1172,6 +1175,7 @@ def transformation_from_pretransformation(
             tf_dunder=tf_dunder_payload,
             scratch=scratch,
             require_value=require_value,
+            strict_dunder=bool(transformation_obj._strict_dunder),
         )
 
     def destructor(transformation_obj):  # pylint: disable=unused-argument
@@ -1189,6 +1193,7 @@ def transformation_from_pretransformation(
         pretransformation=pre_transformation,
         tf_dunder=explicit_tf_dunder,
         scratch=scratch,
+        strict_dunder=strict_dunder,
         definition_payload_template=frozen_payload_template,
     )
     return tf
@@ -1200,6 +1205,7 @@ def transformation_from_dict(
     meta: dict | None = None,
     scratch: bool = False,
     tf_dunder: dict | None = None,
+    strict_dunder: bool = False,
 ) -> Transformation[T]:
     """Build a Transformation from an already-prepared transformation dict."""
     from .pretransformation import PreparedPreTransformation
@@ -1211,6 +1217,7 @@ def transformation_from_dict(
         meta=meta or {},
         scratch=scratch,
         tf_dunder=tf_dunder,
+        strict_dunder=strict_dunder,
     )
 
 

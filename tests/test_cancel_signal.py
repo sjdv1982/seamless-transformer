@@ -7,6 +7,7 @@ from seamless import Checksum
 from seamless_transformer.api import run_transformation
 from seamless_transformer.cmd import bash_transformation
 from seamless_transformer.cmd.api import main as run_main
+from seamless_transformer import transformation_cache
 
 
 class _FakeCache:
@@ -131,4 +132,29 @@ def test_seamless_run_sigint_cancels_active_dask_submission(monkeypatch):
                 scratch=False,
             )
 
+    assert calls == [checksum.hex()]
+
+
+def test_cancel_by_checksum_propagates_to_jobserver(monkeypatch):
+    checksum = Checksum("d" * 64)
+    calls = []
+
+    class _FakeJobserverRemote:
+        def cancel_transformation(self, tf_checksum):
+            calls.append(Checksum(tf_checksum).hex())
+            return True
+
+    monkeypatch.setattr(transformation_cache.worker, "cancel_by_checksum", lambda _: False)
+    monkeypatch.setattr(
+        "seamless_dask.transformer_client.get_seamless_dask_client",
+        lambda: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        transformation_cache,
+        "jobserver_remote",
+        _FakeJobserverRemote(),
+    )
+
+    assert transformation_cache.get_transformation_cache().cancel_by_checksum(checksum)
     assert calls == [checksum.hex()]
