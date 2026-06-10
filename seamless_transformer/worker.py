@@ -39,7 +39,7 @@ from seamless import Buffer, CacheMissError, Checksum, set_is_worker, ensure_ope
 from seamless.caching.buffer_cache import get_buffer_cache
 
 from .process import ChildChannel, ProcessManager, ConnectionClosed
-from .process.manager import ProcessError
+from .process.manager import ProcessError, ProcessHandle
 from .remote_job import parse_remote_job_written
 from .run import run_transformation_dict
 
@@ -770,6 +770,17 @@ class _WorkerManager:
         self._delegate_owner_cancelled: Dict[str, float] = {}
         self._delegate_owner_by_handle: Dict[str, str] = {}
         self._active_dispatches: Dict[str, set[_cf.Future]] = {}
+        # tf_checksum_hex -> names of worker handles currently executing that
+        # checksum, used to target a cancel (terminate + respawn) at the right
+        # subprocess so the slot is reclaimed rather than left running until the
+        # work finishes. Names (not handle objects) because ProcessHandle is an
+        # unhashable dataclass.
+        self._active_handles: Dict[str, set[str]] = {}
+        # Checksums that have been canceled: a ProcessError/ConnectionClosed for one
+        # of these (e.g. from terminating its worker) must abort the dispatch instead
+        # of migrating the job to a fresh worker, which would silently re-run the
+        # canceled computation.
+        self._cancelled_checksums: set[str] = set()
         self._active_dispatch_lock = threading.RLock()
 
         init_future = asyncio.run_coroutine_threadsafe(
@@ -909,6 +920,7 @@ class _WorkerManager:
         owner_dask_priority: int | None = None,
     ) -> Checksum | str:
         await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
+        tf_hex = Checksum(tf_checksum).hex()
         retry_attempts = 0
         max_retries = max(1, len(self._handles) * 3)
         while True:
@@ -957,6 +969,7 @@ class _WorkerManager:
                 self._delegate_owner_by_handle[handle.name] = owner_dask_key
             retry = False
             result: Checksum | str | None = None
+            self._remember_active_handle(tf_hex, handle)
             try:
                 payload = {
                     "transformation_dict": transformation_dict,
@@ -970,7 +983,15 @@ class _WorkerManager:
                 if owner_dask_priority is not None:
                     payload["owner_dask_priority"] = owner_dask_priority
                 result = await handle.request("execute_transformation", payload)
-            except ProcessError:
+            except (ProcessError, ConnectionClosed):
+                # A canceled checksum whose worker we just terminated must abort,
+                # not migrate to a fresh worker (which would re-run it). Innocent
+                # co-tenants of that worker fall through to the normal retry so they
+                # are re-dispatched rather than failed.
+                with self._active_dispatch_lock:
+                    cancelled = tf_hex in self._cancelled_checksums
+                if cancelled:
+                    raise
                 retry = True
                 retry_attempts += 1
                 try:
@@ -980,6 +1001,7 @@ class _WorkerManager:
                 if retry_attempts >= max_retries:
                     raise
             finally:
+                self._forget_active_handle(tf_hex, handle)
                 self._load[handle.name] = max(0, self._load.get(handle.name, 0) - 1)
                 if (
                     owner_dask_key
@@ -1061,21 +1083,72 @@ class _WorkerManager:
     def _forget_active_dispatch(self, tf_checksum_hex: str, fut: _cf.Future) -> None:
         with self._active_dispatch_lock:
             futures = self._active_dispatches.get(tf_checksum_hex)
-            if not futures:
-                return
-            futures.discard(fut)
-            if not futures:
-                self._active_dispatches.pop(tf_checksum_hex, None)
+            if futures:
+                futures.discard(fut)
+                if not futures:
+                    self._active_dispatches.pop(tf_checksum_hex, None)
+            # Once nothing is running this checksum, the cancellation guard can be
+            # dropped so a future re-submission is not mistaken for the canceled one.
+            if not self._active_dispatches.get(tf_checksum_hex) and not (
+                self._active_handles.get(tf_checksum_hex)
+            ):
+                self._cancelled_checksums.discard(tf_checksum_hex)
+
+    def _remember_active_handle(self, tf_checksum_hex: str, handle: ProcessHandle) -> None:
+        with self._active_dispatch_lock:
+            self._active_handles.setdefault(tf_checksum_hex, set()).add(handle.name)
+
+    def _forget_active_handle(self, tf_checksum_hex: str, handle: ProcessHandle) -> None:
+        with self._active_dispatch_lock:
+            handles = self._active_handles.get(tf_checksum_hex)
+            if handles:
+                handles.discard(handle.name)
+                if not handles:
+                    self._active_handles.pop(tf_checksum_hex, None)
+            if not self._active_handles.get(tf_checksum_hex) and not (
+                self._active_dispatches.get(tf_checksum_hex)
+            ):
+                self._cancelled_checksums.discard(tf_checksum_hex)
 
     def cancel_by_checksum(self, tf_checksum: Checksum | str) -> bool:
+        """Cancel a transformation and reclaim its execution slot.
+
+        The owner wait is released (the in-flight dispatch futures are canceled) and
+        every worker subprocess currently running this checksum is terminated and
+        respawned, so the slot is freed immediately instead of staying occupied until
+        the abandoned computation finishes. The checksum is recorded as canceled so
+        the terminated dispatch aborts rather than migrating to a fresh worker.
+        """
+
         tf_checksum_hex = Checksum(tf_checksum).hex()
         with self._active_dispatch_lock:
+            self._cancelled_checksums.add(tf_checksum_hex)
             futures = list(self._active_dispatches.pop(tf_checksum_hex, set()))
+            handle_names = set(self._active_handles.get(tf_checksum_hex, set()))
+        by_name = {h.name: h for h in self._handles}
+        handles = [by_name[name] for name in handle_names if name in by_name]
         canceled = False
         for fut in futures:
             if fut.done():
                 continue
             canceled = fut.cancel() or canceled
+        for handle in handles:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._manager.restart_worker(handle), self.loop
+                )
+                canceled = True
+            except Exception:
+                pass
+        if not handles:
+            # No worker subprocess is running this checksum, so nothing will later
+            # clear the guard via _forget_active_handle; drop it now unless a dispatch
+            # is still registered (it will clear the guard when it ends).
+            with self._active_dispatch_lock:
+                if not self._active_handles.get(
+                    tf_checksum_hex
+                ) and not self._active_dispatches.get(tf_checksum_hex):
+                    self._cancelled_checksums.discard(tf_checksum_hex)
         return canceled
 
     async def _store_delegate_entry(self, token: str, entry: Dict[str, Any]) -> None:
