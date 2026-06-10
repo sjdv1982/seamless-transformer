@@ -54,7 +54,7 @@ def cancel_by_checksum(tf_checksum: Checksum) -> tuple[bool, list[str]]:
         messages.append(f"process: error: {exc}")
     else:
         try:
-            if get_transformation_cache().cancel_by_checksum(tf_checksum):
+            if get_transformation_cache().cancel_by_checksum(tf_checksum, remote=False):
                 canceled = True
                 messages.append("process: canceled")
             else:

@@ -345,7 +345,9 @@ class TransformationCache:
                 if self._active_submissions.get(tf_checksum) is active:
                     self._active_submissions.pop(tf_checksum, None)
 
-    def cancel_by_checksum(self, tf_checksum: Checksum | str) -> bool:
+    def cancel_by_checksum(
+        self, tf_checksum: Checksum | str, *, remote: bool = True
+    ) -> bool:
         tf_checksum = Checksum(tf_checksum)
         canceled = False
         with self._active_lock:
@@ -360,19 +362,27 @@ class TransformationCache:
             canceled = worker.cancel_by_checksum(tf_checksum) or canceled
         except Exception:
             pass
-        try:
-            from seamless_dask.transformer_client import get_seamless_dask_client
-        except Exception:
-            dask_client = None
-        else:
-            dask_client = get_seamless_dask_client()
-        if dask_client is not None:
-            cancel = getattr(dask_client, "cancel_by_checksum", None)
-            if callable(cancel):
-                try:
-                    canceled = bool(cancel(tf_checksum)) or canceled
-                except Exception:
-                    pass
+        if remote:
+            try:
+                from seamless_dask.transformer_client import get_seamless_dask_client
+            except Exception:
+                dask_client = None
+            else:
+                dask_client = get_seamless_dask_client()
+            if dask_client is not None:
+                cancel = getattr(dask_client, "cancel_by_checksum", None)
+                if callable(cancel):
+                    try:
+                        canceled = bool(cancel(tf_checksum)) or canceled
+                    except Exception:
+                        pass
+            if jobserver_remote is not None:
+                cancel = getattr(jobserver_remote, "cancel_transformation", None)
+                if callable(cancel):
+                    try:
+                        canceled = bool(cancel(tf_checksum)) or canceled
+                    except Exception:
+                        pass
         return canceled
 
     def transformation_status(self, tf_checksum: Checksum | str) -> str:

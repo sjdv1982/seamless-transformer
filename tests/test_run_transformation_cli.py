@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import uuid
 
 from seamless import Buffer, Checksum
 
@@ -33,13 +34,66 @@ def _assert_success(proc):
     )
 
 
-def _prepare_uploaded_echo_job(tmp_path):
+def _write_remote_config(workdir, *, backend, project):
+    cluster = f"cluster-{uuid.uuid4().hex}"
+    (workdir / "seamless.yaml").write_text(
+        "\n".join(
+            [
+                "- clusters:",
+                f"    {cluster}:",
+                "      type: local",
+                "      workers: 1",
+                "      frontends:",
+                "        - hashserver:",
+                f"            bufferdir: {workdir / 'buffers'}",
+                "            conda: seamless1",
+                "            port_start: 10000",
+                "            port_end: 19999",
+                "          database:",
+                f"            database_dir: {workdir / 'buffers'}",
+                "            conda: seamless1",
+                "            port_start: 20000",
+                "            port_end: 29999",
+                "          jobserver:",
+                "            conda: seamless1",
+                "            network_interface: 0.0.0.0",
+                "            port_start: 20000",
+                "            port_end: 29999",
+                "          daskserver:",
+                "            network_interface: 0.0.0.0",
+                "            port_start: 20000",
+                "            port_end: 29999",
+                "      default_queue: default",
+                "      queues:",
+                "        default:",
+                "          conda: seamless1",
+                "          interactive: true",
+                "          walltime: 10m",
+                "          memory: 30000MB",
+                f"- project: {project}",
+                "- execution: remote",
+                f"- remote: {backend}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (workdir / "seamless.profile.yaml").write_text(
+        f"- cluster: {cluster}\n",
+        encoding="utf-8",
+    )
+
+
+def _prepare_uploaded_echo_job(tmp_path, *, backend="jobserver"):
     workdir = tmp_path / "work"
-    cache_dir = tmp_path / "cache"
     job_dir = tmp_path / "job"
     workdir.mkdir()
-    cache_dir.mkdir()
-    env = {"SEAMLESS_CACHE": str(cache_dir)}
+    env = {}
+    _write_remote_config(
+        workdir,
+        backend=backend,
+        project=f"run-transformation-{backend}-{uuid.uuid4().hex}",
+    )
 
     proc = _run_command(
         [
@@ -62,13 +116,6 @@ def _prepare_uploaded_echo_job(tmp_path):
     checksum_file = job_dir / "transformation.json.CHECKSUM"
     assert checksum_file.read_text().strip() == checksum
     return workdir, env, checksum, checksum_file
-
-
-def _write_daskserver_config(workdir):
-    (workdir / "seamless.yaml").write_text(
-        "- project: cmd-test\n- execution: remote\n- remote: daskserver\n"
-    )
-    (workdir / "seamless.profile.yaml").write_text("- cluster: local\n")
 
 
 def _extract_labeled_checksum(label, proc):
@@ -229,8 +276,10 @@ def test_run_transformation_cli_replays_uploaded_job_checksum_file(tmp_path):
 def test_run_transformation_cli_replays_uploaded_job_checksum_file_with_daskserver_config(
     tmp_path,
 ):
-    workdir, env, _checksum, checksum_file = _prepare_uploaded_echo_job(tmp_path)
-    _write_daskserver_config(workdir)
+    workdir, env, _checksum, checksum_file = _prepare_uploaded_echo_job(
+        tmp_path,
+        backend="daskserver",
+    )
 
     proc = _run_command(
         [
@@ -249,10 +298,13 @@ def test_run_transformation_cli_replays_delayed_python_transformation_checksum(
     tmp_path,
 ):
     workdir = tmp_path / "work"
-    cache_dir = tmp_path / "cache"
     workdir.mkdir()
-    cache_dir.mkdir()
-    env = {"SEAMLESS_CACHE": str(cache_dir)}
+    env = {}
+    _write_remote_config(
+        workdir,
+        backend="jobserver",
+        project=f"delayed-transformation-{uuid.uuid4().hex}",
+    )
     producer = workdir / "make_delayed_checksum.py"
     producer.write_text(
         "\n".join(
