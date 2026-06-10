@@ -171,6 +171,45 @@ class ProcessManager:
         handle.endpoint = None
         handle.process = None
 
+    async def restart_worker(self, handle: ProcessHandle) -> bool:
+        """Hard-terminate a worker process and respawn a fresh one in its place.
+
+        Used to reclaim a worker slot when a transformation running on it is
+        canceled. Any other transformations sharing that worker are torn down with
+        it; the dispatcher re-runs those (they were not canceled). Returns True if a
+        live process was terminated.
+        """
+
+        if handle.closing or self._closing or not handle.restart:
+            return False
+        # Prevent the endpoint monitor from racing us into a second restart.
+        handle.restarting = True
+        handle.cancel_watchers()
+        endpoint = handle.endpoint
+        if endpoint:
+            try:
+                await endpoint.aclose()
+            except Exception:
+                pass
+        process = handle.process
+        terminated = False
+        if process and process.is_alive():
+            process.terminate()
+            process.join(timeout=2.0)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1.0)
+            terminated = True
+        if handle.pid is not None:
+            await self.memory_registry.reset_pid(handle.pid)
+        if handle.restart and not self._closing and not handle.closing:
+            await self._spawn_into_handle(handle)
+        else:
+            handle.restarting = False
+            handle.endpoint = None
+            handle.process = None
+        return terminated
+
     async def _spawn_into_handle(self, handle: ProcessHandle) -> None:
         parent_conn, child_conn = _CTX.Pipe()
         initializer = handle.initializer

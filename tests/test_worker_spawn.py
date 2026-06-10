@@ -74,6 +74,9 @@ def test_daemon_thread_pool_executor_executes_tasks():
 def test_worker_manager_cancel_by_checksum_cancels_active_dispatches():
     manager = worker._WorkerManager.__new__(worker._WorkerManager)
     manager._active_dispatches = {}
+    manager._active_handles = {}
+    manager._cancelled_checksums = set()
+    manager._handles = []
     manager._active_dispatch_lock = worker.threading.RLock()
     checksum = Checksum("6" * 64)
     future = concurrent.futures.Future()
@@ -83,3 +86,6 @@ def test_worker_manager_cancel_by_checksum_cancels_active_dispatches():
     assert manager.cancel_by_checksum(checksum) is True
     assert future.cancelled()
     assert manager._active_dispatches == {}
+    # With no worker actually running the checksum, the cancellation guard is not
+    # left dangling.
+    assert checksum.hex() not in manager._cancelled_checksums
