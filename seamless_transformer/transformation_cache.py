@@ -515,15 +515,20 @@ class TransformationCache:
         elif is_worker() and not force_local:
             assert not worker.has_spawned()
             _debug("forwarding transformation request to parent")
-            result_checksum = await _await_with_active_cancellation(
-                worker.forward_to_parent(
-                    transformation_dict,
-                    tf_checksum=tf_checksum,
-                    tf_dunder=tf_dunder,
-                    scratch=scratch,
-                    strict_dunder=strict_dunder,
-                ),
-                active_submission,
+            # Plain await, no _await_with_active_cancellation: cancellation of
+            # delegated work reaches us through the delegation protocol itself
+            # (the parent resolves the proxy future to "cancelled"). Racing the
+            # forward with a local cancel future means a cancel/release cancels
+            # the forward task mid-protocol, which cancels the delegate proxy
+            # future and makes the poll loop tell the parent to cancel the
+            # delegated Dask submission, wedging nested Dask dependency
+            # bookkeeping (tasks stuck in cancelled/executing on the workers).
+            result_checksum = await worker.forward_to_parent(
+                transformation_dict,
+                tf_checksum=tf_checksum,
+                tf_dunder=tf_dunder,
+                scratch=scratch,
+                strict_dunder=strict_dunder,
             )
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
