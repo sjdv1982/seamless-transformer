@@ -52,6 +52,8 @@ def write_bash_job(
 ):
     """Materialize a bash transformation job in the current directory."""
 
+    META_FILE_PREFIX = "META__FILE__"
+
     env = os.environ.copy()
     base_env = env.copy()
     for pin in pins_:
@@ -62,6 +64,10 @@ def write_bash_job(
         v = PINS[pin]
         if isinstance(v, Buffer):
             v = v.content
+        if pin.startswith(META_FILE_PREFIX):
+            actual_name = pin[len(META_FILE_PREFIX):]
+            _write_file(actual_name, v if isinstance(v, bytes) else v.encode(), "bw")
+            continue
         if pin in FILESYSTEM:
             if FILESYSTEM[pin]["filesystem"]:
                 env[pin] = v

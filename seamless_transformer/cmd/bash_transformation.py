@@ -76,6 +76,7 @@ def prepare_bash_transformation(
     meta: dict,
     variables: dict | None,
     meta_variables: dict | None = None,
+    meta_file_checksums: dict[str, str] | None = None,
     dry_run: bool = False,
 ) -> str:
     """Prepare a bash transformation for execution.
@@ -151,6 +152,12 @@ def prepare_bash_transformation(
                 raise TypeError(celltype)
             new_args[f"META__{k}"] = celltype, None, value
             meta_variable_names.append(k)
+
+    if meta_file_checksums:
+        for name, checksum in meta_file_checksums.items():
+            if not isinstance(checksum, str):
+                checksum = Checksum(checksum).hex()
+            transformation_dict[f"META__FILE__{name}"] = ("bytes", None, checksum)
 
     bashcode = prepare_bash_code(
         code,

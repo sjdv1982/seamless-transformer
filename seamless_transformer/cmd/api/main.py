@@ -137,6 +137,7 @@ def _load_input_file(path: str) -> list[str]:
     return result
 
 
+
 def _parse_var_spec(spec: str) -> tuple[str, str]:
     if "=" not in spec:
         err(f"Invalid --var '{spec}': expected NAME=VALUE")
@@ -321,6 +322,21 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
             "Use for execution hints (thread counts, verbosity, debug flags) that "
             "should not invalidate the cache. Use --var for values that are part of "
             "the computation and should invalidate the cache when changed."
+        ),
+    )
+    parser.add_argument(
+        "--metafile",
+        action="append",
+        dest="metafiles",
+        metavar="FILE",
+        help=(
+            "Add FILE as a meta-pin input (repeatable). "
+            "Behaves like -i/--input: the file is checksummed and injected into the "
+            "transformation workspace under its mapped name. "
+            "Unlike -i, the pin is stored as META__FILE__<name> and does NOT "
+            "contribute to the transformation identity (cache key). "
+            "Use for configuration files, hints, or any input whose change should not "
+            "invalidate the cache."
         ),
     )
 
@@ -646,59 +662,38 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
 
     first_command = commands[primary_index]
 
-    (
-        interface_argindex,
-        interface_file,
-        interface_py_file,
-        mapped_execarg,
-    ) = interface.locate_files(first_command.words)
+    first_mapped_execarg = interface.resolve_executable(first_command.words)
 
     msg(1, f"First command: {first_command.commandstring}")
 
     first_command_words = copy(first_command.words)
-    if mapped_execarg:
-        first_command_words[0] = mapped_execarg
+    if first_mapped_execarg:
+        first_command_words[0] = first_mapped_execarg
     first_pipeline_words = copy(first_command_words)
 
-    argtypes_initial, results_initial = interface.get_argtypes_and_results(
-        interface_file,
-        interface_py_file,
-        interface_argindex,
-        first_command_words,
-        first_command.words[0],
-    )
+    msg(2, "Try to obtain argtypes from rules")
 
-    if interface_py_file is None:
-        msg(2, "Try to obtain argtypes from rules")
+    overrule_ext, overrule_no_ext = False, False
+    if args.g1:
+        msg(1, "disable argtyping guess rule 1")
+        overrule_ext = True
+    if args.g2:
+        msg(1, "disable argtyping guess rule 2")
+        overrule_no_ext = True
 
-        overrule_ext, overrule_no_ext = False, False
-        if args.g1:
-            msg(1, "disable argtyping guess rule 1")
-            overrule_ext = True
-        if args.g2:
-            msg(1, "disable argtyping guess rule 2")
-            overrule_no_ext = True
-
-        try:
-            if primary_pipeline:
-                pp_start, pp_end = primary_pipeline
-                for com in commands[pp_start:pp_end]:
-                    if com is not first_command:
-                        first_pipeline_words += com.words
-            argtypes_guess = guess_arguments(
-                first_pipeline_words,
-                overrule_ext=overrule_ext,
-                overrule_no_ext=overrule_no_ext,
-            )
-        except ValueError as exc:
-            err(*exc.args)
-        if argtypes_initial is None:
-            argtypes_initial = argtypes_guess
-        else:
-            argtypes_temp = argtypes_initial
-            argtypes_initial = {}
-            argtypes_initial.update(argtypes_guess)
-            argtypes_initial.update(argtypes_temp)
+    try:
+        if primary_pipeline:
+            pp_start, pp_end = primary_pipeline
+            for com in commands[pp_start:pp_end]:
+                if com is not first_command:
+                    first_pipeline_words += com.words
+        argtypes_initial = guess_arguments(
+            first_pipeline_words,
+            overrule_ext=overrule_ext,
+            overrule_no_ext=overrule_no_ext,
+        )
+    except ValueError as exc:
+        err(*exc.args)
 
     extra_inputs: list[str] = []
     if args.extra_inputs:
@@ -722,6 +717,25 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
             ):
                 err(f"input argument '{inp}': file/directory does not exist")
 
+    meta_file_inputs: list[str] = []
+    if args.metafiles:
+        meta_file_inputs.extend(args.metafiles)
+
+    argtypes_meta_file_inputs = {}
+    if meta_file_inputs:
+        argtypes_meta_file_inputs = guess_arguments(
+            meta_file_inputs,
+            overrule_ext=True,
+            overrule_no_ext=True,
+        )
+        for inp in meta_file_inputs:
+            assert inp in argtypes_meta_file_inputs
+            if (
+                argtypes_meta_file_inputs[inp] == "value"
+                or argtypes_meta_file_inputs[inp]["type"] == "value"
+            ):
+                err(f"--metafile argument '{inp}': file/directory does not exist")
+
     argtypesstr = json.dumps(unchecksum(argtypes_initial), sort_keys=False, indent=2)
     msg(1, "initial argtypes dict:\n" + argtypesstr)
 
@@ -729,6 +743,7 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
     if file_mapping_mode is None:
         file_mapping_mode = "literal"
 
+    argtypes_meta_file_inputs2: dict = {}
     try:
         argtypes = get_file_mapping(
             argtypes_initial,
@@ -742,6 +757,12 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         )
         argtypes_extra_inputs2.pop("@order")
         argtypes.update(argtypes_extra_inputs2)
+        argtypes_meta_file_inputs2 = get_file_mapping(
+            argtypes_meta_file_inputs,
+            mapping_mode=file_mapping_mode,
+            working_directory=workdir,
+        )
+        argtypes_meta_file_inputs2.pop("@order")
     except ValueError as exc:
         err(*exc.args)
 
@@ -768,108 +789,21 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
             word_substitutions[node] = word
 
     ################################################################
-    interface_data = {}
     make_executables = []
-
-    def update_interface_data(new_interface_data, first):
-        changed = False
-        for k, v in new_interface_data.items():
-            if k in ("argtypes", "files", "directories", "shim"):
-                continue
-            curr = interface_data.get(k)
-            if k == "results":
-                if first:
-                    continue
-                if isinstance(v, list):
-                    v = {kk: None for kk in v}
-                if k not in interface_data:
-                    interface_data[k] = {}
-                if v:
-                    interface_data[k].update(v)
-                    changed = True
-                continue
-            if k == "environment":
-                if curr is None:
-                    interface_data[k] = v
-                    continue
-                if curr == v:
-                    continue
-                raise NotImplementedError("Multiple environments")
-
-            changed = True
-            if curr is None:
-                interface_data[k] = v
-            else:
-                if isinstance(v, list) != isinstance(curr, list):
-                    interface_data[k] = v
-                elif isinstance(curr, list):
-                    interface_data[k] += v
-                else:
-                    interface_data[k] = v
-        if changed:
-            msg(3, f"Updated interface data: {json.dumps(interface_data, indent=2)}")
 
     for commandnr, command in enumerate(commands):
         if commandnr != primary_index:
             msg(1, f"Command #{commandnr+1}: {command.commandstring}")
-            (
-                interface_argindex,
-                interface_file,
-                interface_py_file,
-                mapped_execarg,
-            ) = interface.locate_files(command.words)
-        if interface_file is not None or interface_py_file is not None:
-            if commandnr > 0:
-                msg(
-                    1,
-                    f"Interface files found for command #{commandnr+1}: {command.commandstring}",
-                )
+            mapped_execarg = interface.resolve_executable(command.words)
+            if mapped_execarg:
+                wordnode = command.wordnodes[0]
+                old_word = command.words[0]
+                if mapped_execarg != old_word:
+                    word_substitutions[wordnode] = mapped_execarg
+        else:
+            mapped_execarg = first_mapped_execarg
 
-        shim = None
-        if interface_file is not None:
-            msg(2, f"loading {interface_file}")
-            _new_interface_data = interface.load(interface_file.as_posix())
-            msg(
-                3,
-                f"{interface_file} content: {json.dumps(_new_interface_data, indent=2)}",
-            )
-            new_shim = _new_interface_data.get("shim")
-            if new_shim is not None:
-                shim = new_shim
-            update_interface_data(
-                _new_interface_data, first=(commandnr == primary_index)
-            )
-
-        if commandnr == primary_index:
-            interface_py_file = None
-        if interface_py_file is not None:
-            if commandnr == primary_index:
-                command_words = mapped_first_pipeline
-            else:
-                command_words = copy(command.words)
-                if mapped_execarg:
-                    command_words[0] = mapped_execarg
-
-            arguments = command_words[interface_argindex + 1 :]
-            _new_interface_data = interface.interface_from_py_file(
-                interface_py_file, arguments
-            )
-            msg(
-                3,
-                f"{interface_py_file} result: {json.dumps(_new_interface_data, indent=2)}",
-            )
-            new_shim = _new_interface_data.get("shim")
-            if new_shim is not None:
-                shim = new_shim
-            update_interface_data(
-                _new_interface_data, first=(commandnr == primary_index)
-            )
-
-            if shim:
-                wordnode = command.wordnodes[interface_argindex]
-                word_substitutions[wordnode] = shim
-
-        if mapped_execarg and not shim:
+        if mapped_execarg:
             wordnode = command.wordnodes[0]
             word = command.words[0]
             word = word_substitutions.get(wordnode, word)
@@ -899,22 +833,7 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         if redirection != redirection_node.word:
             word_substitutions[redirection_node] = redirection
 
-    if results_initial is None:
-        results_initial = {}
-    else:
-        msg(2, f"Initial result targets from first command: {results_initial}")
-        decal = os.path.relpath(os.getcwd(), workdir)
-        if decal != ".":
-            results_initial2 = results_initial.copy()
-            for _k, _v in results_initial.items():
-                if _v is None:
-                    _kk = os.path.join(decal, _k)
-                    results_initial2.pop(_k)
-                    results_initial2[_kk] = _v
-            results_initial = results_initial2
-
-    results = results_initial.copy()
-    results.update(interface_data.get("results", {}))
+    results = {}
 
     if args.extra_results:
         for extra_result in args.extra_results:
@@ -949,17 +868,11 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
     env = Environment()
 
     docker_image = args.docker_image
-    if docker_image is None:
-        docker_image = interface_data.get("environment", {}).get("docker_image")
-
     if docker_image is not None:
         msg(1, f'Set Docker image to "{docker_image}"')
         env.set_docker({"name": docker_image})
 
     conda_environment = args.conda_environment
-    if conda_environment is None:
-        conda_environment = interface_data.get("environment", {}).get("conda_environment")
-
     if conda_environment is not None:
         msg(1, f'Set conda environment to "{conda_environment}"')
         env.set_conda_env(conda_environment)
@@ -1056,6 +969,24 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
                     directories[path] = argname
                 mapping[argname] = path
 
+    meta_file_mapping = {}
+    meta_file_direct_checksums = {}
+    for argname, arg in argtypes_meta_file_inputs2.items():
+        if isinstance(arg, dict):
+            argtype = arg.get("type")
+            path = arg.get("mapping", argname)
+            direct_checksum = arg.get("checksum")
+        else:
+            argtype = arg
+            path = argname
+            direct_checksum = None
+        if argtype in ("file", "directory"):
+            if direct_checksum:
+                meta_file_direct_checksums[argname] = direct_checksum
+            else:
+                paths.add(path)
+                meta_file_mapping[argname] = path
+
     try:
         file_checksum_dict, _ = files_to_checksums(
             paths,
@@ -1076,6 +1007,11 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
     if len(directories):
         msg(2, "directories:", directories)
 
+    meta_file_checksums = {k: file_checksum_dict[v] for k, v in meta_file_mapping.items()}
+    meta_file_checksums.update(meta_file_direct_checksums)
+    if meta_file_checksums:
+        msg(2, "meta-file checksum dict:\n" + json.dumps(meta_file_checksums, sort_keys=True, indent=2))
+
     ################################################################
 
     for node in sorted(word_substitutions.keys(), key=lambda node: -node.pos[0]):
@@ -1093,42 +1029,6 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
 
     command = commandstring.split()
     variables = cli_variables.copy() if cli_variables else None
-    if len(commands) == 1:
-        found_canonical = False
-        canonical = interface_data.get("canonical", [])
-        for canon in canonical:
-            vars = canon.get("variables", [])
-            varnames = [var["name"] for var in vars]
-            vartypes = {var["name"]: var["celltype"] for var in vars}
-            canon_cmd = canon["command"].split()
-            if len(canon_cmd) != len(command):
-                continue
-            for w1, w2 in zip(canon_cmd, command):
-                if w1 == w2:
-                    continue
-                if w1[0] == "$" and w1[1:] in varnames:
-                    continue
-                break
-            else:
-                msg(1, f"Found canonical command match:\n  {canon['command']}")
-                variables_from_canonical = {}
-                for w1, w2 in zip(canon_cmd, command):
-                    if w1[0] == "$" and w1[1:] in varnames:
-                        varname = w1[1:]
-                        variables_from_canonical[varname] = (w2, vartypes[varname])
-                if cli_variables:
-                    for varname in cli_variables:
-                        if varname in variables_from_canonical:
-                            err(
-                                f"Variable '{varname}' is already defined by canonical command matching"
-                            )
-                    variables_from_canonical.update(cli_variables)
-                variables = variables_from_canonical
-                msg(2, f"Variables:\n  {variables}")
-                commandstring = canon["command"]
-                found_canonical = True
-        if len(canonical) and not found_canonical:
-            msg(1, "No canonical command match found")
 
     ################################################################
 
@@ -1144,6 +1044,7 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         environment=environment,
         variables=variables,
         meta_variables=cli_meta_variables,
+        meta_file_checksums=meta_file_checksums or None,
         meta=meta,
         dry_run=(args.dry_run and not args.upload),
     )
