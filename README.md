@@ -118,6 +118,17 @@ For this path, the producer must keep the transformation dict and its referenced
 buffers available to the run-transformation process. In practice, use the same configured
 project, hashserver, or `SEAMLESS_CACHE` for both processes, and persist the
 transformation identity buffer as shown above.
+### Managing dependencies with `seamless-run`
+
+The canonical ways to declare inputs and execution hints that are not positional command arguments:
+
+| Flag | Description |
+|------|-------------|
+| `-i PATH` / `--input PATH` | Add a single file or directory as an explicit input (repeatable) |
+| `-I FILE` / `--input-file FILE` | Read input file paths (one per line) from `FILE`; each becomes an explicit input (repeatable) |
+| `--metafile FILE` | Read meta-variable definitions (`NAME=VALUE`, one per line) from `FILE` (repeatable). Same semantics as `--metavar`: variables are available as `$NAME` in the bash command but do **not** contribute to the transformation identity. Use for thread counts, verbosity, temp dirs, and other execution hints that should not invalidate the cache. |
+
+These three flags (`-i`, `-I`, `--metafile`) are the recommended mechanism for dependency management when the wrapped command does not already surface all inputs as positional file arguments.
 
 ## Execution records
 
