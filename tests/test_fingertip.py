@@ -76,6 +76,7 @@ def test_fingertip_recovers_expression_over_transformation_result():
 
     tf = produce()
     tf_result = tf.compute()
+    assert asyncio.run(tf_result.fingertip("plain")) == {"a": "via-transform"}
     expression = Expression(tf_result, "a", "plain", "str")
     expression_result = expression.compute()
 
