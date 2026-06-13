@@ -93,17 +93,18 @@ class PreTransformation:
             pass
 
     def build_partial_transformation(
-        self, upstream_dependencies: Optional[Dict[str, "Transformation"]] = None
-    ) -> tuple[Dict[str, Any], Dict[str, "Transformation"]]:
-        """Prepare a transformation dict, keeping upstream transformations unresolved.
+        self, upstream_dependencies: Optional[Dict[str, Any]] = None
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """Prepare a transformation dict, keeping upstream dependencies unresolved.
 
-        Non-transformation inputs are converted to checksums, while dependencies are
-        left as placeholders so they can be resolved lazily by a Dask client.
+        Non-dependency inputs are converted to checksums, while dependencies are
+        left as placeholders so they can be resolved lazily by the transformation.
         """
         from .transformation_class import Transformation
+        from seamless import Expression
 
         tf_dict: Dict[str, Any] = {}
-        dependencies: Dict[str, Transformation] = {}
+        dependencies: Dict[str, Any] = {}
         upstream_dependencies = upstream_dependencies or {}
         for argname in list(self._pretransformation_dict.keys()):
             raw_value = self._pretransformation_dict[argname]
@@ -112,7 +113,7 @@ class PreTransformation:
                 continue
             celltype, subcelltype, value = raw_value
             prepared_value = self._prepare_pin_value_for_dask(argname, value, celltype)
-            if isinstance(prepared_value, Transformation):
+            if isinstance(prepared_value, (Transformation, Expression)):
                 dependency = upstream_dependencies.get(argname, prepared_value)
                 dependencies[argname] = dependency
                 tf_dict[argname] = (celltype, subcelltype, None)
@@ -128,15 +129,22 @@ class PreTransformation:
 
     # --- helpers --------------------------------------------------------------
     def _prepare_pin_value(self, argname: str, value, celltype: str):
-        # Convert upstream Transformation dependencies into their result checksum.
+        # Convert upstream dependencies into their result checksum.
         # Dependencies are ensured to have been computed earlier.
         from .transformation_class import Transformation
+        from seamless import Expression
 
         if isinstance(value, Transformation):
             if value.exception is not None:
                 msg = f"Dependency '{argname}' has an exception:\n{value.exception}"
                 raise RuntimeError(msg)
             return value.result_checksum
+        if isinstance(value, Expression):
+            try:
+                return value.compute()
+            except Exception as exc:
+                msg = f"Dependency '{argname}' has an exception:\n{exc}"
+                raise RuntimeError(msg) from exc
         if argname == "code":
             if self._pretransformation_dict.get("__language__") == "python":
                 return self._prepare_code(value)
@@ -147,8 +155,9 @@ class PreTransformation:
     def _prepare_pin_value_for_dask(self, argname: str, value, celltype: str):
         """Like `_prepare_pin_value` but leaves dependencies unresolved."""
         from .transformation_class import Transformation
+        from seamless import Expression
 
-        if isinstance(value, Transformation):
+        if isinstance(value, (Transformation, Expression)):
             return value
         return self._prepare_pin_value(argname, value, celltype)
 
@@ -232,12 +241,19 @@ class PreparedPreTransformation(PreTransformation):
 
     def _prepare_pin_value(self, argname: str, value, celltype: str):
         from .transformation_class import Transformation
+        from seamless import Expression
 
         if isinstance(value, Transformation):
             if value.exception is not None:
                 msg = f"Dependency '{argname}' has an exception:\n{value.exception}"
                 raise RuntimeError(msg)
             return value.result_checksum
+        if isinstance(value, Expression):
+            try:
+                return value.compute()
+            except Exception as exc:
+                msg = f"Dependency '{argname}' has an exception:\n{exc}"
+                raise RuntimeError(msg) from exc
         return self._to_checksum(value, celltype)
 
 
