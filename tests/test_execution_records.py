@@ -861,8 +861,9 @@ def test_spawn_record_writes_single_execution_record(monkeypatch):
         tf_checksum,
         tf_dunder,
         scratch,
+        strict_dunder,
     ):
-        del transformation_dict, tf_checksum, tf_dunder, scratch
+        del transformation_dict, tf_checksum, tf_dunder, scratch, strict_dunder
         return result_checksum
 
     monkeypatch.setattr(transformation_cache, "database_remote", fake_database_remote)

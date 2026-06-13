@@ -137,6 +137,9 @@ def test_run_transformation_cli_wires_strict(monkeypatch, capsys):
     calls = []
     fake_transformation = object()
 
+    monkeypatch.setattr(
+        run_transformation.seamless_config, "init", lambda **kwargs: None
+    )
     monkeypatch.setattr(run_transformation, "_parse_checksum", lambda _arg: checksum)
     monkeypatch.setattr(
         run_transformation,
@@ -194,6 +197,9 @@ def test_run_transformation_cli_loads_sibling_dunder(monkeypatch, tmp_path, caps
     calls = []
     fake_transformation = object()
 
+    monkeypatch.setattr(
+        run_transformation.seamless_config, "init", lambda **kwargs: None
+    )
     monkeypatch.setattr(
         run_transformation,
         "_resolve_transformation_dict",
