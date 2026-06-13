@@ -1199,6 +1199,9 @@ def transformation_from_pretransformation(
                 raise RuntimeError(msg)
             celltype, subcelltype, _value = transformation_dict[pinname]
             result_checksum = _dependency_result_checksum(dep)
+            from seamless.checksum.hash_type_validation import validate_deserializable_as
+
+            validate_deserializable_as(result_checksum, celltype)
             transformation_dict[pinname] = (
                 celltype,
                 subcelltype,

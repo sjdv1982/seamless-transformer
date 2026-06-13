@@ -199,6 +199,7 @@ class PreTransformation:
     def _to_checksum(self, value, celltype: str) -> Checksum | None:
         if value is None:
             return None
+        buffer = None
         if isinstance(value, Checksum):
             checksum = value
         elif isinstance(value, str) and len(value) == 64:
@@ -215,6 +216,9 @@ class PreTransformation:
                     buffer.tempref()  # ensure parent sees worker-created buffers
                 except Exception:
                     pass
+        from seamless.checksum.hash_type_validation import validate_deserializable_as
+
+        validate_deserializable_as(checksum, celltype or "mixed", buffer=buffer)
         if not is_worker():
             try:
                 from seamless.caching.buffer_cache import get_buffer_cache
