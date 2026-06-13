@@ -175,10 +175,12 @@ class TransformerCore(Generic[P, R]):
 
         ensure_open("transformer call")
         arguments = self._bind_arguments(*args, **kwargs)
+        from seamless import Expression
+
         deps = {
             argname: arg
             for argname, arg in arguments.items()
-            if isinstance(arg, Transformation)
+            if isinstance(arg, (Transformation, Expression))
         }
         env = self._environment._to_lowlevel()
 

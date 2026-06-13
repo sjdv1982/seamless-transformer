@@ -56,6 +56,96 @@ def _readonly_recursive(value):
     return deepcopy(value)
 
 
+def _is_expression(value: Any) -> bool:
+    try:
+        from seamless import Expression
+    except Exception:
+        return False
+    return isinstance(value, Expression)
+
+
+def _dependency_exception(dep: Any) -> str | None:
+    if _is_expression(dep):
+        return None
+    return getattr(dep, "exception", None)
+
+
+def _dependency_is_evaluated(dep: Any) -> bool:
+    if _is_expression(dep):
+        return getattr(dep, "result", None) is not None
+    return bool(getattr(dep, "_evaluated", False))
+
+
+def _start_dependency(dep: Any, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
+    if _is_expression(dep):
+        return
+    dep.start(loop=loop)
+
+
+def _dependency_result_checksum(dep: Any) -> Checksum:
+    if _is_expression(dep):
+        from seamless import Expression
+
+        input_ref = dep.input_ref
+        transformation_cls = globals().get("Transformation")
+        if isinstance(input_ref, Expression) or (
+            transformation_cls is not None and isinstance(input_ref, transformation_cls)
+        ):
+            input_ref = _dependency_result_checksum(input_ref)
+        expr = Expression(
+            input_ref,
+            path=dep.path,
+            celltype=dep.celltype,
+            target_celltype=dep.target_celltype,
+            validator=dep.validator,
+            validator_language=dep.validator_language,
+        )
+        result = expr.compute()
+        if result is None:
+            raise RuntimeError("Expression result is empty")
+        return Checksum(result)
+    if not _dependency_is_evaluated(dep) and hasattr(dep, "compute"):
+        dep.compute()
+    dep_exception = _dependency_exception(dep)
+    if dep_exception is not None:
+        raise RuntimeError(dep_exception)
+    return dep.result_checksum
+
+
+async def _dependency_computation(dep: Any, *, require_value: bool) -> Checksum | None:
+    if _is_expression(dep):
+        from seamless import Expression
+        from seamless.checksum.expression import evaluate_expression_async
+
+        input_ref = dep.input_ref
+        transformation_cls = globals().get("Transformation")
+        if isinstance(input_ref, Expression):
+            input_ref = await _dependency_computation(
+                input_ref, require_value=require_value
+            )
+        elif transformation_cls is not None and isinstance(input_ref, transformation_cls):
+            upstream = input_ref
+            input_ref = await upstream.computation(require_value=True)
+            dep_exception = _dependency_exception(upstream)
+            if dep_exception is not None:
+                raise RuntimeError(dep_exception)
+
+        if input_ref is None:
+            raise RuntimeError("Expression input checksum is empty")
+        result = await evaluate_expression_async(
+            input_ref,
+            dep.path,
+            dep.celltype,
+            dep.target_celltype,
+            validator=dep.validator,
+            validator_language=dep.validator_language,
+        )
+        if result is None:
+            raise RuntimeError("Expression result is empty")
+        return Checksum(result)
+    return await dep.computation(require_value=require_value)
+
+
 T = TypeVar("T")
 
 
@@ -303,9 +393,12 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         if recursive:
             for dep in self._upstream_dependencies.values():
                 try:
-                    transitioned = (
-                        await dep.cancel_async(recursive=True)
-                    ) or transitioned
+                    if hasattr(dep, "cancel_async"):
+                        transitioned = (
+                            await dep.cancel_async(recursive=True)
+                        ) or transitioned
+                    elif hasattr(dep, "cancel"):
+                        transitioned = dep.cancel(recursive=True) or transitioned
                 except Exception:
                     pass
 
@@ -345,7 +438,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         if recursive:
             for dep in self._upstream_dependencies.values():
                 try:
-                    transitioned = dep.cancel(recursive=True) or transitioned
+                    if hasattr(dep, "cancel"):
+                        transitioned = dep.cancel(recursive=True) or transitioned
                 except Exception:
                     pass
         self._mark_cancelled()
@@ -541,7 +635,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     def _run_dependencies(self) -> None:
         all_evaluated = True
         for depname, dep in self._upstream_dependencies.items():
-            if not dep._evaluated:
+            if not _dependency_is_evaluated(dep):
                 all_evaluated = False
         if all_evaluated:
             return
@@ -550,12 +644,17 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             self._verify_sync_construct(loop)
             self.start(loop=loop)
             for depname, dep in self._upstream_dependencies.items():
-                dep.start(loop=loop)
+                _start_dependency(dep, loop=loop)
             for depname, dep in self._upstream_dependencies.items():
-                dep.compute()
-                if dep.exception is not None:
+                try:
+                    _dependency_result_checksum(dep)
+                except Exception as exc:
                     msg = "Dependency '{}' has an exception:\n{}"
-                    raise RuntimeError(msg.format(depname, dep.exception))
+                    raise RuntimeError(msg.format(depname, exc)) from exc
+                dep_exception = _dependency_exception(dep)
+                if dep_exception is not None:
+                    msg = "Dependency '{}' has an exception:\n{}"
+                    raise RuntimeError(msg.format(depname, dep_exception))
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
@@ -566,18 +665,26 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         loop = get_event_loop()
         for depname, dep in self._upstream_dependencies.items():
             tasks[depname] = loop.create_task(
-                dep.computation(require_value=require_value)
+                _dependency_computation(dep, require_value=require_value)
             )
         if tasks:
-            await asyncio.gather(*tasks.values(), return_exceptions=True)
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        else:
+            results = []
+        task_errors = dict(zip(tasks.keys(), results))
         for task in tasks.values():
             self._future_cleanup(task)
         try:
+            for depname, task_result in task_errors.items():
+                if isinstance(task_result, BaseException):
+                    msg = "Dependency '{}' has an exception:\n{}"
+                    raise RuntimeError(msg.format(depname, task_result)) from task_result
             for depname in tasks:
                 dep = self._upstream_dependencies[depname]
-                if dep.exception is not None:
+                dep_exception = _dependency_exception(dep)
+                if dep_exception is not None:
                     msg = "Dependency '{}' has an exception:\n{}"
-                    raise RuntimeError(msg.format(depname, dep.exception))
+                    raise RuntimeError(msg.format(depname, dep_exception))
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
@@ -594,7 +701,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     def _verify_sync(self, task_loop0, err_msg: str, jupyter_err_msg: str):
         task_loops: dict[str | None, Any] = {None: task_loop0}
         for depname, dep in self._upstream_dependencies.items():
-            assert isinstance(dep, Transformation)
+            if not isinstance(dep, Transformation):
+                continue
             dep_task_loop = None
             if dep._computation_future is not None:
                 try:
@@ -828,7 +936,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         if self._cancelled:
             return self
         for _depname, dep in self._upstream_dependencies.items():
-            dep.start()
+            _start_dependency(dep)
         if _dask_available() and not self._prefer_local_execution():
             if self._computation_task is None:
                 loop = loop or get_event_loop()
@@ -1085,11 +1193,12 @@ def transformation_from_pretransformation(
     ) -> dict[str, Any]:
         transformation_dict = deepcopy(frozen_payload_template)
         for pinname, dep in transformation_obj._upstream_dependencies.items():
-            if dep.exception is not None:
-                msg = f"Dependency '{pinname}' has an exception:\n{dep.exception}"
+            dep_exception = _dependency_exception(dep)
+            if dep_exception is not None:
+                msg = f"Dependency '{pinname}' has an exception:\n{dep_exception}"
                 raise RuntimeError(msg)
             celltype, subcelltype, _value = transformation_dict[pinname]
-            result_checksum = dep.result_checksum
+            result_checksum = _dependency_result_checksum(dep)
             transformation_dict[pinname] = (
                 celltype,
                 subcelltype,
@@ -1102,6 +1211,8 @@ def transformation_from_pretransformation(
     ) -> dict[str, Any]:
         deps: dict[str, str] = {}
         for pinname, dep in transformation_obj._upstream_dependencies.items():
+            if _is_expression(dep):
+                continue
             try:
                 dep_cs = dep.transformation_checksum
             except Exception:
