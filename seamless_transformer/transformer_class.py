@@ -102,6 +102,8 @@ class TransformerCore(Generic[P, R]):
         self._optional_pins = set()
         self._environment = Environment()
         self._meta = {"transformer_path": ["tf", "tf"], "local": local}
+        self._workflow_backend = None
+        self._workflow_callable = None
         self.scratch = scratch
         self.direct_print = direct_print
 
@@ -113,10 +115,15 @@ class TransformerCore(Generic[P, R]):
 
     @property
     def language(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.language
         return self._language
 
     @language.setter
     def language(self, lang):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.language = lang
+            return
         if lang is None:
             lang = "python"
         self._language = lang
@@ -125,6 +132,8 @@ class TransformerCore(Generic[P, R]):
     def celltypes(self):
         """The celltypes."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.celltypes
         return CelltypesWrapper(
             self._celltypes, self._args, fixed=self._get_signature() is not None
         )
@@ -133,20 +142,34 @@ class TransformerCore(Generic[P, R]):
     def args(self):
         """Pre-bound transformer arguments."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.args
         return ArgsWrapper(
             self._args, self._celltypes, fixed=self._get_signature() is not None
         )
 
     @property
+    def pins(self):
+        """Pre-bound transformer inputs."""
+
+        if self._workflow_backend is not None:
+            return self._workflow_backend.pins
+        return self.args
+
+    @property
     def modules(self):
         """Imported Python modules."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.modules
         return ModulesWrapper(self._modules)
 
     @property
     def globals(self):
         """Global symbols injected via modules.main."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.globals
         return GlobalsWrapper(self._globals)
 
     @property
@@ -158,16 +181,23 @@ class TransformerCore(Generic[P, R]):
         absence and only plain/mixed pins can use that absence value.
         """
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.optional_pins
         return self._optional_pins
 
     @optional_pins.setter
     def optional_pins(self, value) -> None:
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.optional_pins = value
+            return
         self._optional_pins = set(value or ())
 
     @property
     def environment(self) -> Environment:
         """Execution environment for this transformer."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.environment
         return self._environment
 
     def _bind_arguments(self, *args, **kwargs):
@@ -189,6 +219,8 @@ class TransformerCore(Generic[P, R]):
     def __call__(self, *args, **kwargs) -> Transformation[R]:
         """Build a delayed Transformation from the current transformer state."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.call(*args, **kwargs)
         ensure_open("transformer call")
         arguments = self._bind_arguments(*args, **kwargs)
         from seamless import Expression
@@ -247,10 +279,15 @@ class TransformerCore(Generic[P, R]):
     def meta(self):
         """Transformation metadata."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.meta
         return self._meta
 
     @meta.setter
     def meta(self, meta: dict):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.meta = meta
+            return
         self._meta.update(meta)
         for k in list(self._meta.keys()):
             if self._meta[k] is None and k != "local":
@@ -260,10 +297,15 @@ class TransformerCore(Generic[P, R]):
     def scratch(self) -> bool:
         """If True, the transformation result buffer will not be saved."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.scratch
         return self._scratch
 
     @scratch.setter
     def scratch(self, value: bool):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.scratch = value
+            return
         self._scratch = value
 
     @property
@@ -285,10 +327,15 @@ class TransformerCore(Generic[P, R]):
     def direct_print(self):
         """Print stdout/stderr directly instead of only storing logs."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.direct_print
         return self._meta.get("__direct_print__", False)
 
     @direct_print.setter
     def direct_print(self, value):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.direct_print = value
+            return
         if not isinstance(value, bool) and value is not None:
             raise TypeError(type(value))
         self.meta = {"__direct_print__": value}
@@ -309,10 +356,15 @@ class TransformerCore(Generic[P, R]):
     def local(self) -> bool | None:
         """Local execution preference."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.local
         return self.meta.get("local")
 
     @local.setter
     def local(self, value: bool | None):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.local = value
+            return
         self.meta["local"] = value
 
 
@@ -344,6 +396,7 @@ class PythonMixin(Generic[P, R]):
         signature = None
         if callable(code):
             assert isinstance(code, FunctionType)
+            self._workflow_callable = code
             signature = inspect.signature(code)
             code = getsource(code)
             codebuf = Buffer(code, "python")
@@ -351,30 +404,48 @@ class PythonMixin(Generic[P, R]):
             self._celltypes = {k: "mixed" for k in signature.parameters}
             self._celltypes["result"] = "mixed"
         else:
+            self._workflow_callable = None
             assert isinstance(code, str)
             self._codebuf = Buffer(code, "text")
         self._signature = signature
 
     def _get_signature(self):
+        if self._workflow_backend is not None:
+            cfg = self._workflow_backend.cfg
+            if callable(cfg.callable):
+                return inspect.signature(cfg.callable)
+            return None
         return self._signature
 
     def _get_codebuf(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.code
         return self._codebuf
 
     @property
     def code(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.code
         return self._codebuf
 
     @code.setter
     def code(self, code: Callable[P, R] | str):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.code = code
+            return
         return self._set_code(code)
 
     @property
     def language(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.language
         return self._language
 
     @language.setter
     def language(self, lang):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.language = lang
+            return
         if lang is None:
             lang = "python"
         self._language = lang
