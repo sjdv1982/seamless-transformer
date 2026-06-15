@@ -319,7 +319,7 @@ class TransformationCache:
         try:
             return await asyncio.shield(asyncio.wrap_future(active.result_future))
         finally:
-            self.softcancel_by_checksum(tf_checksum, member=member)
+            await self.softcancel_by_checksum_async(tf_checksum, member=member)
 
     async def _execute_active_submission(
         self,
@@ -366,6 +366,26 @@ class TransformationCache:
                 if self._active_submissions.get(tf_checksum) is active_submission:
                     self._active_submissions.pop(tf_checksum, None)
 
+    def _detach_active_member(
+        self,
+        tf_checksum: Checksum | str,
+        member: object | None = None,
+    ) -> tuple[bool, bool, _ActiveSubmission | None]:
+        if member is None:
+            return False, False, None
+        tf_checksum = Checksum(tf_checksum)
+        active: _ActiveSubmission | None
+        should_cancel = False
+        with self._active_lock:
+            active = self._active_submissions.get(tf_checksum)
+            if active is None or member not in active.awaiters:
+                return False, False, None
+            active.awaiters.remove(member)
+            should_cancel = not active.awaiters and not active.result_future.done()
+            if should_cancel:
+                active.canceled = True
+        return True, should_cancel, active
+
     def softcancel_by_checksum(
         self,
         tf_checksum: Checksum | str,
@@ -373,22 +393,35 @@ class TransformationCache:
         *,
         remote: bool = True,
     ) -> bool:
-        if member is None:
-            return False
         tf_checksum = Checksum(tf_checksum)
-        active: _ActiveSubmission | None
-        should_cancel = False
-        with self._active_lock:
-            active = self._active_submissions.get(tf_checksum)
-            if active is None or member not in active.awaiters:
-                return False
-            active.awaiters.remove(member)
-            should_cancel = not active.awaiters and not active.result_future.done()
-            if should_cancel:
-                active.canceled = True
+        removed, should_cancel, active = self._detach_active_member(
+            tf_checksum, member
+        )
+        if not removed:
+            return False
         if not should_cancel:
             return True
+        assert active is not None
         self._softcancel_leaf(tf_checksum, active, remote=remote)
+        return True
+
+    async def softcancel_by_checksum_async(
+        self,
+        tf_checksum: Checksum | str,
+        member: object | None = None,
+        *,
+        remote: bool = True,
+    ) -> bool:
+        tf_checksum = Checksum(tf_checksum)
+        removed, should_cancel, active = self._detach_active_member(
+            tf_checksum, member
+        )
+        if not removed:
+            return False
+        if not should_cancel:
+            return True
+        assert active is not None
+        await self._softcancel_leaf_async(tf_checksum, active, remote=remote)
         return True
 
     def _softcancel_leaf(
@@ -433,6 +466,61 @@ class TransformationCache:
                         )
                     except Exception:
                         pass
+
+    async def _softcancel_leaf_async(
+        self,
+        tf_checksum: Checksum,
+        active: _ActiveSubmission,
+        *,
+        remote: bool,
+    ) -> None:
+        if active.background_task is not None and not active.background_task.done():
+            active.background_task.cancel()
+        if not active.result_future.done():
+            active.result_future.set_exception(
+                TransformationCancelledError("Transformation was canceled")
+            )
+        try:
+            worker.cancel_by_checksum(tf_checksum)
+        except Exception:
+            pass
+        if not remote:
+            return
+        try:
+            from seamless_dask.transformer_client import get_seamless_dask_client
+        except Exception:
+            dask_client = None
+        else:
+            dask_client = get_seamless_dask_client()
+            if dask_client is not None:
+                softcancel = getattr(dask_client, "softcancel_by_checksum", None)
+                if callable(softcancel):
+                    try:
+                        softcancel(
+                            tf_checksum, getattr(active, "dask_member_id", None)
+                        )
+                    except Exception:
+                        pass
+        if jobserver_remote is not None:
+            softcancel_async = getattr(
+                jobserver_remote, "softcancel_transformation_async", None
+            )
+            if callable(softcancel_async):
+                try:
+                    await softcancel_async(
+                        tf_checksum, getattr(active, "jobserver_member_id", None)
+                    )
+                    return
+                except Exception:
+                    pass
+            softcancel = getattr(jobserver_remote, "softcancel_transformation", None)
+            if callable(softcancel):
+                try:
+                    softcancel(
+                        tf_checksum, getattr(active, "jobserver_member_id", None)
+                    )
+                except Exception:
+                    pass
 
     def _hard_cancel_active(self, active: _ActiveSubmission) -> bool:
         if active.result_future.done():

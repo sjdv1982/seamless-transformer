@@ -359,7 +359,14 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         transitioned = False
         task = self._computation_task
         if task is not None and not task.done():
-            task.cancel()
+            try:
+                task_loop = task.get_loop()
+            except Exception:
+                task_loop = None
+            if task_loop is not None and task_loop.is_running():
+                task_loop.call_soon_threadsafe(task.cancel)
+            else:
+                task.cancel()
             transitioned = True
         future = self._computation_future
         if future is not None:

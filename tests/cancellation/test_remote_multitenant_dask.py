@@ -69,17 +69,6 @@ def test_dask_latch_on_runner_softcancel_first_runner_survives(dask_cluster):
     assert Cluster.count(markers, "finished") == 1
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="The quasi-member future-ownership fix is not yet realized across separate "
-    "client processes. Evidence: when the first-runner softcancels, the latcher "
-    "receives TransformationError('Transformation was canceled') instead of the "
-    "result. The first-runner's departure releases the shared Dask future out from "
-    "under surviving latchers (design pass3 Part III §10b: 'cache/set owns the "
-    "future'). Unlike the jobserver benign case, this is a sibling-kill — the latcher "
-    "loses a result it wanted. Remove this xfail once the daskserver set owns the "
-    "future independently of the first-runner client.",
-)
 def test_dask_first_runner_softcancel_latcher_survives(dask_cluster):
     """The subtle quasi-member case: the FIRST-RUNNER (A) softcancels, but a
     surviving latch-on-runner (B) must still receive the result — the cache/set

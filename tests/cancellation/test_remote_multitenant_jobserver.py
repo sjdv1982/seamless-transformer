@@ -105,17 +105,6 @@ def test_jobserver_all_softcancel_is_benign(jobserver_cluster):
     assert "was canceled" not in out_b, ("softcancel forced an error on a peer", out_b)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="OPTIONAL leaf-kill across the jobserver boundary is not yet realized. "
-    "Evidence: tf.cancel() detaches the local awaiter but sends no server-side "
-    "deregister, so the jobserver runs the orphaned job to completion (jobserver log "
-    "shows Received/Attached/Completed and zero cancel messages). This is the "
-    "soft-cascade-to-leaf item (design pass3 Part III constraint 1 / §10a). It is "
-    "'benign under-cancellation' per constraint 2 (no peer is killed). Remove this "
-    "xfail once the jobserver gains a server-side membership set that leaf-kills on "
-    "empty.",
-)
 def test_jobserver_both_softcancel_leaf_kill(jobserver_cluster):
     """Both tenants leave => the membership set empties => leaf kill. The job does
     not finish, and a later replay re-executes (the cancelled run cached nothing)."""
