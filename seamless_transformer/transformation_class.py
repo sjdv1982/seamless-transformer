@@ -365,7 +365,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                     transitioned = True
             except Exception:
                 pass
-        if self._release_dask_futures(cancel=True):
+        if self._release_dask_futures(cancel=False):
             transitioned = True
         return transitioned
 
@@ -389,7 +389,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 from .transformation_cache import get_transformation_cache
 
                 transitioned = (
-                    get_transformation_cache().cancel_by_checksum(
+                    get_transformation_cache().softcancel_by_checksum(
                         self._transformation_checksum
                     )
                     or transitioned
@@ -434,7 +434,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 from .transformation_cache import get_transformation_cache
 
                 transitioned = (
-                    get_transformation_cache().cancel_by_checksum(
+                    get_transformation_cache().softcancel_by_checksum(
                         self._transformation_checksum
                     )
                     or transitioned
@@ -589,6 +589,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
+            if exc.__class__.__name__ == "TransformationCancelledError":
+                self._mark_cancelled(str(exc) or None)
+                raise
             self._exception = _format_exception(exc)
         finally:
             self._evaluated = True
@@ -633,6 +636,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
+            if exc.__class__.__name__ == "TransformationCancelledError":
+                self._mark_cancelled(str(exc) or None)
+                raise
             self._exception = _format_exception(exc)
         finally:
             self._evaluated = True
