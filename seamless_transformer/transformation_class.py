@@ -345,7 +345,11 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             release = getattr(client, "release_transformation_futures", None)
             if callable(release):
                 try:
-                    release(futures, cancel=cancel)
+                    release(
+                        futures,
+                        cancel=cancel,
+                        member_id=getattr(self, "_dask_member_id", None),
+                    )
                 except Exception:
                     pass
         self._dask_futures = None
