@@ -13,7 +13,11 @@ from typing import Any, Dict, Generic, Optional, TYPE_CHECKING, TypeVar
 
 from seamless import Checksum, Buffer, ensure_open, is_worker
 from seamless.util.get_event_loop import get_event_loop
-from .transformation_utils import extract_tf_dunder, tf_get_buffer
+from .transformation_utils import (
+    extract_tf_dunder,
+    normalize_optional_pins_for_construction,
+    tf_get_buffer,
+)
 from . import worker
 
 try:  # Optional Dask integration
@@ -281,6 +285,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         scratch: bool = False,
         strict_dunder: bool = False,
         definition_payload_template: dict[str, Any] | None = None,
+        optional_pins=None,
     ) -> None:
         self._result_celltype = result_celltype
         self._upstream_dependencies = (upstream_dependencies or {}).copy()
@@ -309,6 +314,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             if isinstance(definition_payload_template, dict)
             else None
         )
+        self._optional_pins = frozenset(optional_pins or ())
         self._dask_futures: TransformationFutures | None = None
         self._computation_task: Optional[asyncio.Task] = None
         self._computation_future: Optional[asyncio.Future] = None
@@ -1162,6 +1168,7 @@ def transformation_from_pretransformation(
     )
     frozen_payload_template = deepcopy(frozen_payload_template)
     frozen_dependencies = dict(frozen_dependencies)
+    optional_pins = pre_transformation.optional_pins
     frozen_meta = deepcopy(meta) if isinstance(meta, dict) else {}
     prepared_execution_dict: dict[str, Any] | None = None
     prepared_tf_dunder: dict[str, Any] = {}
@@ -1199,14 +1206,21 @@ def transformation_from_pretransformation(
                 raise RuntimeError(msg)
             celltype, subcelltype, _value = transformation_dict[pinname]
             result_checksum = _dependency_result_checksum(dep)
-            from seamless.checksum.hash_type_validation import validate_deserializable_as
-
-            validate_deserializable_as(result_checksum, celltype)
             transformation_dict[pinname] = (
                 celltype,
                 subcelltype,
                 result_checksum.hex(),
             )
+        normalize_optional_pins_for_construction(transformation_dict, optional_pins)
+        from seamless.checksum.hash_type_validation import validate_deserializable_as
+
+        for pinname, value in transformation_dict.items():
+            if pinname.startswith("__"):
+                continue
+            celltype, _subcelltype, checksum_hex = value
+            if checksum_hex is None:
+                continue
+            validate_deserializable_as(checksum_hex, celltype)
         return transformation_dict
 
     def _inject_dependency_dunder(
@@ -1309,6 +1323,7 @@ def transformation_from_pretransformation(
         scratch=scratch,
         strict_dunder=strict_dunder,
         definition_payload_template=frozen_payload_template,
+        optional_pins=optional_pins,
     )
     return tf
 

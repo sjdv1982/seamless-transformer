@@ -66,6 +66,61 @@ def tf_get_buffer(transformation: Dict[str, Any]) -> Buffer:
     return Buffer(result, celltype="plain")
 
 
+def json_null_checksum() -> Checksum:
+    """Return the canonical checksum used for JSON null optional-pin absence."""
+
+    return Buffer(None, "plain").get_checksum()
+
+
+def normalize_optional_pins_for_construction(
+    transformation_dict: Dict[str, Any], optional_pins
+) -> Dict[str, Any]:
+    """Drop connected optional pins that resolved to canonical JSON null.
+
+    Optional pin metadata is intentionally external to the checksum-defining
+    transformation payload. Connected optional pins still resolve normally; only
+    a successful plain/mixed JSON-null result is canonicalized to pin absence.
+    """
+
+    optional_pin_names = frozenset(optional_pins or ())
+    if not optional_pin_names:
+        return transformation_dict
+    null_checksum = json_null_checksum()
+    null_checksum_hex = null_checksum.hex()
+    for pinname in optional_pin_names:
+        value = transformation_dict.get(pinname)
+        if value is None:
+            continue
+        celltype, _subcelltype, checksum = value
+        if checksum is None:
+            continue
+        if isinstance(checksum, Checksum):
+            checksum_hex = checksum.hex()
+        else:
+            checksum_hex = checksum
+        if checksum_hex != null_checksum_hex:
+            continue
+        if celltype not in ("plain", "mixed"):
+            raise TypeError(
+                f"Optional pin '{pinname}' with celltype '{celltype}' "
+                "cannot use JSON null as absence"
+            )
+        transformation_dict.pop(pinname, None)
+    return transformation_dict
+
+
+def sufficiently_connected(required_pins, optional_pins, wired_pins) -> bool:
+    """Return true when every required pin is wired.
+
+    Connected optional pins are represented by membership in ``wired_pins`` and
+    therefore gate through normal dependency construction. Unwired optional pins
+    are acceptable and absent.
+    """
+
+    required = set(required_pins or ()) - set(optional_pins or ())
+    return required.issubset(set(wired_pins or ()))
+
+
 def extract_tf_dunder(transformation: Dict[str, Any]) -> Dict[str, Any]:
     """Return non-identity dunder payload for worker/jobserver transport."""
 
@@ -167,6 +222,9 @@ def pack_deep_structure(structure, celltype: str):
 
 __all__ = [
     "tf_get_buffer",
+    "json_null_checksum",
+    "normalize_optional_pins_for_construction",
+    "sufficiently_connected",
     "extract_tf_dunder",
     "extract_job_dunder",
     "merge_transformation_meta",

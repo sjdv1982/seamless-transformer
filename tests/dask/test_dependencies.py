@@ -1,8 +1,11 @@
 import seamless.config
+import pytest
 
 seamless.config.init()
 
 from seamless.transformer import direct, delayed
+from seamless_dask.dummy_scheduler import create_dummy_client
+from seamless_dask.transformer_client import set_seamless_dask_client
 
 OFFSET = 25  # increment to force cache misses
 
@@ -63,3 +66,61 @@ def test_dependencies():
     assert result == 3 + 4 + 5 + 6 + 7 + 5 * offset
     duration = time.perf_counter() - start
     print(f"{duration:.3f}")
+
+
+def test_optional_pin_dask_partial_construction_and_null_normalization():
+    sd_client = create_dummy_client(workers=1, worker_threads=2, spawn_workers=2)
+    set_seamless_dask_client(sd_client)
+    try:
+
+        @delayed
+        def consume(a, x=None):
+            if x is None:
+                return a
+            return a + x
+
+        consume.optional_pins.add("x")
+
+        absent = consume(10)
+        submission = absent._build_dask_submission(
+            sd_client,
+            require_value=False,
+            need_fat=False,
+        )
+        assert submission.optional_pins == frozenset({"x"})
+
+        assert absent.run() == 10
+        null_connected = consume(10, None)
+        assert null_connected.run() == 10
+        assert absent.transformation_checksum == null_connected.transformation_checksum
+
+        non_null = consume(10, 5)
+        assert non_null.run() == 15
+        assert non_null.transformation_checksum != absent.transformation_checksum
+    finally:
+        set_seamless_dask_client(None)
+        seamless.close()
+
+
+def test_optional_pin_dask_dependency_failure_is_not_absence():
+    sd_client = create_dummy_client(workers=1, worker_threads=2, spawn_workers=2)
+    set_seamless_dask_client(sd_client)
+    try:
+
+        @delayed
+        def boom():
+            raise RuntimeError("dask upstream failed")
+
+        @delayed
+        def consume(a, x=None):
+            return a
+
+        consume.optional_pins.add("x")
+        tf = consume(10, boom())
+
+        with pytest.raises(Exception):
+            tf.run()
+        assert "dask upstream failed" in tf.exception
+    finally:
+        set_seamless_dask_client(None)
+        seamless.close()

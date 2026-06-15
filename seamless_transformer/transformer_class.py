@@ -99,6 +99,7 @@ class TransformerCore(Generic[P, R]):
         self._modules = {}
         self._globals = {}
         self._celltypes = {}
+        self._optional_pins = set()
         self._environment = Environment()
         self._meta = {"transformer_path": ["tf", "tf"], "local": local}
         self.scratch = scratch
@@ -147,6 +148,21 @@ class TransformerCore(Generic[P, R]):
         """Global symbols injected via modules.main."""
 
         return GlobalsWrapper(self._globals)
+
+    @property
+    def optional_pins(self) -> set[str]:
+        """Input pins where JSON null means absence.
+
+        Connected optional pins still compute and still fail on upstream errors.
+        Optional pins can be tricky: for these pins, JSON null is reserved as
+        absence and only plain/mixed pins can use that absence value.
+        """
+
+        return self._optional_pins
+
+    @optional_pins.setter
+    def optional_pins(self, value) -> None:
+        self._optional_pins = set(value or ())
 
     @property
     def environment(self) -> Environment:
@@ -214,6 +230,7 @@ class TransformerCore(Generic[P, R]):
             arguments,
             env,
             language=self.language,
+            optional_pins=self._optional_pins,
         )
         return cast(
             Transformation[R],

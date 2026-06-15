@@ -688,6 +688,7 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
             arguments=arguments,
             env=self._environment._to_lowlevel(),
             language=self.language,
+            optional_pins=self._optional_pins,
         )
         deferred_prepare_sync = None
         deferred_prepare_async = None

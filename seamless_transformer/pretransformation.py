@@ -30,11 +30,13 @@ class PreTransformation:
         pretransformation_dict: Dict[str, Any],
         *,
         code_manager: Optional[CodeManager] = None,
+        optional_pins=None,
     ):
         if "__language__" not in pretransformation_dict:
             raise ValueError("pretransformation dict must include __language__")
         self._pretransformation_dict = pretransformation_dict
         self._code_manager = code_manager or get_code_manager()
+        self._optional_pins = frozenset(optional_pins or ())
         self._prepared = False
         self._code_refs: list[tuple[Checksum, Checksum]] = []
         self._value_refs: list[Checksum] = []
@@ -48,6 +50,11 @@ class PreTransformation:
     def prepared(self) -> bool:
         """True when `prepare_transformation` has run."""
         return self._prepared
+
+    @property
+    def optional_pins(self) -> frozenset[str]:
+        """Names of pins whose JSON null value is canonicalized to absence."""
+        return self._optional_pins
 
     def prepare_transformation(self) -> Dict[str, Any]:
         """Prepare all pins by ensuring they reference checksums."""
@@ -149,6 +156,14 @@ class PreTransformation:
             if self._pretransformation_dict.get("__language__") == "python":
                 return self._prepare_code(value)
             return self._to_checksum(value, celltype)
+        if value is None and argname in self._optional_pins and celltype not in (
+            "plain",
+            "mixed",
+        ):
+            raise TypeError(
+                f"Optional pin '{argname}' with celltype '{celltype}' "
+                "cannot use JSON null as absence"
+            )
         checksum = self._to_checksum(value, celltype)
         return checksum
 
@@ -197,18 +212,17 @@ class PreTransformation:
         return syntactic_checksum
 
     def _to_checksum(self, value, celltype: str) -> Checksum | None:
-        if value is None:
-            return None
         buffer = None
         if isinstance(value, Checksum):
             checksum = value
         elif isinstance(value, str) and len(value) == 64:
             checksum = Checksum(value)
         else:
+            buffer_celltype = "plain" if value is None else celltype or "mixed"
             buffer = (
                 value
                 if isinstance(value, Buffer)
-                else Buffer(value, celltype or "mixed")
+                else Buffer(value, buffer_celltype)
             )
             checksum = buffer.get_checksum()
             if is_worker():
@@ -271,6 +285,7 @@ def direct_transformer_to_pretransformation(
     *,
     language,
     code_manager: Optional[CodeManager] = None,
+    optional_pins=None,
 ) -> PreTransformation:
     """Create a PreTransformation instance for a direct transformer call."""
     result_celltype = celltypes["result"]
@@ -347,7 +362,11 @@ def direct_transformer_to_pretransformation(
     if format_section:
         pretransformation_dict["__format__"] = format_section
 
-    return PreTransformation(pretransformation_dict, code_manager=code_manager)
+    return PreTransformation(
+        pretransformation_dict,
+        code_manager=code_manager,
+        optional_pins=optional_pins,
+    )
 
 
 def _buffer_checksum_hex(value, celltype: str) -> str:
@@ -370,6 +389,7 @@ def compiled_transformer_to_pretransformation(
     env,
     language: str,
     code_manager: Optional[CodeManager] = None,
+    optional_pins=None,
 ) -> PreTransformation:
     """Create a PreTransformation for a compiled transformer call."""
 
@@ -397,7 +417,11 @@ def compiled_transformer_to_pretransformation(
     for pinname, value in arguments.items():
         pretransformation_dict[pinname] = ("mixed", None, value)
 
-    return PreTransformation(pretransformation_dict, code_manager=code_manager)
+    return PreTransformation(
+        pretransformation_dict,
+        code_manager=code_manager,
+        optional_pins=optional_pins,
+    )
 
 
 __all__ = [
