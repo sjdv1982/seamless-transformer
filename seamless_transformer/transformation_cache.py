@@ -10,6 +10,7 @@ import os
 import subprocess
 import time
 import threading
+import uuid
 
 from seamless import Buffer, CacheMissError, Checksum, is_worker
 
@@ -554,6 +555,9 @@ class TransformationCache:
                     "Remote execution requires an active database server"
                 )
             _debug("dispatching transformation to remote jobserver")
+            jobserver_member_id = uuid.uuid4().hex
+            if active_submission is not None:
+                active_submission.jobserver_member_id = jobserver_member_id
 
             ### NOTE: flushing the entire buffer_writer queue, just to be sure that
             ###   the jobserver has it available.
@@ -571,6 +575,7 @@ class TransformationCache:
                     tf_dunder=tf_dunder,
                     scratch=scratch,
                     strict_dunder=strict_dunder,
+                    member_id=jobserver_member_id,
                 ),
                 active_submission,
             )
