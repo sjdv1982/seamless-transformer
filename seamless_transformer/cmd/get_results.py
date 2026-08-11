@@ -1,7 +1,6 @@
 import os
 import pathlib
 import threading
-import time
 
 from seamless import Buffer, Checksum, CacheMissError
 from seamless.caching.buffer_cache import get_buffer_cache
@@ -60,7 +59,8 @@ def maintain_futures(
 
     count = 0
     while not delete_futures_event.is_set():
-        time.sleep(1)
+        if delete_futures_event.wait(1):
+            break
         count += 1
         if count == 30:
             count = 0

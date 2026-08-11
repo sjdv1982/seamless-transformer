@@ -283,7 +283,8 @@ Error: Result file/folder RESULT does not exist
             )
             raise SeamlessStreamTransformationError(msg)
 
-        if os.path.isdir(resultfile):
+        result_is_dir = os.path.isdir(resultfile)
+        if result_is_dir:
             result = {}
             for dirpath, _, filenames in os.walk(resultfile):
                 for filename in filenames:

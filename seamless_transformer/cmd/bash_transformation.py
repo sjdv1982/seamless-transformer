@@ -119,10 +119,11 @@ def prepare_bash_transformation(
         env_checksum = register_dict(environment, dry_run=dry_run)
         transformation_dict["__env__"] = env_checksum
     format_ = {}
+    directory_set = set(directories)
     for k, v in checksum_dict.items():
         if not isinstance(v, str):
             v = Checksum(v).hex()
-        if k in directories:
+        if k in directory_set:
             fmt = {
                 "filesystem": {"optional": True, "mode": "directory"},
                 "celltype": "deepfolder",

@@ -5,9 +5,8 @@ import time
 from typing import Any
 from pathlib import Path
 import os
+import shlex
 from collections import namedtuple
-
-import bashlex
 
 from seamless.checksum.calculate_checksum import calculate_checksum
 from seamless.checksum.calculate_checksum import calculate_file_checksum
@@ -156,10 +155,12 @@ def guess_arguments_with_custom_error_messages(
 
         extension = path.suffix
         msg(3, "Argument #{} '{}', extension: '{}'".format(argindex, arg, extension))
-        exists = path.exists() or path.expanduser().exists()
+        expanded_path = path.expanduser()
+        has_expansion = expanded_path != path
+        exists = path.exists() or (has_expansion and expanded_path.exists())
         is_dir = False
         if exists:
-            is_dir = path.is_dir() or path.expanduser().is_dir()
+            is_dir = path.is_dir() or (has_expansion and expanded_path.is_dir())
         is_float = False
         if extension:
             try:
@@ -293,60 +294,133 @@ Therefore, it must be a directory."""
 Command = namedtuple(
     "Command", ("start", "end", "main_node", "wordnodes", "words", "commandstring")
 )
+SimpleWordNode = namedtuple("SimpleWordNode", ("word", "pos"))
+
+_BASHLEX = None
+_SIMPLE_SHELL_METACHARS = frozenset("|&;()<>$`\\*?[]{}!~\n")
 
 
-class _WordVisitor(bashlex.ast.nodevisitor):
-    def __init__(self):
-        self.words = []
-        self.nodes = []
-        # barrier *should* be redundant, but you never know.
-        # The words must be the correct ones for the interface .py file to get the correct arguments
-        self.barrier = None
-        super().__init__()
+def _load_bashlex():
+    global _BASHLEX
+    if _BASHLEX is None:
+        import bashlex
 
-    def visitword(self, n, _):
-        node = n
-        self.nodes.append(node)
-        self.words.append(node.word)
-        return True
-
-    def visitredirect(
-        self, node, *args, **kwargs
-    ):  # pylint: disable = arguments-differ, unused-argument
-        start = node.pos[0]
-        if self.barrier is None or self.barrier < start:
-            self.barrier = start
-        return False
-
-    def _filter(self):
-        if self.barrier is None:
-            return
-        self.nodes[:] = [node for node in self.nodes if node.pos[1] < self.barrier]
-        self.words[:] = [node.word for node in self.nodes]
+        _BASHLEX = bashlex
+    return _BASHLEX
 
 
-class _CommandVisitor(bashlex.ast.nodevisitor):
-    def __init__(self, full_commandstring):
-        self.commands = []
-        self.full_commandstring = full_commandstring
-        super().__init__()
+def _make_bashlex_visitors():
+    bashlex = _load_bashlex()
 
-    def visitcommand(self, n, _):
-        node = n
-        wordvisitor = _WordVisitor()
-        wordvisitor.visit(node)
-        wordvisitor._filter()
-        start, end = node.pos
-        cmd = Command(
-            main_node=node,
-            start=start,
-            end=end,
-            wordnodes=wordvisitor.nodes,
-            words=wordvisitor.words,
-            commandstring=self.full_commandstring[start:end],
+    class WordVisitor(bashlex.ast.nodevisitor):
+        def __init__(self):
+            self.words = []
+            self.nodes = []
+            # barrier *should* be redundant, but you never know.
+            # The words must be correct for the interface .py file.
+            self.barrier = None
+            super().__init__()
+
+        def visitword(self, n, _):
+            node = n
+            self.nodes.append(node)
+            self.words.append(node.word)
+            return True
+
+        def visitredirect(
+            self, node, *args, **kwargs
+        ):  # pylint: disable = arguments-differ, unused-argument
+            start = node.pos[0]
+            if self.barrier is None or self.barrier < start:
+                self.barrier = start
+            return False
+
+        def _filter(self):
+            if self.barrier is None:
+                return
+            self.nodes[:] = [node for node in self.nodes if node.pos[1] < self.barrier]
+            self.words[:] = [node.word for node in self.nodes]
+
+    class CommandVisitor(bashlex.ast.nodevisitor):
+        def __init__(self, full_commandstring):
+            self.commands = []
+            self.full_commandstring = full_commandstring
+            super().__init__()
+
+        def visitcommand(self, n, _):
+            node = n
+            wordvisitor = WordVisitor()
+            wordvisitor.visit(node)
+            wordvisitor._filter()
+            start, end = node.pos
+            cmd = Command(
+                main_node=node,
+                start=start,
+                end=end,
+                wordnodes=wordvisitor.nodes,
+                words=wordvisitor.words,
+                commandstring=self.full_commandstring[start:end],
+            )
+            self.commands.append(cmd)
+            return True
+
+    class RedirectionVisitor(bashlex.ast.nodevisitor):
+        def __init__(self):
+            self.redirect = None
+            self.maybe_redirect = None
+            super().__init__()
+
+        def visitredirect(self, node, *args, **kwargs):
+            # pylint: disable = arguments-differ, unused-argument
+            maybe = False
+            if node.output.word.startswith("<"):
+                return
+            if isinstance(node.input, int) and node.input == 2:
+                return
+            if isinstance(node.input, int) and node.input != 1:
+                maybe = True
+            if maybe:
+                self.maybe_redirect = node
+            else:
+                if self.redirect is not None:
+                    msg(-1, "Multiple redirects in the last command")
+                    exit(1)
+                self.redirect = node
+
+    return CommandVisitor, RedirectionVisitor
+
+
+def _get_simple_command(commandstring: str) -> list[Command] | None:
+    stripped = commandstring.strip()
+    if not stripped or stripped != commandstring:
+        return None
+    if any(char in _SIMPLE_SHELL_METACHARS for char in stripped):
+        return None
+    try:
+        words = shlex.split(stripped)
+    except ValueError:
+        return None
+    if not words:
+        return None
+    wordnodes = []
+    search_from = 0
+    for word in words:
+        start = stripped.find(word, search_from)
+        if start == -1:
+            return None
+        end = start + len(word)
+        wordnodes.append(SimpleWordNode(word=word, pos=(start, end)))
+        search_from = end
+    return [
+        Command(
+            start=0,
+            end=len(stripped),
+            main_node=None,
+            wordnodes=wordnodes,
+            words=words,
+            commandstring=stripped,
         )
-        self.commands.append(cmd)
-        return True
+    ]
 
 
 def get_primary_pipeline(
@@ -399,16 +473,21 @@ def get_primary_pipeline(
 def get_commands(
     commandstring: str,
     primary: int = 0,
-) -> tuple[list[Command], tuple[int, int] | None, bashlex.parser.ast.node | None]:
+) -> tuple[list[Command], tuple[int, int] | None, Any | None]:
     """Parse a bash command string into a list of Command instances.
     The range of the primary bash pipeline is also returned as (start, end) indices.
     If the command is a pipeline between parentheses, its redirect is returned as well.
     """
+    simple_commands = _get_simple_command(commandstring)
+    if simple_commands is not None:
+        return simple_commands, (primary, primary + 1), None
+    CommandVisitor, RedirectionVisitor = _make_bashlex_visitors()
+    bashlex = _load_bashlex()
     try:
         bashtrees = bashlex.parse(commandstring)
     except Exception:
         raise ValueError("Unrecognized bash syntax") from None
-    visitor = _CommandVisitor(commandstring)
+    visitor = CommandVisitor(commandstring)
     for bashtree in bashtrees:
         visitor.visit(bashtree)
     commands = sorted(visitor.commands, key=lambda command: command.start)
@@ -417,7 +496,7 @@ def get_commands(
     if len(bashtrees):
         first = bashtrees[0]
         if first.kind == "compound" and len(first.list):
-            v = _RedirectionVisitor()
+            v = RedirectionVisitor()
             v.visit(first)
             redirect = v.redirect
             if redirect is None:
@@ -433,33 +512,12 @@ def get_commands(
     return commands, primary_pipeline, pipeline_redirect
 
 
-class _RedirectionVisitor(bashlex.ast.nodevisitor):
-    def __init__(self):
-        self.redirect = None
-        self.maybe_redirect = None
-        super().__init__()
-
-    def visitredirect(self, node, *args, **kwargs):
-        # pylint: disable = arguments-differ, unused-argument
-        maybe = False
-        if node.output.word.startswith("<"):
-            return
-        if isinstance(node.input, int) and node.input == 2:
-            return
-        if isinstance(node.input, int) and node.input != 1:
-            maybe = True
-        if maybe:
-            self.maybe_redirect = node
-        else:
-            if self.redirect is not None:
-                msg(-1, "Multiple redirects in the last command")
-                exit(1)
-            self.redirect = node
-
-
 def get_redirection(command: Command):
     """Return the redirection output of a bash command"""
-    visitor = _RedirectionVisitor()
+    if command.main_node is None:
+        return None
+    _CommandVisitor, RedirectionVisitor = _make_bashlex_visitors()
+    visitor = RedirectionVisitor()
     visitor.visit(command.main_node)
     redirect = visitor.redirect
     if redirect is None:

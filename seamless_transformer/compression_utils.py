@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-import gzip
-
-import zstandard
-
 COMPRESSION_SUFFIXES = (".zst", ".gz")
 COMPRESSION_PREFERENCE = (".zst", ".gz")
 CONTENT_ENCODING_TO_SUFFIX = {
@@ -24,16 +20,24 @@ def strip_compression_suffix(name: str) -> tuple[str, str | None]:
 
 def decompress_bytes(data: bytes, suffix: str) -> bytes:
     if suffix == ".zst":
+        import zstandard
+
         return zstandard.ZstdDecompressor().decompress(data)
     if suffix == ".gz":
+        import gzip
+
         return gzip.decompress(data)
     raise ValueError(suffix)
 
 
 def compress_bytes(data: bytes, suffix: str) -> bytes:
     if suffix == ".zst":
+        import zstandard
+
         return zstandard.ZstdCompressor().compress(data)
     if suffix == ".gz":
+        import gzip
+
         return gzip.compress(data)
     raise ValueError(suffix)
 
