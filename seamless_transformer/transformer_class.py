@@ -13,6 +13,7 @@ from seamless import Buffer, ensure_open
 from .environment import Environment
 from .pretransformation import direct_transformer_to_pretransformation
 from .transformation_class import Transformation, transformation_from_pretransformation
+from .builder_snapshot import TransformerBuilderSnapshot
 
 
 P = ParamSpec("P")
@@ -112,6 +113,27 @@ class TransformerCore(Generic[P, R]):
 
     def _get_codebuf(self):
         raise NotImplementedError
+
+    def _snapshot_for_call(self) -> TransformerBuilderSnapshot:
+        if self._workflow_backend is not None:
+            return self._workflow_backend.snapshot_for_call()
+        return TransformerBuilderSnapshot(
+            codebuf=self._get_codebuf(),
+            language=self.language,
+            celltypes=deepcopy(self._celltypes),
+            optional_pins=frozenset(self._optional_pins),
+            args=deepcopy(self._args),
+            modules=deepcopy(self._modules),
+            globals=deepcopy(self._globals),
+            meta=deepcopy(self._meta),
+            environment=self._environment._to_lowlevel(),
+            scratch=bool(self.scratch),
+            direct_print=bool(self.direct_print),
+            local=self.local,
+            call_mode="direct" if isinstance(self, DirectTransformer) else "delayed",
+            callable=self._workflow_callable,
+            signature=self._get_signature(),
+        )
 
     @property
     def language(self):
@@ -216,13 +238,26 @@ class TransformerCore(Generic[P, R]):
                 raise TypeError(f"Missing argument: '{argname}'")
         return all_args
 
-    def __call__(self, *args, **kwargs) -> Transformation[R]:
-        """Build a delayed Transformation from the current transformer state."""
+    @staticmethod
+    def _bind_snapshot_arguments(snapshot, args, kwargs):
+        all_args = deepcopy(snapshot.args)
+        signature = snapshot.signature
+        if signature is not None:
+            all_args.update(signature.bind_partial(*args, **kwargs).arguments)
+            return signature.bind(**all_args).arguments
+        if args:
+            raise TypeError("No function signature: positional arguments not supported")
+        all_args.update(kwargs)
+        for argname in snapshot.celltypes:
+            if argname == "result":
+                continue
+            if argname not in all_args and argname not in snapshot.optional_pins:
+                raise TypeError(f"Missing argument: '{argname}'")
+        return all_args
 
-        if self._workflow_backend is not None:
-            return self._workflow_backend.call(*args, **kwargs)
+    def _build_from_snapshot(self, snapshot, *args, **kwargs) -> Transformation[R]:
         ensure_open("transformer call")
-        arguments = self._bind_arguments(*args, **kwargs)
+        arguments = self._bind_snapshot_arguments(snapshot, args, kwargs)
         from seamless import Expression
 
         deps = {
@@ -230,50 +265,88 @@ class TransformerCore(Generic[P, R]):
             for argname, arg in arguments.items()
             if isinstance(arg, (Transformation, Expression))
         }
-        env = self._environment._to_lowlevel()
-
-        meta = deepcopy(self._meta)
-        modules = {}
         from .module_builder import (
             build_globals_module_definition,
             get_module_definition,
             merge_module_definitions,
         )
 
-        for module_name, module in self._modules.items():
+        modules = {}
+        for module_name, module in snapshot.modules.items():
             if isinstance(module, dict):
-                module_definition = module
+                module_definition = deepcopy(module)
             else:
                 module_definition = get_module_definition(module)
             modules[module_name] = module_definition
-
-        if self._globals:
-            globals_def = build_globals_module_definition(self._globals)
+        if snapshot.globals:
+            globals_def = build_globals_module_definition(snapshot.globals)
             if "main" in modules:
                 modules["main"] = merge_module_definitions(modules["main"], globals_def)
             else:
                 modules["main"] = globals_def
 
         pre_transformation = direct_transformer_to_pretransformation(
-            self._get_codebuf(),
-            meta,
-            self._celltypes,
+            snapshot.codebuf,
+            deepcopy(snapshot.meta),
+            deepcopy(snapshot.celltypes),
             modules,
             arguments,
-            env,
-            language=self.language,
-            optional_pins=self._optional_pins,
+            deepcopy(snapshot.environment),
+            language=snapshot.language,
+            optional_pins=snapshot.optional_pins,
         )
         return cast(
             Transformation[R],
             transformation_from_pretransformation(
                 pre_transformation,
                 upstream_dependencies=deps,
-                meta=meta,
-                scratch=self.scratch,
+                meta=deepcopy(snapshot.meta),
+                scratch=snapshot.scratch,
                 tf_dunder={},
             ),
         )
+
+    def __call__(self, *args, **kwargs) -> Transformation[R]:
+        """Build a delayed Transformation from the current transformer state."""
+        return self._build_from_snapshot(self._snapshot_for_call(), *args, **kwargs)
+
+    def transformation(self):
+        return self()
+
+    get_transformation = transformation
+
+    @property
+    def result(self):
+        if self._workflow_backend is None:
+            raise AttributeError("result is only available for bound workflow transformers")
+        return self._workflow_backend.result
+
+    def compute(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.compute()
+        return self().compute()
+
+    def run(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.run()
+        return self().run()
+
+    def task(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.task()
+        return self().task()
+
+    def prune(self):
+        if self._workflow_backend is None:
+            raise AttributeError("prune is only available for bound workflow transformers")
+        return self._workflow_backend.prune()
+
+    def clear_exception(self):
+        if self._workflow_backend is None:
+            raise AttributeError(
+                "clear_exception is only available for bound workflow transformers"
+            )
+        return self._workflow_backend.clear_exception()
 
     @property
     def meta(self):
@@ -312,12 +385,17 @@ class TransformerCore(Generic[P, R]):
     def allow_input_fingertip(self) -> bool:
         """If True, inputs may be fingertipped when resolving their buffers."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.allow_input_fingertip
         return bool(self._meta.get("allow_input_fingertip", False))
 
     @allow_input_fingertip.setter
     def allow_input_fingertip(self, value: bool):
         if not isinstance(value, bool):
             raise TypeError(type(value))
+        if self._workflow_backend is not None:
+            self._workflow_backend.allow_input_fingertip = value
+            return
         if value:
             self.meta = {"allow_input_fingertip": True}
         else:
@@ -344,12 +422,17 @@ class TransformerCore(Generic[P, R]):
     def driver(self) -> bool:
         """Marks the transformer as a driver script."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.driver
         return self._meta.get("driver", False)
 
     @driver.setter
     def driver(self, value):
         if not isinstance(value, bool) and value is not None:
             raise TypeError(type(value))
+        if self._workflow_backend is not None:
+            self._workflow_backend.driver = value
+            return
         self.meta = {"driver": value}
 
     @property
@@ -366,6 +449,46 @@ class TransformerCore(Generic[P, R]):
             self._workflow_backend.local = value
             return
         self.meta["local"] = value
+
+    def _declared_pin_names(self):
+        if self._workflow_backend is not None:
+            return set(self._workflow_backend.pin_names)
+        return set(self._celltypes) - {"result"}
+
+    def __getitem__(self, key):
+        return self.pins[key]
+
+    def __setitem__(self, key, value):
+        self.pins[key] = value
+
+    def __delitem__(self, key):
+        del self.pins[key]
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if _class_attribute(type(self), name) is not None:
+            raise AttributeError(name)
+        if name in self._declared_pin_names():
+            return self.pins[name]
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        if name.startswith("_") or _class_attribute(type(self), name) is not None:
+            object.__setattr__(self, name, value)
+            return
+        backend = getattr(self, "_workflow_backend", None)
+        if name in self._declared_pin_names():
+            self.pins[name] = value
+            return
+        raise AttributeError(name)
+
+
+def _class_attribute(cls, name):
+    for parent in cls.__mro__:
+        if name in parent.__dict__:
+            return parent.__dict__[name]
+    return None
 
 
 class PythonMixin(Generic[P, R]):
