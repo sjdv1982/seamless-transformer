@@ -455,6 +455,16 @@ class TransformerCore(Generic[P, R]):
             return set(self._workflow_backend.pin_names)
         return set(self._celltypes) - {"result"}
 
+    def _workflow_endpoint(self):
+        backend = self._workflow_backend
+        return backend._workflow_endpoint() if backend is not None else None
+
+    def _workflow_capture_source(self):
+        backend = self._workflow_backend
+        if backend is None:
+            return self
+        return backend.capture_source()
+
     def __getitem__(self, key):
         return self.pins[key]
 
@@ -480,6 +490,15 @@ class TransformerCore(Generic[P, R]):
         backend = getattr(self, "_workflow_backend", None)
         if name in self._declared_pin_names():
             self.pins[name] = value
+            return
+        raise AttributeError(name)
+
+    def __delattr__(self, name):
+        if name.startswith("_") or _class_attribute(type(self), name) is not None:
+            object.__delattr__(self, name)
+            return
+        if name in self._declared_pin_names():
+            del self.pins[name]
             return
         raise AttributeError(name)
 
