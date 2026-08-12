@@ -397,7 +397,7 @@ class CompiledMixin:
 
         lang_def = get_language(language)
         self._compiled_language = language
-        self.compilation = deepcopy(lang_def.compilation)
+        self._compilation = deepcopy(lang_def.compilation)
         self._environment = Environment()
         self._schema_text = None
         self._schema = None
@@ -405,6 +405,15 @@ class CompiledMixin:
         self._code_text = None
         self._metavars = MetaVars()
         self._objects = ObjectList()
+
+    @property
+    def compilation(self):
+        """Compiler binary, flags, and mode used to build this transformer."""
+        return self._compilation
+
+    @compilation.setter
+    def compilation(self, value):
+        self._compilation = value
 
     @property
     def language(self) -> str:

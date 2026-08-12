@@ -450,11 +450,6 @@ class TransformerCore(Generic[P, R]):
             return
         self.meta["local"] = value
 
-    def _declared_pin_names(self):
-        if self._workflow_backend is not None:
-            return set(self._workflow_backend.pin_names)
-        return set(self._celltypes) - {"result"}
-
     def _workflow_endpoint(self):
         backend = self._workflow_backend
         return backend._workflow_endpoint() if backend is not None else None
@@ -465,42 +460,23 @@ class TransformerCore(Generic[P, R]):
             return self
         return backend.capture_source()
 
-    def __getitem__(self, key):
-        return self.pins[key]
-
-    def __setitem__(self, key, value):
-        self.pins[key] = value
-
-    def __delitem__(self, key):
-        del self.pins[key]
-
-    def __getattr__(self, name):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        if _class_attribute(type(self), name) is not None:
-            raise AttributeError(name)
-        if name in self._declared_pin_names():
-            return self.pins[name]
-        raise AttributeError(name)
+    # Input pins are reached through `.pins` (or its `.args` alias) only.  There is
+    # deliberately no attribute or item pin sugar and no `__getattr__` fallback:
+    # every Transformer attribute name is configuration API, so a pin can never be
+    # shadowed by a class name such as `scratch`, `local`, `code` or `result`, and a
+    # bound-only property keeps its own error instead of decaying into a pin read.
 
     def __setattr__(self, name, value):
         if name.startswith("_") or _class_attribute(type(self), name) is not None:
             object.__setattr__(self, name, value)
             return
-        backend = getattr(self, "_workflow_backend", None)
-        if name in self._declared_pin_names():
-            self.pins[name] = value
-            return
-        raise AttributeError(name)
+        raise AttributeError(_no_such_attribute(self, name))
 
     def __delattr__(self, name):
         if name.startswith("_") or _class_attribute(type(self), name) is not None:
             object.__delattr__(self, name)
             return
-        if name in self._declared_pin_names():
-            del self.pins[name]
-            return
-        raise AttributeError(name)
+        raise AttributeError(_no_such_attribute(self, name))
 
 
 def _class_attribute(cls, name):
@@ -508,6 +484,13 @@ def _class_attribute(cls, name):
         if name in parent.__dict__:
             return parent.__dict__[name]
     return None
+
+
+def _no_such_attribute(obj, name: str) -> str:
+    return (
+        f"'{type(obj).__name__}' object has no attribute '{name}'; "
+        f"transformer input pins are reached as .pins['{name}']"
+    )
 
 
 class PythonMixin(Generic[P, R]):
