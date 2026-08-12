@@ -321,6 +321,26 @@ class TransformerCore(Generic[P, R]):
             raise AttributeError("result is only available for bound workflow transformers")
         return self._workflow_backend.result
 
+    @property
+    def status(self) -> str:
+        """Return the lifecycle status of a bound workflow transformer."""
+
+        if self._workflow_backend is None:
+            raise AttributeError(
+                "status is only available for bound workflow transformers"
+            )
+        return self._workflow_backend.status
+
+    @property
+    def exception(self):
+        """Return the exception associated with a failed workflow transformer."""
+
+        if self._workflow_backend is None:
+            raise AttributeError(
+                "exception is only available for bound workflow transformers"
+            )
+        return self._workflow_backend.exception
+
     def compute(self):
         if self._workflow_backend is not None:
             return self._workflow_backend.compute()
