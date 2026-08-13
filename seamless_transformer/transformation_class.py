@@ -696,6 +696,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         try:
             result_checksum_raw = self._evaluator_sync(self, require_value=True)
             if result_checksum_raw is None:
+                if self._exception and "Transformation was canceled" in self._exception:
+                    self._mark_cancelled("Transformation was canceled")
+                    raise TransformationCancelledError("Transformation was canceled")
                 raise ValueError("Result is empty")
             try:
                 result_checksum = Checksum(result_checksum_raw)
@@ -709,7 +712,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
-            if exc.__class__.__name__ == "TransformationCancelledError":
+            if (
+                exc.__class__.__name__ == "TransformationCancelledError"
+                or str(exc) == "Transformation was canceled"
+            ):
                 self._mark_cancelled(str(exc) or None)
                 raise
             self._exception = _format_exception(exc)
@@ -743,6 +749,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 self, require_value=require_value
             )
             if result_checksum_raw is None:
+                if self._exception and "Transformation was canceled" in self._exception:
+                    self._mark_cancelled("Transformation was canceled")
+                    raise TransformationCancelledError("Transformation was canceled")
                 raise ValueError("Result is empty")
             try:
                 result_checksum = Checksum(result_checksum_raw)
@@ -756,7 +765,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         except (AssertionError, TransformationError):
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
-            if exc.__class__.__name__ == "TransformationCancelledError":
+            if (
+                exc.__class__.__name__ == "TransformationCancelledError"
+                or str(exc) == "Transformation was canceled"
+            ):
                 self._mark_cancelled(str(exc) or None)
                 raise
             self._exception = _format_exception(exc)

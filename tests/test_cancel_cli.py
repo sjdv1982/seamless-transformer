@@ -328,13 +328,17 @@ def test_cancel_delayed_producer_checksum_file(tmp_path, backend):
 
             tf = sleep_then_print({_SLEEP_SECONDS!r}, {token!r})
             tf.construct()
-            tf.transformation_checksum.resolve().incref()
+            transformation_buffer = tf.transformation_checksum.resolve()
+            transformation_buffer.incref()
             pathlib.Path({str(checksum_file)!r}).write_text(
                 tf.transformation_checksum.hex() + "\\n",
                 encoding="utf-8",
             )
-            print(tf.run())
-            seamless.close()
+            try:
+                print(tf.run())
+            finally:
+                transformation_buffer.decref()
+                seamless.close()
             """
         ),
         encoding="utf-8",
