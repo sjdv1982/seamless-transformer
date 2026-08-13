@@ -681,7 +681,7 @@ class TransformationCache:
                 remote_job_dir = parse_remote_job_written(result_checksum)
                 if remote_job_dir is not None:
                     raise RemoteJobWritten(remote_job_dir)
-                if result_checksum == "Transformation was canceled":
+                if isinstance(result_checksum, str) and result_checksum == "Transformation was canceled":
                     raise TransformationCancelledError(result_checksum)
                 raise RuntimeError(result_checksum)
             result_checksum = Checksum(result_checksum)
@@ -701,7 +701,7 @@ class TransformationCache:
                 remote_job_dir = parse_remote_job_written(result_checksum)
                 if remote_job_dir is not None:
                     raise RemoteJobWritten(remote_job_dir)
-                if result_checksum == "Transformation was canceled":
+                if isinstance(result_checksum, str) and result_checksum == "Transformation was canceled":
                     raise TransformationCancelledError(result_checksum)
                 raise RuntimeError(result_checksum)
             result_checksum = Checksum(result_checksum)
@@ -727,7 +727,7 @@ class TransformationCache:
                 remote_job_dir = parse_remote_job_written(result_checksum)
                 if remote_job_dir is not None:
                     raise RemoteJobWritten(remote_job_dir)
-                if result_checksum == "Transformation was canceled":
+                if isinstance(result_checksum, str) and result_checksum == "Transformation was canceled":
                     raise TransformationCancelledError(result_checksum)
                 raise RuntimeError(result_checksum)
             try:
@@ -758,7 +758,7 @@ class TransformationCache:
             remote_job_dir = parse_remote_job_written(result_checksum)
             if remote_job_dir is not None:
                 raise RemoteJobWritten(remote_job_dir)
-            if result_checksum == "Transformation was canceled":
+            if isinstance(result_checksum, str) and result_checksum == "Transformation was canceled":
                 raise TransformationCancelledError(result_checksum)
             result_checksum = Checksum(result_checksum)
 
