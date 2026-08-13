@@ -39,7 +39,11 @@ class PreTransformation:
         self._optional_pins = frozenset(optional_pins or ())
         self._prepared = False
         self._code_refs: list[tuple[Checksum, Checksum]] = []
-        self._value_refs: list[Checksum] = []
+        self._value_refs: list[tuple[Checksum, str]] = []
+        self._refholds_released = False
+        from seamless.reference_lifecycle import register_refholder
+
+        register_refholder(self)
 
     @property
     def pretransformation_dict(self) -> Dict[str, Any]:
@@ -88,9 +92,15 @@ class PreTransformation:
             self._code_manager.decref_semantic(semantic_checksum)
         self._code_refs.clear()
 
-        for checksum in self._value_refs:
-            checksum.decref()
+        for checksum, _role in self._value_refs:
+            checksum.decref_refholder()
         self._value_refs.clear()
+        self._refholds_released = True
+
+    def _refheld_checksums(self):
+        if self._refholds_released:
+            return ()
+        return tuple(self._value_refs)
 
     def __del__(self):
         try:
@@ -155,7 +165,7 @@ class PreTransformation:
         if argname == "code":
             if self._pretransformation_dict.get("__language__") == "python":
                 return self._prepare_code(value)
-            return self._to_checksum(value, celltype)
+                return self._to_checksum(value, celltype, "input:code")
         if value is None and argname in self._optional_pins and celltype not in (
             "plain",
             "mixed",
@@ -164,7 +174,7 @@ class PreTransformation:
                 f"Optional pin '{argname}' with celltype '{celltype}' "
                 "cannot use JSON null as absence"
             )
-        checksum = self._to_checksum(value, celltype)
+        checksum = self._to_checksum(value, celltype, f"input:{argname}")
         return checksum
 
     def _prepare_pin_value_for_dask(self, argname: str, value, celltype: str):
@@ -211,7 +221,7 @@ class PreTransformation:
         # Prefer syntactic checksum for execution; semantic guard remains tracked.
         return syntactic_checksum
 
-    def _to_checksum(self, value, celltype: str) -> Checksum | None:
+    def _to_checksum(self, value, celltype: str, role: str) -> Checksum | None:
         buffer = None
         if isinstance(value, Checksum):
             checksum = value
@@ -246,8 +256,8 @@ class PreTransformation:
             if scratch_ref:
                 checksum.tempref(scratch=True)
             else:
-                checksum.incref()
-        self._value_refs.append(checksum)
+                checksum.incref_refholder(scratch=False)
+                self._value_refs.append((checksum, role))
         return checksum
 
 
@@ -272,7 +282,7 @@ class PreparedPreTransformation(PreTransformation):
             except Exception as exc:
                 msg = f"Dependency '{argname}' has an exception:\n{exc}"
                 raise RuntimeError(msg) from exc
-        return self._to_checksum(value, celltype)
+        return self._to_checksum(value, celltype, f"input:{argname}")
 
 
 def direct_transformer_to_pretransformation(

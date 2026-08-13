@@ -31,11 +31,12 @@ class CodeManager:
         # guard reference counts (semantic guards syntactic, syntactic guards semantic)
         self._syntactic_guard_refs: Dict[str, int] = {}
         self._semantic_guard_refs: Dict[str, int] = {}
-        # bookkeeping of which checksums are currently incref'ed in the cache
-        self._syntactic_active: set[str] = set()
-        self._semantic_active: set[str] = set()
         # keep semantic buffers alive so they remain resolvable across processes
         self._semantic_buffers: Dict[str, Buffer] = {}
+        self._refholds_released = False
+        from seamless.reference_lifecycle import register_refholder
+
+        register_refholder(self)
 
     # --- registration helpers -------------------------------------------------
     def track_code_buffer(self, code_buffer: Buffer) -> Tuple[Checksum, Checksum]:
@@ -72,7 +73,7 @@ class CodeManager:
         checksum = _coerce_checksum(checksum)
         key = checksum.hex()
         self._semantic_direct_refs[key] = self._semantic_direct_refs.get(key, 0) + 1
-        self._update_semantic_state(key, checksum)
+        checksum.incref_refholder()
         self._enable_syntactic_guards(self._semantic_to_syntactic.get(key, ()))
 
     def decref_semantic(self, checksum) -> None:
@@ -85,16 +86,16 @@ class CodeManager:
         if current <= 1:
             self._semantic_direct_refs.pop(key, None)
             self._disable_syntactic_guards(self._semantic_to_syntactic.get(key, ()))
+            checksum.decref_refholder()
         else:
             self._semantic_direct_refs[key] = current - 1
-        self._update_semantic_state(key, checksum)
 
     def incref_syntactic(self, checksum) -> None:
         """Increment syntactic reference count and guard the semantic checksum."""
         checksum = _coerce_checksum(checksum)
         key = checksum.hex()
         self._syntactic_direct_refs[key] = self._syntactic_direct_refs.get(key, 0) + 1
-        self._update_syntactic_state(key, checksum)
+        checksum.incref_refholder()
 
         semantic_checksum = self._syntactic_to_semantic.get(key)
         if semantic_checksum is None:
@@ -103,7 +104,7 @@ class CodeManager:
         self._semantic_guard_refs[sem_key] = (
             self._semantic_guard_refs.get(sem_key, 0) + 1
         )
-        self._update_semantic_state(sem_key, semantic_checksum)
+        semantic_checksum.incref_refholder()
 
     def decref_syntactic(self, checksum) -> None:
         """Decrement syntactic reference count and release semantic guard if needed."""
@@ -116,7 +117,7 @@ class CodeManager:
             self._syntactic_direct_refs.pop(key, None)
         else:
             self._syntactic_direct_refs[key] = current - 1
-        self._update_syntactic_state(key, checksum)
+        checksum.decref_refholder()
 
         semantic_checksum = self._syntactic_to_semantic.get(key)
         if semantic_checksum is None:
@@ -127,7 +128,7 @@ class CodeManager:
             self._semantic_guard_refs.pop(sem_key, None)
         else:
             self._semantic_guard_refs[sem_key] = guard_refs - 1
-        self._update_semantic_state(sem_key, semantic_checksum)
+        semantic_checksum.decref_refholder()
 
     # --- guard helpers --------------------------------------------------------
     def _enable_syntactic_guards(self, syntactic_keys: Iterable[str]) -> None:
@@ -136,7 +137,7 @@ class CodeManager:
                 continue
             self._syntactic_guard_refs[syn_key] = 1
             checksum = _coerce_checksum(syn_key)
-            self._update_syntactic_state(syn_key, checksum)
+            checksum.incref_refholder()
 
     def _disable_syntactic_guards(self, syntactic_keys: Iterable[str]) -> None:
         for syn_key in syntactic_keys:
@@ -144,35 +145,43 @@ class CodeManager:
                 continue
             self._syntactic_guard_refs.pop(syn_key, None)
             checksum = _coerce_checksum(syn_key)
-            self._update_syntactic_state(syn_key, checksum)
+            checksum.decref_refholder()
 
-    # --- activity management --------------------------------------------------
-    def _update_syntactic_state(self, key: str, checksum: Checksum) -> None:
-        """Ensure syntactic checksum incref/decref matches combined refcounts."""
-        total = self._syntactic_direct_refs.get(
-            key, 0
-        ) + self._syntactic_guard_refs.get(key, 0)
-        active = key in self._syntactic_active
-        if total > 0 and not active:
-            checksum.incref()
-            self._syntactic_active.add(key)
-        elif total == 0 and active:
-            checksum.decref()
-            self._syntactic_active.remove(key)
+    def _refheld_checksums(self):
+        if self._refholds_released:
+            return ()
+        claims = []
+        for key, count in self._syntactic_direct_refs.items():
+            checksum = Checksum(key)
+            claims.extend((checksum, "syntactic:direct") for _ in range(count))
+        for key, count in self._syntactic_guard_refs.items():
+            checksum = Checksum(key)
+            claims.extend((checksum, "syntactic:guard") for _ in range(count))
+        for key, count in self._semantic_direct_refs.items():
+            checksum = Checksum(key)
+            claims.extend((checksum, "semantic:direct") for _ in range(count))
+        for key, count in self._semantic_guard_refs.items():
+            checksum = Checksum(key)
+            claims.extend((checksum, "semantic:guard") for _ in range(count))
+        return claims
 
-    def _update_semantic_state(self, key: str, checksum: Checksum) -> None:
-        """Ensure semantic checksum incref/decref matches combined refcounts."""
-        total = self._semantic_direct_refs.get(key, 0) + self._semantic_guard_refs.get(
-            key, 0
-        )
-        active = key in self._semantic_active
-        if total > 0 and not active:
-            checksum.incref()
-            self._semantic_active.add(key)
-        elif total == 0 and active:
-            checksum.decref()
-            self._semantic_active.remove(key)
-            self._semantic_buffers.pop(key, None)
+    def _release_refholds(self) -> None:
+        if self._refholds_released:
+            return
+        for checksum, _role in list(self._refheld_checksums()):
+            checksum.decref_refholder()
+        self._syntactic_direct_refs.clear()
+        self._syntactic_guard_refs.clear()
+        self._semantic_direct_refs.clear()
+        self._semantic_guard_refs.clear()
+        self._semantic_buffers.clear()
+        self._refholds_released = True
+
+    def __del__(self):
+        try:
+            self._release_refholds()
+        except Exception:
+            pass
 
     def get_syntactic_checksums(self, semantic_checksum) -> list[Checksum]:
         """Return syntactic checksums mapped to a semantic checksum."""

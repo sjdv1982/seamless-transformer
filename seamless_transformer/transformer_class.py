@@ -105,8 +105,12 @@ class TransformerCore(Generic[P, R]):
         self._meta = {"transformer_path": ["tf", "tf"], "local": local}
         self._workflow_backend = None
         self._workflow_callable = None
+        self._refholds_released = False
         self.scratch = scratch
         self.direct_print = direct_print
+        from seamless.reference_lifecycle import register_refholder
+
+        register_refholder(self)
 
     def _get_signature(self):
         return None
@@ -167,7 +171,7 @@ class TransformerCore(Generic[P, R]):
         if self._workflow_backend is not None:
             return self._workflow_backend.args
         return ArgsWrapper(
-            self._args, self._celltypes, fixed=self._get_signature() is not None
+            self, self._args, self._celltypes, fixed=self._get_signature() is not None
         )
 
     @property
@@ -184,7 +188,7 @@ class TransformerCore(Generic[P, R]):
 
         if self._workflow_backend is not None:
             return self._workflow_backend.modules
-        return ModulesWrapper(self._modules)
+        return ModulesWrapper(self, self._modules)
 
     @property
     def globals(self):
@@ -498,6 +502,52 @@ class TransformerCore(Generic[P, R]):
             return
         raise AttributeError(_no_such_attribute(self, name))
 
+    def _replace_checksum_field(self, old, new) -> None:
+        from seamless import Checksum
+
+        old_checksum = old if isinstance(old, Checksum) else None
+        new_checksum = new if isinstance(new, Checksum) else None
+        if new_checksum is not None:
+            new_checksum.incref_refholder()
+        if old_checksum is not None:
+            old_checksum.decref_refholder()
+
+    def _refheld_checksums(self):
+        from seamless import Checksum
+
+        if getattr(self, "_refholds_released", False):
+            return ()
+        claims = []
+        for name, value in self._args.items():
+            if isinstance(value, Checksum):
+                claims.append((value, f"pin:{name}"))
+        if isinstance(getattr(self, "_codebuf", None), Checksum):
+            claims.append((self._codebuf, "code"))
+        for name, value in self._modules.items():
+            if isinstance(value, Checksum):
+                claims.append((value, f"module:{name}"))
+        return claims
+
+    def _release_refholds(self) -> None:
+        if getattr(self, "_refholds_released", False):
+            return
+        object.__setattr__(self, "_refholds_released", True)
+        from seamless import Checksum
+        for value in list(self._args.values()):
+            if isinstance(value, Checksum):
+                value.decref_refholder()
+        for value in list(self._modules.values()):
+            if isinstance(value, Checksum):
+                value.decref_refholder()
+        if isinstance(getattr(self, "_codebuf", None), Checksum):
+            self._codebuf.decref_refholder()
+
+    def __del__(self):
+        try:
+            self._release_refholds()
+        except Exception:
+            pass
+
 
 def _class_attribute(cls, name):
     for parent in cls.__mro__:
@@ -681,7 +731,8 @@ class CelltypesWrapper:
 class ArgsWrapper:
     """Wrapper around an imperative transformer's arguments."""
 
-    def __init__(self, args, celltypes, fixed):
+    def __init__(self, owner, args, celltypes, fixed):
+        self._owner = owner
         self._args = args
         self._celltypes = celltypes
         self._fixed = fixed
@@ -706,6 +757,8 @@ class ArgsWrapper:
             self._celltypes[key] = "mixed"
             if "result" not in self._celltypes:
                 self._celltypes["result"] = "mixed"
+        old = self._args.get(key)
+        self._owner._replace_checksum_field(old, value)
         self._args[key] = value
 
     def __delattr__(self, attr: str) -> None:
@@ -733,7 +786,8 @@ class ArgsWrapper:
 class ModulesWrapper:
     """Wrapper around an imperative transformer's imported modules."""
 
-    def __init__(self, modules):
+    def __init__(self, owner, modules):
+        self._owner = owner
         self._modules = modules
 
     def __getattr__(self, attr):
@@ -750,6 +804,8 @@ class ModulesWrapper:
     def __setitem__(self, key, value):
         if not isinstance(value, (ModuleType, dict)):
             raise TypeError(type(value))
+        old = self._modules.get(key)
+        self._owner._replace_checksum_field(old, value)
         self._modules[key] = value
 
     def __delattr__(self, attr: str) -> None:
@@ -758,7 +814,8 @@ class ModulesWrapper:
         return self.__delitem__(attr)
 
     def __delitem__(self, key) -> None:
-        self._modules.pop(key, None)
+        old = self._modules.pop(key, None)
+        self._owner._replace_checksum_field(old, None)
 
     def __dir__(self):
         return sorted(self._modules.keys())
