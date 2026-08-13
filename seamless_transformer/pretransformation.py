@@ -65,18 +65,24 @@ class PreTransformation:
         if self._prepared:
             return self._pretransformation_dict
 
-        for argname in list(self._pretransformation_dict.keys()):
-            if argname in TRANSFORMATION_DUNDER_ITEMS:
-                continue
-            celltype, subcelltype, value = self._pretransformation_dict[argname]
-            prepared_value = self._prepare_pin_value(argname, value, celltype)
-            if isinstance(prepared_value, Checksum):
-                prepared_value = prepared_value.hex()
-            self._pretransformation_dict[argname] = (
-                celltype,
-                subcelltype,
-                prepared_value,
-            )
+        try:
+            for argname in list(self._pretransformation_dict.keys()):
+                if argname in TRANSFORMATION_DUNDER_ITEMS:
+                    continue
+                celltype, subcelltype, value = self._pretransformation_dict[argname]
+                prepared_value = self._prepare_pin_value(argname, value, celltype)
+                if isinstance(prepared_value, Checksum):
+                    prepared_value = prepared_value.hex()
+                self._pretransformation_dict[argname] = (
+                    celltype,
+                    subcelltype,
+                    prepared_value,
+                )
+        except Exception:
+            # A failed preparation must not leave the successfully converted
+            # prefix holding checksums after its caller abandons the object.
+            self.release()
+            raise
 
         self._prepared = True
         return self._pretransformation_dict
@@ -109,9 +115,10 @@ class PreTransformation:
 
     def __del__(self):
         try:
-            self.release()
+            from seamless.reference_lifecycle import safe_release_refholder
+
+            safe_release_refholder(self)
         except Exception:
-            # Suppress destructor errors
             pass
 
     def build_partial_transformation(
@@ -160,10 +167,18 @@ class PreTransformation:
             if value.exception is not None:
                 msg = f"Dependency '{argname}' has an exception:\n{value.exception}"
                 raise RuntimeError(msg)
-            return value.result_checksum
+            if value._result_checksum_internal() is None:
+                value._compute_dependency()
+            result = value._result_checksum_internal()
+            if result is None:
+                raise RuntimeError(f"Dependency '{argname}' has no result")
+            return result
         if isinstance(value, Expression):
             try:
-                return value.compute()
+                result = value._evaluate_internal()
+                if result is None:
+                    raise RuntimeError("Expression result is empty")
+                return result
             except Exception as exc:
                 msg = f"Dependency '{argname}' has an exception:\n{exc}"
                 raise RuntimeError(msg) from exc
@@ -280,10 +295,18 @@ class PreparedPreTransformation(PreTransformation):
             if value.exception is not None:
                 msg = f"Dependency '{argname}' has an exception:\n{value.exception}"
                 raise RuntimeError(msg)
-            return value.result_checksum
+            if value._result_checksum_internal() is None:
+                value._compute_dependency()
+            result = value._result_checksum_internal()
+            if result is None:
+                raise RuntimeError(f"Dependency '{argname}' has no result")
+            return result
         if isinstance(value, Expression):
             try:
-                return value.compute()
+                result = value._evaluate_internal()
+                if result is None:
+                    raise RuntimeError("Expression result is empty")
+                return result
             except Exception as exc:
                 msg = f"Dependency '{argname}' has an exception:\n{exc}"
                 raise RuntimeError(msg) from exc

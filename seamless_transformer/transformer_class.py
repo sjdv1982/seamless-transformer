@@ -8,7 +8,7 @@ from copy import deepcopy
 from functools import update_wrapper
 from typing import Callable, Generic, Optional, ParamSpec, TypeVar, cast, overload
 
-from seamless import Buffer, ensure_open
+from seamless import Buffer, Checksum, ensure_open
 
 from .environment import Environment
 from .pretransformation import direct_transformer_to_pretransformation
@@ -29,6 +29,50 @@ def _snapshot_modules(modules):
     }
 
 
+def _clone_transformer_builder(source, target_cls, language=None):
+    """Clone a standalone builder with independent lifecycle ownership."""
+
+    snapshot = source._snapshot_for_call()
+    code = snapshot.callable
+    if code is None:
+        codebuf = snapshot.codebuf
+        if isinstance(codebuf, Checksum):
+            codebuf = codebuf.resolve()
+        code = codebuf.decode() if isinstance(codebuf, Buffer) else codebuf
+    target = target_cls(
+        code,
+        scratch=snapshot.scratch,
+        direct_print=snapshot.direct_print,
+        local=bool(snapshot.local) if snapshot.local is not None else False,
+        language=snapshot.language if language is None else language,
+    )
+    try:
+        target._celltypes = deepcopy(snapshot.celltypes)
+        target._optional_pins = set(snapshot.optional_pins)
+        target._args = {}
+        for key, value in snapshot.args.items():
+            target._replace_checksum_field(None, value)
+            target._args[key] = deepcopy(value)
+        target._modules = {}
+        for key, value in snapshot.modules.items():
+            target._replace_checksum_field(None, value)
+            target._modules[key] = value if isinstance(value, ModuleType) else deepcopy(value)
+        target._globals = deepcopy(snapshot.globals)
+        target._meta = deepcopy(snapshot.meta)
+        source_environment = getattr(source, "_environment", snapshot.environment)
+        target._environment = deepcopy(source_environment)
+        target._workflow_callable = snapshot.callable
+        if isinstance(snapshot.codebuf, Checksum):
+            target._codebuf = snapshot.codebuf
+            target._replace_code_ref(snapshot.codebuf)
+        if language is not None:
+            target.language = language
+        return target
+    except Exception:
+        target._release_refholds()
+        raise
+
+
 @overload
 def direct(
     func: "Transformer[P, R]", language: None = None
@@ -47,11 +91,7 @@ def direct(
     """Execute immediately, returning the result value."""
 
     if isinstance(func, Transformer):
-        result = DirectTransformer.__new__(DirectTransformer)
-        for k, v in func.__dict__.items():
-            setattr(result, k, deepcopy(v))
-        if language is not None:
-            result.language = language
+        result = _clone_transformer_builder(func, DirectTransformer, language)
     else:
         if language is None:
             language = "python"
@@ -73,11 +113,7 @@ def delayed(
     """Return a Transformation object that can be executed later."""
 
     if isinstance(func, Transformer):
-        result = Transformer.__new__(Transformer)
-        for k, v in func.__dict__.items():
-            setattr(result, k, v)
-        if language is not None:
-            result.language = language
+        result = _clone_transformer_builder(func, Transformer, language)
     else:
         if language is None:
             language = "python"
@@ -114,6 +150,7 @@ class TransformerCore(Generic[P, R]):
         self._meta = {"transformer_path": ["tf", "tf"], "local": local}
         self._workflow_backend = None
         self._workflow_callable = None
+        self._code_checksum_ref = None
         self._refholds_released = False
         self.scratch = scratch
         self.direct_print = direct_print
@@ -521,18 +558,32 @@ class TransformerCore(Generic[P, R]):
         if old_checksum is not None:
             old_checksum.decref_refholder()
 
+    def _replace_code_ref(self, codebuf) -> None:
+        new = None
+        # A normal source Buffer is owned directly by the builder.  Only an
+        # explicitly checksum-backed code field needs a lifecycle claim.
+        if isinstance(codebuf, Checksum):
+            new = codebuf
+        old = getattr(self, "_code_checksum_ref", None)
+        if new is not None and not getattr(self, "_refholds_released", False):
+            new.incref_refholder()
+        self._code_checksum_ref = new
+        if old is not None:
+            old.decref_refholder()
+
     def _refheld_checksums(self):
         from seamless import Checksum
 
         if getattr(self, "_refholds_released", False):
             return ()
         claims = []
-        for name, value in self._args.items():
+        for name, value in getattr(self, "_args", {}).items():
             if isinstance(value, Checksum):
                 claims.append((value, f"pin:{name}"))
-        if isinstance(getattr(self, "_codebuf", None), Checksum):
-            claims.append((self._codebuf, "code"))
-        for name, value in self._modules.items():
+        code_checksum = getattr(self, "_code_checksum_ref", None)
+        if isinstance(code_checksum, Checksum):
+            claims.append((code_checksum, "code"))
+        for name, value in getattr(self, "_modules", {}).items():
             if isinstance(value, Checksum):
                 claims.append((value, f"module:{name}"))
         return claims
@@ -542,18 +593,22 @@ class TransformerCore(Generic[P, R]):
             return
         object.__setattr__(self, "_refholds_released", True)
         from seamless import Checksum
-        for value in list(self._args.values()):
+        for value in list(getattr(self, "_args", {}).values()):
             if isinstance(value, Checksum):
                 value.decref_refholder()
-        for value in list(self._modules.values()):
+        for value in list(getattr(self, "_modules", {}).values()):
             if isinstance(value, Checksum):
                 value.decref_refholder()
-        if isinstance(getattr(self, "_codebuf", None), Checksum):
-            self._codebuf.decref_refholder()
+        code_checksum = getattr(self, "_code_checksum_ref", None)
+        if isinstance(code_checksum, Checksum):
+            code_checksum.decref_refholder()
+        self._code_checksum_ref = None
 
     def __del__(self):
         try:
-            self._release_refholds()
+            from seamless.reference_lifecycle import safe_release_refholder
+
+            safe_release_refholder(self)
         except Exception:
             pass
 
@@ -611,6 +666,7 @@ class PythonMixin(Generic[P, R]):
             self._workflow_callable = None
             assert isinstance(code, str)
             self._codebuf = Buffer(code, "text")
+        self._replace_code_ref(self._codebuf)
         self._signature = signature
 
     def _get_signature(self):
@@ -779,8 +835,8 @@ class ArgsWrapper:
         if self._fixed or key not in self._celltypes:
             raise AttributeError(key)
         del self._celltypes[key]
-        if key in self._args:
-            del self._args[key]
+        old = self._args.pop(key, None)
+        self._owner._replace_checksum_field(old, None)
 
     def __dir__(self):
         return sorted(self._args.keys())
@@ -811,7 +867,7 @@ class ModulesWrapper:
         return self.__setitem__(attr, value)
 
     def __setitem__(self, key, value):
-        if not isinstance(value, (ModuleType, dict)):
+        if not isinstance(value, (ModuleType, dict, Checksum)):
             raise TypeError(type(value))
         old = self._modules.get(key)
         self._owner._replace_checksum_field(old, value)

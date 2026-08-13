@@ -88,29 +88,12 @@ def _start_dependency(dep: Any, *, loop: asyncio.AbstractEventLoop | None = None
 
 def _dependency_result_checksum(dep: Any) -> Checksum:
     if _is_expression(dep):
-        from seamless import Expression
-
-        input_ref = dep.input_ref
-        transformation_cls = globals().get("Transformation")
-        if isinstance(input_ref, Expression) or (
-            transformation_cls is not None and isinstance(input_ref, transformation_cls)
-        ):
-            input_ref = _dependency_result_checksum(input_ref)
-        from seamless.checksum.expression import evaluate_expression
-
-        result = evaluate_expression(
-            input_ref,
-            dep.path,
-            dep.celltype,
-            dep.target_celltype,
-            validator=dep.validator,
-            validator_language=dep.validator_language,
-        )
+        result = dep._evaluate_internal()
         if result is None:
             raise RuntimeError("Expression result is empty")
         return Checksum(result)
-    if not _dependency_is_evaluated(dep) and hasattr(dep, "_compute"):
-        dep._compute(api_origin="dependency")
+    if not _dependency_is_evaluated(dep) and hasattr(dep, "_compute_dependency"):
+        dep._compute_dependency()
     dep_exception = _dependency_exception(dep)
     if dep_exception is not None:
         raise RuntimeError(dep_exception)
@@ -119,37 +102,14 @@ def _dependency_result_checksum(dep: Any) -> Checksum:
 
 async def _dependency_computation(dep: Any, *, require_value: bool) -> Checksum | None:
     if _is_expression(dep):
-        from seamless import Expression
-        from seamless.checksum.expression import evaluate_expression_async
-
-        input_ref = dep.input_ref
-        transformation_cls = globals().get("Transformation")
-        if isinstance(input_ref, Expression):
-            input_ref = await _dependency_computation(
-                input_ref, require_value=require_value
-            )
-        elif transformation_cls is not None and isinstance(input_ref, transformation_cls):
-            upstream = input_ref
-            await upstream._computation(require_value=False)
-            input_ref = upstream._result_checksum_internal()
-            dep_exception = _dependency_exception(upstream)
-            if dep_exception is not None:
-                raise RuntimeError(dep_exception)
-
-        if input_ref is None:
-            raise RuntimeError("Expression input checksum is empty")
-        result = await evaluate_expression_async(
-            input_ref,
-            dep.path,
-            dep.celltype,
-            dep.target_celltype,
-            validator=dep.validator,
-            validator_language=dep.validator_language,
-        )
+        result = await dep._evaluate_internal_async()
         if result is None:
             raise RuntimeError("Expression result is empty")
         return Checksum(result)
-    await dep._computation(require_value=require_value)
+    if hasattr(dep, "_compute_dependency_async"):
+        await dep._compute_dependency_async(require_value=require_value)
+    else:
+        await dep._computation(require_value=require_value)
     return dep._result_checksum_internal()
 
 
@@ -365,6 +325,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     def _publish_definition(self, checksum: Checksum | str | bytes) -> Checksum:
         checksum = Checksum(checksum)
+        if self._cancelled:
+            return checksum
         checksum.tempref(scratch=self._scratch)
         if not self._definition_refheld and not self._refholds_released:
             checksum.incref_refholder(scratch=self._scratch)
@@ -375,6 +337,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         if checksum is None:
             return None
         checksum = Checksum(checksum)
+        # A canceled transformation may still have a worker finishing after
+        # its owner detached.  Keep that late result out of the object.
+        if self._cancelled:
+            return None
         checksum.tempref(scratch=self._scratch)
         old = self._result_checksum
         if old is not None and old == checksum:
@@ -429,11 +395,16 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._refholds_released = True
 
     def _mark_cancelled(self, message: str | None = None) -> None:
+        if self._cancelled:
+            return
         self._cancelled = True
         self._cancel_requested = True
         if message is not None:
             self._cancel_message = message
         self._exception = self._cancel_message
+        # Release while all checksum fields are still intact.  Clearing the
+        # result first used to strand the result refholder during cancellation.
+        self._release_refholds()
         self._result_checksum = None
         self._evaluated = True
         self._constructed = True
@@ -777,12 +748,6 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         return self._result_checksum
 
     def _run_dependencies(self) -> None:
-        all_evaluated = True
-        for depname, dep in self._upstream_dependencies.items():
-            if not _dependency_is_evaluated(dep):
-                all_evaluated = False
-        if all_evaluated:
-            return
         try:
             loop = get_event_loop()
             self._verify_sync_construct(loop)
@@ -922,7 +887,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 """,
         )
 
-    def _compute(self, api_origin: str) -> Checksum | None:
+    def _compute_sync(self, api_origin: str) -> Checksum | None:
         ensure_open("transformation compute")
         if self._cancelled:
             return None
@@ -932,7 +897,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             if _dask_available() and not self._prefer_local_execution():
                 return self._compute_with_dask(require_value=False)
             task_loop = get_event_loop()
-            self.start(loop=task_loop)
+            self.start(loop=task_loop, _internal=True)
 
         if self._computation_future is not None:
             assert self._computation_task is None
@@ -982,6 +947,56 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._computation_task = None
         return self._result_checksum
 
+    def _compute_dependency(self) -> Checksum | None:
+        """Synchronously evaluate as a dependency without result interest."""
+
+        return self._compute_sync("dependency")
+
+    async def _compute_dependency_async(self, *, require_value: bool = False) -> Checksum | None:
+        """Asynchronously evaluate as a dependency without result interest."""
+
+        ensure_open("transformation computation")
+        if self._cancelled:
+            return None
+        if self._computation_task is None and self._computation_future is None:
+            if _dask_available() and not self._prefer_local_execution():
+                return await self._compute_with_dask_async(require_value=require_value)
+            return await self._computation(require_value=require_value)
+        if self._computation_future is not None:
+            await asyncio.wrap_future(self._computation_future)
+            self._computation_future = None
+            if require_value:
+                await self._ensure_result_value()
+            return self._result_checksum
+        task = self._computation_task
+        assert task is not None
+        if task.get_loop().is_running() and asyncio.get_running_loop() is not task.get_loop():
+            async def _await_task():
+                return await task
+
+            await asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(_await_task(), task.get_loop())
+            )
+        else:
+            await task
+        self._computation_task = None
+        if require_value:
+            await self._ensure_result_value()
+        return self._result_checksum
+
+    def _compute(self, api_origin: str) -> Checksum | None:
+        """Evaluate through a public entry point.
+
+        ``api_origin='dependency'`` is retained as a compatibility shim for
+        older callers, but all framework dependency code uses the named
+        ``_compute_dependency`` method above.
+        """
+
+        if api_origin == "dependency":
+            return self._compute_dependency()
+        self._enable_result_holding()
+        return self._compute_sync(api_origin)
+
     def compute(self) -> Checksum | None:
         """Run the transformation and return the checksum.
 
@@ -991,7 +1006,6 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
         It is made sure that the result checksum is fingertippable (resolvable or recomputable).
         """
-        self._enable_result_holding()
         return self._compute(api_origin="compute")
 
     async def _computation(self, require_value: bool) -> Checksum | None:
@@ -1172,6 +1186,11 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             raise TransformationError("Transformation has not been constructed")
         return self._transformation_checksum
 
+    def _transformation_checksum_internal(self) -> Checksum | None:
+        """Read the definition checksum without public API semantics."""
+
+        return self._transformation_checksum
+
     @property
     def result_checksum(self) -> Checksum:
         self._enable_result_holding()
@@ -1211,13 +1230,21 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     @property
     def buffer(self) -> Buffer:
-        buf = self._result_checksum_internal().resolve()
+        self._enable_result_holding()
+        return self._buffer_internal()
+
+    def _buffer_internal(self) -> Buffer:
+        checksum = self._result_checksum_internal()
+        if checksum is None:
+            raise TransformationError("Transformation result is empty")
+        buf = checksum.resolve()
         assert isinstance(buf, Buffer)
         return buf
 
     @property
     def value(self) -> T:
-        buf = self.buffer
+        self._enable_result_holding()
+        buf = self._buffer_internal()
         return buf.get_value(self.celltype)
 
     async def _run(self) -> T:
@@ -1302,7 +1329,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     def __del__(self):
         try:
-            self._release_refholds()
+            from seamless.reference_lifecycle import safe_release_refholder
+
+            safe_release_refholder(self)
         except Exception:
             pass
         try:
@@ -1410,8 +1439,10 @@ def transformation_from_pretransformation(
             if _is_expression(dep):
                 continue
             try:
-                dep_cs = dep.transformation_checksum
+                dep_cs = dep._transformation_checksum_internal()
             except Exception:
+                continue
+            if dep_cs is None:
                 continue
             deps[pinname] = dep_cs.hex()
         if not deps:
@@ -1462,7 +1493,7 @@ def transformation_from_pretransformation(
         )
         return run_sync(
             deepcopy(prepared_execution_dict),
-            tf_checksum=transformation_obj.transformation_checksum,
+            tf_checksum=transformation_obj._transformation_checksum_internal(),
             tf_dunder=tf_dunder_payload,
             scratch=scratch,
             require_value=require_value,
@@ -1478,7 +1509,7 @@ def transformation_from_pretransformation(
         )
         return await run(
             deepcopy(prepared_execution_dict),
-            tf_checksum=transformation_obj.transformation_checksum,
+            tf_checksum=transformation_obj._transformation_checksum_internal(),
             tf_dunder=tf_dunder_payload,
             scratch=scratch,
             require_value=require_value,
@@ -1552,7 +1583,7 @@ def compute_transformation_sync(
     if transformation.exception is not None:
         raise RuntimeError(transformation.exception)
     else:
-        return transformation.result_checksum
+        return transformation._result_checksum_internal()
 
 
 __all__ = [

@@ -14,9 +14,10 @@ def test_expression_dependency_is_tempref_only_and_transformation_adopts_result(
     transformation = delayed(add_one)(expression)
     assert transformation.compute() == Buffer(5, "int").get_checksum()
     expression_result = expression._result_checksum_internal()
-    assert expression_result is None
+    assert expression_result is not None
+    assert get_buffer_cache().reference_snapshot()[expression_result][0] == 1
+    assert not expression._refheld_checksums()
     # Expression dependency evaluation is internal; the downstream
     # Transformation owns its concrete input role.
     assert any(role == "input:value" for _cs, role in transformation._refheld_checksums())
     transformation._release_refholds()
-

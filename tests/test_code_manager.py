@@ -20,3 +20,18 @@ def test_code_manager_roles_have_logical_multiplicity_and_one_bridge():
     manager._release_refholds()
     assert cache.reference_snapshot().get(syntactic, (0, 0, False))[0] == 0
     assert cache.reference_snapshot().get(semantic, (0, 0, False))[0] == 0
+
+
+def test_semantic_direct_release_is_balanced_per_multiplicity():
+    manager = CodeManager()
+    code = Buffer(b"def g(x):\n    return x\n", "python")
+    semantic, syntactic = manager.track_code_buffer(code)
+    manager.incref_semantic(semantic)
+    manager.incref_semantic(semantic)
+    cache = get_buffer_cache()
+    assert cache.reference_snapshot()[semantic][0] == 2
+    manager.decref_semantic(semantic)
+    assert cache.reference_snapshot()[semantic][0] == 1
+    manager.decref_semantic(semantic)
+    assert cache.reference_snapshot().get(semantic, (0, 0, False))[0] == 0
+    manager._release_refholds()

@@ -77,7 +77,7 @@ class CodeManager:
         self._enable_syntactic_guards(self._semantic_to_syntactic.get(key, ()))
 
     def decref_semantic(self, checksum) -> None:
-        """Decrement semantic reference count and release guards if needed."""
+        """Decrement one semantic reference and release guards if needed."""
         checksum = _coerce_checksum(checksum)
         key = checksum.hex()
         current = self._semantic_direct_refs.get(key)
@@ -86,9 +86,11 @@ class CodeManager:
         if current <= 1:
             self._semantic_direct_refs.pop(key, None)
             self._disable_syntactic_guards(self._semantic_to_syntactic.get(key, ()))
-            checksum.decref_refholder()
         else:
             self._semantic_direct_refs[key] = current - 1
+        # Every direct semantic demand has a matching cache acquisition.  The
+        # syntactic guard is the only role whose release is transition-based.
+        checksum.decref_refholder()
 
     def incref_syntactic(self, checksum) -> None:
         """Increment syntactic reference count and guard the semantic checksum."""
@@ -179,7 +181,9 @@ class CodeManager:
 
     def __del__(self):
         try:
-            self._release_refholds()
+            from seamless.reference_lifecycle import safe_release_refholder
+
+            safe_release_refholder(self)
         except Exception:
             pass
 
