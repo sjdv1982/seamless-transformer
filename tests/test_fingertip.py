@@ -52,6 +52,7 @@ def test_fingertip_recompute_scratch():
     buf = result_checksum.resolve()
     assert buf.get_value("mixed") == pytest.approx(12.84)
 
+    tf._release_refholds()
     get_buffer_cache().purge_scratch(result_checksum)
     with pytest.raises(CacheMissError):
         result_checksum.resolve()
