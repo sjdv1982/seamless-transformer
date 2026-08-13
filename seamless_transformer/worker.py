@@ -473,6 +473,14 @@ def _buffer_decref(self: Buffer) -> None:
     _buffer_ref_op(self, "decref")
 
 
+def _buffer_incref_refholder(self: Buffer, **_kwargs: Any) -> None:
+    return None
+
+
+def _buffer_decref_refholder(self: Buffer) -> None:
+    return None
+
+
 def _buffer_tempref(self: Buffer, **_kwargs: Any) -> None:
     _buffer_ref_op(self, "tempref")
 
@@ -522,6 +530,12 @@ def _patch_worker_primitives() -> None:
         def decref(self, *args: Any, **kwargs: Any) -> None:
             return None
 
+        def incref_refholder(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def decref_refholder(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
         def tempref(self, *args: Any, **kwargs: Any) -> None:
             return None
 
@@ -540,6 +554,10 @@ def _patch_worker_primitives() -> None:
     # Checksum refcounting is disabled inside a worker.
     Checksum.incref = lambda self, *args, **kwargs: None  # type: ignore[assignment]
     Checksum.decref = lambda self, *args, **kwargs: None  # type: ignore[assignment]
+    Checksum.incref_refholder = lambda self, *args, **kwargs: None  # type: ignore[assignment]
+    Checksum.decref_refholder = lambda self, *args, **kwargs: None  # type: ignore[assignment]
+    Buffer.incref_refholder = _buffer_incref_refholder  # type: ignore[assignment]
+    Buffer.decref_refholder = _buffer_decref_refholder  # type: ignore[assignment]
     Checksum.tempref = (  # type: ignore[assignment]
         lambda self, interest=128.0, fade_factor=2.0, fade_interval=2.0, **kwargs: None
     )
