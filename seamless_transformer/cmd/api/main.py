@@ -1092,6 +1092,20 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
             buf = buf.content
         handle.write(buf)
 
+    def hold_buffer_until_close(buffer):
+        """Keep an uploaded CLI buffer alive until the normal close audit."""
+
+        released = False
+        buffer.incref()
+
+        def release():
+            nonlocal released
+            if not released:
+                released = True
+                buffer.decref()
+
+        seamless.register_close_hook(release)
+
     if args.dry_run:
         if args.write_job is not None:
             from seamless.caching.buffer_cache import get_buffer_cache
@@ -1137,10 +1151,11 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
             from seamless_transformer.transformation_utils import extract_tf_dunder
 
             print("Transformation submitted to remote server")
+            transformation_buffer = None
             if args.upload:
                 transformation_buffer = Checksum(transformation_checksum).resolve()
                 assert isinstance(transformation_buffer, Buffer)
-                transformation_buffer.incref()
+                hold_buffer_until_close(transformation_buffer)
             tf_dunder = extract_tf_dunder(transformation_dict)
             try:
                 run_sync(
@@ -1160,11 +1175,13 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
             )
 
         if args.upload or args.write_job:
-            print(transformation_checksum)
             if args.upload:
                 transformation_buffer = Checksum(transformation_checksum).resolve()
                 assert isinstance(transformation_buffer, Buffer)
-                transformation_buffer.incref()
+                hold_buffer_until_close(transformation_buffer)
+                print(transformation_checksum)
+            else:
+                print(transformation_checksum)
 
         return 0
 
