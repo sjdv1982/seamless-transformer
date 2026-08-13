@@ -97,6 +97,11 @@ class PreTransformation:
         self._value_refs.clear()
         self._refholds_released = True
 
+    def _release_refholds(self) -> None:
+        """Release lifecycle references through the common holder protocol."""
+
+        self.release()
+
     def _refheld_checksums(self):
         if self._refholds_released:
             return ()
