@@ -1225,6 +1225,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             await self._computation(require_value=False)
             checksum = self._result_checksum_internal()
             if checksum is None:
+                if self._exception is not None:
+                    raise TransformationError(
+                        "Transformation returned an exception:\n" + self._exception
+                    )
                 raise TransformationError("Transformation result is empty")
             return await checksum.fingertip(self.celltype)
         except asyncio.CancelledError:
@@ -1252,6 +1256,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._compute(api_origin="run")
         checksum = self._result_checksum_internal()
         if checksum is None:
+            if self._exception is not None:
+                raise TransformationError(
+                    "Transformation returned an exception:\n" + self._exception
+                )
             raise TransformationError("Transformation result is empty")
         return checksum.fingertip_sync(self.celltype)
 
