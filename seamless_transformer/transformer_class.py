@@ -20,6 +20,15 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
+def _snapshot_modules(modules):
+    """Copy module mappings without attempting to pickle module objects."""
+
+    return {
+        name: value if isinstance(value, ModuleType) else deepcopy(value)
+        for name, value in modules.items()
+    }
+
+
 @overload
 def direct(
     func: "Transformer[P, R]", language: None = None
@@ -127,7 +136,7 @@ class TransformerCore(Generic[P, R]):
             celltypes=deepcopy(self._celltypes),
             optional_pins=frozenset(self._optional_pins),
             args=deepcopy(self._args),
-            modules=deepcopy(self._modules),
+            modules=_snapshot_modules(self._modules),
             globals=deepcopy(self._globals),
             meta=deepcopy(self._meta),
             environment=self._environment._to_lowlevel(),
