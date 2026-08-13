@@ -40,6 +40,7 @@ from seamless_transformer.cmd import interface
 from seamless_transformer.cmd.exceptions import SeamlessSystemExit
 from seamless_transformer.cmd.bytes2human import human2bytes
 from seamless_transformer.remote_job import REMOTE_JOB_META_KEY, RemoteJobWritten
+from seamless_transformer.transformation_cache import get_transformation_cache
 
 from seamless_transformer.environment import Environment
 from seamless.checksum.json_ import json_dumps_bytes
@@ -72,8 +73,6 @@ def _cancel_current_on_termination(tf_checksum: Checksum | str):
         if canceled:
             return
         canceled = True
-        from seamless_transformer.transformation_cache import get_transformation_cache
-
         get_transformation_cache().cancel_by_checksum(tf_checksum)
 
     def _terminate(_signum, _frame):
