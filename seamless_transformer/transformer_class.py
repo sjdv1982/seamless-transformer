@@ -649,7 +649,7 @@ class PythonMixin(Generic[P, R]):
         if callable(code):
             update_wrapper(self, code)
 
-    def _set_code(self, code: Callable[P, R] | str):
+    def _set_code(self, code: Callable[P, R] | str | Checksum):
         from .getsource import getsource
 
         signature = None
@@ -662,6 +662,16 @@ class PythonMixin(Generic[P, R]):
             self._codebuf = codebuf
             self._celltypes = {k: "mixed" for k in signature.parameters}
             self._celltypes["result"] = "mixed"
+        elif isinstance(code, Checksum):
+            # A checksum-backed code field is an explicit lifecycle role.  Keep
+            # the checksum as the builder's source so cloning/binding can adopt
+            # it independently; snapshot construction resolves it only when a
+            # transformation payload is assembled.
+            self._workflow_callable = None
+            self._codebuf = code
+            self._replace_code_ref(self._codebuf)
+            self._signature = None
+            return
         else:
             self._workflow_callable = None
             assert isinstance(code, str)
@@ -689,7 +699,7 @@ class PythonMixin(Generic[P, R]):
         return self._codebuf
 
     @code.setter
-    def code(self, code: Callable[P, R] | str):
+    def code(self, code: Callable[P, R] | str | Checksum):
         if getattr(self, "_workflow_backend", None) is not None:
             self._workflow_backend.code = code
             return

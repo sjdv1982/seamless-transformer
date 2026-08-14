@@ -3,6 +3,7 @@ import seamless_config.select as select
 
 from seamless_transformer.cmd.api import main as cmd_main
 import seamless_transformer.probe_capture as probe_capture
+import seamless_transformer.cmd.register as register_module
 
 
 def _reset_config_state(monkeypatch):
@@ -61,6 +62,7 @@ def test_probe_main_accepts_naked_probe(monkeypatch, tmp_path):
 
     monkeypatch.chdir(workdir)
     monkeypatch.setenv("SEAMLESS_CACHE", str(cache_dir))
+    monkeypatch.setattr(register_module, "_write_buffer_remote", lambda buffer: None)
     monkeypatch.setattr(probe_capture, "refresh_required_buckets_sync", fake_refresh)
 
     assert cmd_main.probe_main([]) == 0
@@ -92,6 +94,7 @@ def test_probe_main_wires_target_tf_dunder_and_force(monkeypatch, tmp_path):
 
     monkeypatch.chdir(workdir)
     monkeypatch.setenv("SEAMLESS_CACHE", str(cache_dir))
+    monkeypatch.setattr(register_module, "_write_buffer_remote", lambda buffer: None)
     monkeypatch.setattr(probe_capture, "refresh_required_buckets_sync", fake_refresh)
 
     assert cmd_main.probe_main(["--force", "true"]) == 0
