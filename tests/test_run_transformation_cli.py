@@ -273,6 +273,49 @@ def test_run_transformation_cli_replays_uploaded_job_checksum_file(tmp_path):
     assert proc.stdout.splitlines()[-1].strip() == _HELLO_CHECKSUM
 
 
+def test_run_transformation_cli_replays_uploaded_metafile(tmp_path):
+    workdir = tmp_path / "work"
+    job_dir = tmp_path / "job"
+    workdir.mkdir()
+    _write_remote_config(
+        workdir,
+        backend="jobserver",
+        project=f"run-transformation-metafile-{uuid.uuid4().hex}",
+    )
+    helper = workdir / "helper"
+    helper.write_text("#!/bin/sh\nprintf 'hello from meta-file\\n'\n")
+
+    proc = _run_command(
+        [
+            "seamless-run",
+            "--dry-run",
+            "--upload",
+            "-q",
+            "-j",
+            str(job_dir),
+            "--metafile",
+            str(helper),
+            "-c",
+            "./helper",
+        ],
+        cwd=workdir,
+    )
+    _assert_success(proc)
+    dunder = (job_dir / "dunder.json").read_text()
+    assert "META__FILE__helper" in dunder
+
+    proc = _run_command(
+        [
+            "seamless-run-transformation",
+            str(job_dir / "transformation.json.CHECKSUM"),
+        ],
+        cwd=workdir,
+    )
+    _assert_success(proc)
+    expected = Buffer(b"hello from meta-file\n", "bytes").get_checksum().hex()
+    assert proc.stdout.splitlines()[-1].strip() == expected
+
+
 def test_run_transformation_cli_replays_uploaded_job_checksum_file_with_daskserver_config(
     tmp_path,
 ):
