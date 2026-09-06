@@ -72,7 +72,7 @@ def extract_tf_dunder(transformation: Dict[str, Any]) -> Dict[str, Any]:
     return {
         key: deepcopy(value)
         for key, value in transformation.items()
-        if key in TRANSFORMATION_EXECUTION_DUNDER_KEYS
+        if key in TRANSFORMATION_EXECUTION_DUNDER_KEYS or key.startswith("META__")
     }
 
 
@@ -82,7 +82,11 @@ def extract_job_dunder(transformation: Dict[str, Any]) -> Dict[str, Any]:
     return {
         key: deepcopy(value)
         for key, value in transformation.items()
-        if key in TRANSFORMATION_EXECUTION_DUNDER_KEYS and key != "__env__"
+        if (
+            key.startswith("META__")
+            or key in TRANSFORMATION_EXECUTION_DUNDER_KEYS
+            and key != "__env__"
+        )
     }
 
 

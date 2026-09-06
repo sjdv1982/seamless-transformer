@@ -119,6 +119,10 @@ def run_transformation_dict(
 
     transformation: Dict[str, Any] = {}
     transformation.update(transformation_dict)
+    if isinstance(tf_dunder, dict):
+        for key, value in tf_dunder.items():
+            if key.startswith("META__"):
+                transformation[key] = value
     meta = merge_transformation_meta(transformation, tf_dunder)
     if meta:
         transformation["__meta__"] = meta

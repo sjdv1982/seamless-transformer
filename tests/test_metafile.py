@@ -1,9 +1,12 @@
 """Tests for --metafile flag: file-typed meta-pins."""
 
 import hashlib
-import pytest
 
 from seamless_transformer.cmd.bash_transformation import prepare_bash_transformation
+from seamless_transformer.transformation_utils import (
+    extract_job_dunder,
+    extract_tf_dunder,
+)
 
 
 def _fake_register_buffer(buffer, dry_run=False):
@@ -67,6 +70,16 @@ def test_metafile_pin_stored_with_correct_prefix(monkeypatch):
 
     assert "META__FILE__config.txt" in tf_dict
     assert tf_dict["META__FILE__config.txt"] == ("bytes", None, checksum)
+    assert extract_tf_dunder(tf_dict)["META__FILE__config.txt"] == (
+        "bytes",
+        None,
+        checksum,
+    )
+    assert extract_job_dunder(tf_dict)["META__FILE__config.txt"] == (
+        "bytes",
+        None,
+        checksum,
+    )
 
 
 def test_metafile_none_has_no_effect(monkeypatch):
