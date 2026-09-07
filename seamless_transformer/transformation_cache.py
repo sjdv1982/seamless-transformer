@@ -14,6 +14,7 @@ import uuid
 
 from seamless import Buffer, CacheMissError, Checksum, is_worker
 
+from . import observation
 from . import record_utils as _record_utils
 from . import worker
 from .probe_index import ensure_record_bucket_preconditions, is_record_probe
@@ -212,6 +213,11 @@ class TransformationCache:
                     cached_result = None
             if cached_result is not None:
                 _debug(f"cache hit {tf_checksum.hex()}")
+                observation.observe(
+                    tf_checksum,
+                    observation.CACHE_HIT,
+                    transformation_dict=transformation_dict,
+                )
                 if scratch:
                     cached_result.tempref(scratch=True)
                 else:
@@ -238,6 +244,11 @@ class TransformationCache:
                         remote_result = None
                 if remote_result is not None:
                     _debug("using remote result")
+                    observation.observe(
+                        tf_checksum,
+                        observation.CACHE_HIT,
+                        transformation_dict=transformation_dict,
+                    )
                     if scratch:
                         remote_result.tempref(scratch=True)
                     else:
@@ -247,6 +258,11 @@ class TransformationCache:
                     )
                     return remote_result
 
+        observation.observe(
+            tf_checksum,
+            observation.CACHE_MISS,
+            transformation_dict=transformation_dict,
+        )
         return await self._run_active_or_execute(
             transformation_dict,
             tf_checksum=tf_checksum,
@@ -939,6 +955,11 @@ class TransformationCache:
                 except CacheMissError:
                     cached_result = None
             if cached_result is not None:
+                observation.observe(
+                    tf_checksum,
+                    observation.CACHE_HIT,
+                    transformation_dict=transformation_dict,
+                )
                 self._register_transformation_result(
                     tf_checksum, cached_result, tf_dunder=tf_dunder
                 )
