@@ -372,14 +372,32 @@ class TransformerCore(Generic[P, R]):
         return self._workflow_backend.result
 
     @property
-    def status(self) -> str:
-        """Return the lifecycle status of a bound workflow transformer."""
+    def state(self) -> str:
+        """Return the node state of a bound workflow transformer.
+
+        The six-state vocabulary of the node itself: ``unwired``, ``blocked``,
+        ``waiting``, ``computing``, ``complete``, ``failed``.  With
+        :attr:`block_reason` this is the whole of a node's lifecycle report;
+        the display string ``status`` used to return is gone, because it
+        collapsed ``waiting`` and ``computing`` into one word.  For a summary,
+        ``repr`` of the handle carries the state.
+        """
 
         if self._workflow_backend is None:
             raise AttributeError(
-                "status is only available for bound workflow transformers"
+                "state is only available for bound workflow transformers"
             )
-        return self._workflow_backend.status
+        return self._workflow_backend.state
+
+    @property
+    def block_reason(self) -> str | None:
+        """Why a ``blocked`` transformer is blocked: ``blocked-by-unwired``, ``blocked-by-error``, or None."""
+
+        if self._workflow_backend is None:
+            raise AttributeError(
+                "block_reason is only available for bound workflow transformers"
+            )
+        return self._workflow_backend.block_reason
 
     @property
     def exception(self):
@@ -519,6 +537,42 @@ class TransformerCore(Generic[P, R]):
             self._workflow_backend.local = value
             return
         self.meta["local"] = value
+
+    def __repr__(self):
+        """A REPL summary, including node state for a bound transformer.
+
+        ``status`` used to be the thing you typed in Jupyter to see how a
+        transformer was doing; it is gone, and the six-state vocabulary of
+        :attr:`state` replaced it.  A bare ``ctx.tf`` should therefore say so
+        rather than printing an object address.  Never raises: a stale or
+        standalone handle omits the fields it cannot read.
+        """
+
+        cls = type(self).__name__
+        parts = []
+        backend = self._workflow_backend
+        try:
+            if backend is not None:
+                parts.append(repr(".".join(backend.node_path)))
+            else:
+                name = getattr(self.code, "__name__", None)
+                if name:
+                    parts.append(repr(name))
+        except Exception:
+            pass
+        try:
+            parts.append(f"language={self.language!r}")
+        except Exception:
+            pass
+        try:
+            if backend is not None:
+                parts.append(f"state={backend.state!r}")
+                reason = backend.block_reason
+                if reason is not None:
+                    parts.append(f"block_reason={reason!r}")
+        except Exception:
+            pass
+        return f"{cls}({', '.join(parts)})"
 
     def _workflow_endpoint(self):
         backend = self._workflow_backend
