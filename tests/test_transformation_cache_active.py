@@ -265,3 +265,29 @@ def test_cancel_by_checksum_releases_owner_before_backend_finishes(monkeypatch):
             release.set()
 
     asyncio.run(main())
+
+
+def test_last_awaiter_cancellation_has_no_unhandled_loop_exception(monkeypatch, capfd):
+    cache = TransformationCache()
+    unhandled = []
+    async def main():
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: unhandled.append(context))
+        entered = asyncio.Event()
+        async def stalled(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+        monkeypatch.setattr(cache, '_run_uncached', stalled)
+        task = asyncio.create_task(cache.run(
+            {'code': 'return 1'}, tf_checksum=_checksum('e'), tf_dunder={},
+            scratch=False, require_value=False, force_local=True))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Deliver result-future callbacks, including any shield error reporting.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not cache._active_submissions
+    asyncio.run(main())
+    assert unhandled == []
+    assert capfd.readouterr().err == ''

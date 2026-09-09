@@ -338,6 +338,7 @@ def direct_transformer_to_pretransformation(
     if env is not None:
         envbuf = Buffer(env, "plain")
         checksum = envbuf.get_checksum()
+        envbuf.tempref()
         pretransformation_dict["__env__"] = checksum.hex()
 
     if meta:

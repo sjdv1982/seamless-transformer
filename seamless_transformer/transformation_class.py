@@ -290,6 +290,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
         register_refholder(self)
         if self._definition_payload_template:
+            for name in ("__env__", "__schema__", "__header__", "__compilation__"):
+                value = self._tf_dunder.get(name, self._definition_payload_template.get(name))
+                if value is not None:
+                    self._replace_input_role("envelope:" + name, Checksum(value))
             for pinname, value in self._definition_payload_template.items():
                 if pinname.startswith("__") or pinname in self._upstream_dependencies:
                     continue

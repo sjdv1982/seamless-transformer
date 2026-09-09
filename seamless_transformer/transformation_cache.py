@@ -332,8 +332,14 @@ class TransformationCache:
                 self._active_submissions[tf_checksum] = active
             active.awaiters.add(member)
 
+        result = asyncio.wrap_future(active.result_future)
+        result.add_done_callback(_retrieve_future_exception)
         try:
-            return await asyncio.shield(asyncio.wrap_future(active.result_future))
+            # wait() leaves the shared result alive when this member detaches.
+            # Unlike shield(), it does not log an expected late cancellation
+            # exception after the caller has gone away (Python 3.14).
+            await asyncio.wait((result,))
+            return result.result()
         finally:
             await self.softcancel_by_checksum_async(tf_checksum, member=member)
 

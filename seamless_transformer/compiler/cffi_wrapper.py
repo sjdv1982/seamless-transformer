@@ -51,23 +51,8 @@ def build_extension_cffi(
             extra_objects=object_paths,
             extra_link_args=list(link_options or []),
         )
-        ffi.compile(tmpdir=build_dir, verbose=compiler_verbose)
-
-        suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
-        candidates = [
-            os.path.join(build_dir, filename)
-            for filename in os.listdir(build_dir)
-            if filename.endswith(suffix)
-            or re.match(rf"{re.escape(full_module_name)}.*\.so$", filename)
-        ]
-        if not candidates:
-            for root, _dirs, files in os.walk(build_dir):
-                for filename in files:
-                    if filename.endswith(".so"):
-                        candidates.append(os.path.join(root, filename))
-        if not candidates:
-            raise RuntimeError("CFFI build did not produce an extension module")
-        with open(candidates[0], "rb") as f:
+        output_path = ffi.compile(tmpdir=build_dir, verbose=compiler_verbose)
+        with open(output_path, "rb") as f:
             return f.read()
 
 

@@ -23,6 +23,12 @@ class TransformerBuilderSnapshot:
     call_mode: str
     callable: Any = None
     signature: Any = None
+    schema: str | None = None
+    compilation: Any = None
+    objects: Any = None
+    header: str | None = None
+    # Optional owning guards supplied by a bound backend during snapshot ingress.
+    leases: tuple[Any, ...] = ()
 
 
 __all__ = ["TransformerBuilderSnapshot"]

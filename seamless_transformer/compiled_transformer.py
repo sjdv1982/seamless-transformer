@@ -534,6 +534,23 @@ class CompiledMixin:
     def _get_signature(self):
         return self._call_signature
 
+    def _snapshot_for_call(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.snapshot_for_call()
+        from .builder_snapshot import TransformerBuilderSnapshot
+        from seamless import Buffer
+        objects, compilation = self._compiled_payloads()
+        meta = deepcopy(self._meta)
+        meta.setdefault("metavars", self._metavars.to_dict())
+        return TransformerBuilderSnapshot(
+            codebuf=Buffer(self._code_text, "text") if self._code_text is not None else None,
+            language=self.language, celltypes=deepcopy(self._celltypes),
+            optional_pins=frozenset(self._optional_pins), args=deepcopy(self._args),
+            modules={}, globals={}, meta=meta, environment=self._environment._to_lowlevel(),
+            scratch=self.scratch, direct_print=self.direct_print, local=self.local,
+            call_mode="delayed", signature=self._call_signature,
+            schema=self._schema_text, compilation=compilation, objects=objects, header=self.header)
+
     def _bind_compiled_arguments(self, *args, **kwargs):
         if self._schema is None:
             raise ValueError("compiled transformer schema is not set")
@@ -674,6 +691,8 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
 
     def __call__(self, *args, **kwargs) -> Transformation:
         ensure_open("compiled transformer call")
+        if self._workflow_backend is not None:
+            return self._build_from_snapshot(self._snapshot_for_call(), *args, **kwargs)
         if self._modules or self._globals:
             raise NotImplementedError("modules/globals are not supported for compiled transformers")
         arguments, deferred_validations = self._bind_compiled_arguments(*args, **kwargs)

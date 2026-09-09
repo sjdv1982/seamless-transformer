@@ -136,6 +136,10 @@ def run_transformation_dict(
             env_dict = env_buffer.get_value("plain")
         if not isinstance(env_dict, dict):
             env_dict = {}
+        import shutil
+        missing = [binary for binary in env_dict.get("which", ()) if shutil.which(binary) is None]
+        if missing:
+            raise RuntimeError("Required environment binaries are unavailable: " + ", ".join(missing))
 
     if get_record_mode() and not is_record_probe(transformation, tf_dunder):
         ensure_record_bucket_preconditions_sync(transformation, tf_dunder)

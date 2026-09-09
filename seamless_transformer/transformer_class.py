@@ -315,6 +315,33 @@ class TransformerCore(Generic[P, R]):
             for argname, arg in arguments.items()
             if isinstance(arg, (Transformation, Expression))
         }
+        if snapshot.schema is not None:
+            from .pretransformation import compiled_transformer_to_pretransformation
+            from .compiled_transformer import (
+                _deferred_validation_hooks, _validate_derived_compiled_dunders,
+                _compose_post_prepare_hooks, _compose_post_prepare_async_hooks,
+                _require_signature_package,
+            )
+            import yaml
+            signature = _require_signature_package().Signature.from_dict(yaml.safe_load(snapshot.schema))
+            validations = [(p.name, p.dtype, p.shape is not None) for p in signature.inputs]
+            sync_validate, async_validate = _deferred_validation_hooks(validations)
+            code = snapshot.codebuf
+            if isinstance(code, Checksum): code = code.resolve()
+            if isinstance(code, Buffer): code = code.decode()
+            pre = compiled_transformer_to_pretransformation(
+                code=code, schema_text=snapshot.schema, header=snapshot.header,
+                compilation=deepcopy(snapshot.compilation), objects=deepcopy(snapshot.objects),
+                meta=deepcopy(snapshot.meta), celltypes=deepcopy(snapshot.celltypes),
+                arguments=arguments, env=deepcopy(snapshot.environment), language=snapshot.language,
+                optional_pins=snapshot.optional_pins)
+            def validate_dunders(prepared):
+                _validate_derived_compiled_dunders(prepared, header=snapshot.header)
+            return transformation_from_pretransformation(
+                pre, upstream_dependencies=deps, meta=deepcopy(snapshot.meta),
+                scratch=snapshot.scratch, tf_dunder={},
+                post_prepare_sync=_compose_post_prepare_hooks(validate_dunders, sync_validate),
+                post_prepare_async=_compose_post_prepare_async_hooks(validate_dunders, async_validate))
         from .module_builder import (
             build_globals_module_definition,
             get_module_definition,
@@ -390,8 +417,14 @@ class TransformerCore(Generic[P, R]):
         return self._workflow_backend.state
 
     @property
-    def block_reason(self) -> str | None:
-        """Why a ``blocked`` transformer is blocked: ``blocked-by-unwired``, ``blocked-by-error``, or None."""
+    def block_reason(self) -> list[str] | None:
+        """Return sorted input pins responsible for the current pending state.
+
+        Applies to ``unwired``, ``blocked``, and ``waiting``; includes ``code``
+        when applicable. Mixed inputs use precedence ``unwired``, then
+        ``blocked``, then ``waiting``; only pins in that category are listed.
+        Returns None for other states.
+        """
 
         if self._workflow_backend is None:
             raise AttributeError(
@@ -409,10 +442,16 @@ class TransformerCore(Generic[P, R]):
             )
         return self._workflow_backend.exception
 
-    def compute(self):
+    def compute(self, timeout=None):
         if self._workflow_backend is not None:
-            return self._workflow_backend.compute()
+            return self._workflow_backend.compute(timeout=timeout)
         return self().compute()
+
+    async def computation(self, timeout=None):
+        if self._workflow_backend is not None:
+            return await self._workflow_backend.computation(timeout=timeout)
+        import asyncio
+        return await asyncio.wait_for(self().computation(), timeout)
 
     def run(self):
         if self._workflow_backend is not None:
@@ -848,7 +887,7 @@ class CelltypesWrapper:
             del self._args[key]
 
     def __dir__(self):
-        return sorted(self._celltypes.keys())
+        return sorted(set(super().__dir__()) | set(self._celltypes))
 
     def __str__(self):
         return str(self._celltypes)
@@ -903,7 +942,7 @@ class ArgsWrapper:
         self._owner._replace_checksum_field(old, None)
 
     def __dir__(self):
-        return sorted(self._args.keys())
+        return sorted(set(super().__dir__()) | (set(self._celltypes) - {"result"}))
 
     def __str__(self):
         return str(self._args)
@@ -947,7 +986,7 @@ class ModulesWrapper:
         self._owner._replace_checksum_field(old, None)
 
     def __dir__(self):
-        return sorted(self._modules.keys())
+        return sorted(set(super().__dir__()) | set(self._modules))
 
     def __str__(self):
         return str(self._modules)
@@ -985,7 +1024,7 @@ class GlobalsWrapper:
         self._globals.pop(key, None)
 
     def __dir__(self):
-        return sorted(self._globals.keys())
+        return sorted(set(super().__dir__()) | set(self._globals))
 
     def __str__(self):
         return str(self._globals)
