@@ -755,6 +755,11 @@ class PythonMixin(Generic[P, R]):
             self._codebuf = codebuf
             self._celltypes = {k: "mixed" for k in signature.parameters}
             self._celltypes["result"] = "mixed"
+            self._optional_pins = {
+                name
+                for name, parameter in signature.parameters.items()
+                if parameter.default is not inspect.Parameter.empty
+            }
         elif isinstance(code, Checksum):
             # A checksum-backed code field is an explicit lifecycle role.  Keep
             # the checksum as the builder's source so cloning/binding can adopt
