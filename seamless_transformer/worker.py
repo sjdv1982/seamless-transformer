@@ -693,21 +693,14 @@ def _execute_transformation_impl(
         _set_current_owner_dask_priority(previous_priority)
 
 
-def _format_pruned_exec_traceback() -> str:
-    exc_type, exc, tb = sys.exc_info()
-    if exc_type is None or exc is None:
+def _format_pruned_exec_traceback(exc: BaseException | None = None) -> str:
+    from .transformation_class import _format_exception
+
+    if exc is None:
+        exc = sys.exc_info()[1]
+    if exc is None:
         return traceback.format_exc()
-    if tb is None:
-        return "".join(traceback.format_exception_only(exc_type, exc))
-    frames = traceback.extract_tb(tb)
-    # Drop the outer frames so user tracebacks start at user code (exec_code is 4th frame).
-    frames = frames[4:]
-    if not frames:
-        return "".join(traceback.format_exception_only(exc_type, exc))
-    formatted = ["Traceback (most recent call last):\n"]
-    formatted.extend(traceback.format_list(frames))
-    formatted.extend(traceback.format_exception_only(exc_type, exc))
-    return "".join(formatted)
+    return _format_exception(exc)
 
 
 async def _child_initializer(channel: ChildChannel) -> None:

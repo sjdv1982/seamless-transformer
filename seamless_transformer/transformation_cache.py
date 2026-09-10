@@ -104,6 +104,10 @@ class _ActiveSubmission:
     canceled: bool = False
 
 
+class SpawnedTransformationError(RuntimeError):
+    """A spawned worker's already-formatted transformation traceback."""
+
+
 class TransformationCancelledError(RuntimeError):
     pass
 
@@ -725,7 +729,7 @@ class TransformationCache:
                     raise RemoteJobWritten(remote_job_dir)
                 if isinstance(result_checksum, str) and result_checksum == "Transformation was canceled":
                     raise TransformationCancelledError(result_checksum)
-                raise RuntimeError(result_checksum)
+                raise SpawnedTransformationError(result_checksum)
             result_checksum = Checksum(result_checksum)
         elif is_worker() and not force_local:
             assert not worker.has_spawned()

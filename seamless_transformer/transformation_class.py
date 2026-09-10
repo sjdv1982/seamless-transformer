@@ -41,9 +41,42 @@ except Exception:  # pragma: no cover - allow operation without seamless-dask
 
 
 def _format_exception(exc: BaseException) -> str:
+    from .transformation_cache import SpawnedTransformationError
+
+    if isinstance(exc, SpawnedTransformationError):
+        return str(exc)
+    if isinstance(exc, AssertionError):
+        tb = exc.__traceback__
+        while tb is not None and tb.tb_next is not None:
+            tb = tb.tb_next
+        filename = tb.tb_frame.f_code.co_filename if tb is not None else ""
+        # Assertions in generated transformer code are user-code failures.
+        # Preserve full diagnostics for assertions elsewhere (or without frames).
+        if not (filename.startswith("transformer-") and not filename.endswith(".py")):
+            return traceback.format_exc().strip("\n") + "\n"
     if isinstance(exc, ValueError) and "fromhex" in str(exc):
         return traceback.format_exc().strip("\n") + "\n"
-    return traceback.format_exc(limit=0).strip("\n") + "\n"
+    formatted = traceback.TracebackException.from_exception(exc)
+    pending = [formatted]
+    while pending:
+        current = pending.pop()
+        start = next(
+            (
+                index
+                for index, frame in enumerate(current.stack)
+                if frame.filename.startswith("transformer-")
+                and not frame.filename.endswith(".py")
+            ),
+            0,
+        )
+        current.stack = traceback.StackSummary.from_list(current.stack[start:])
+        # Keep exception chaining, with the same frame filtering throughout.
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        pending.extend(getattr(current, "exceptions", None) or ())
+    return "".join(formatted.format()).strip("\n") + "\n"
 
 
 def _readonly_recursive(value):
@@ -594,7 +627,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                     f"{tf_checksum_raw!r} ({type(tf_checksum_raw).__name__}): {exc}"
                 ) from exc
             self._transformation_checksum = self._publish_definition(tf_checksum)
-        except (AssertionError, TransformationError):
+        except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
             self._exception = _format_exception(exc)
@@ -624,7 +657,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                     f"{tf_checksum_raw!r} ({type(tf_checksum_raw).__name__}): {exc}"
                 ) from exc
             self._transformation_checksum = self._publish_definition(tf_checksum)
-        except (AssertionError, TransformationError):
+        except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
             self._exception = _format_exception(exc)
@@ -684,7 +717,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 ) from exc
             self._publish_result(result_checksum)
             self._exception = None
-        except (AssertionError, TransformationError):
+        except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
             if (
@@ -704,7 +737,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         try:
             await self._result_checksum.fingertip(self.celltype)
             self._exception = None
-        except (AssertionError, TransformationError):
+        except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
             self._exception = _format_exception(exc)
@@ -737,7 +770,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 ) from exc
             self._publish_result(result_checksum)
             self._exception = None
-        except (AssertionError, TransformationError):
+        except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
             if (
@@ -769,7 +802,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 if dep_exception is not None:
                     msg = "Dependency '{}' has an exception:\n{}"
                     raise RuntimeError(msg.format(depname, dep_exception))
-        except (AssertionError, TransformationError):
+        except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
             self._exception = _format_exception(exc)
@@ -810,7 +843,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 if dep_exception is not None:
                     msg = "Dependency '{}' has an exception:\n{}"
                     raise RuntimeError(msg.format(depname, dep_exception))
-        except (AssertionError, TransformationError):
+        except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
             self._exception = _format_exception(exc)
