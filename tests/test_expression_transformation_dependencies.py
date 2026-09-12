@@ -10,7 +10,7 @@ def add_one(value):
 def test_expression_dependency_is_tempref_only_and_transformation_adopts_result():
     source = Buffer({"value": 4}, "plain")
     source_checksum = source.get_checksum()
-    expression = Expression(source_checksum, "value", celltype="plain", target_celltype="int")
+    expression = Expression(source_checksum, "value", input_celltype="plain", target_celltype="int")
     transformation = delayed(add_one)(expression)
     assert transformation.compute() == Buffer(5, "int").get_checksum()
     expression_result = expression._result_checksum_internal()
