@@ -2,6 +2,51 @@
 
 `seamless-transformer` is the computation engine of the [Seamless](https://github.com/sjdv1982/seamless) framework. It takes a *transformation* — a pure-functional computation defined as a checksum-addressed dict of inputs, code, and language — and executes it, returning a result checksum. It supports Python and bash transformations, multi-process worker pools with shared-memory IPC, and integration with the Seamless caching and remote infrastructure.
 
+## Branch notes: `jupyter-sync` (sync API inside Jupyter)
+
+This branch lets the sync API (`func()` of a `@direct` transformer, `tf.run()`, `tf.compute()`) be used from a Jupyter cell, or from any thread whose own event loop is running. On `cells-and-expressions` (5162312) every sync entry point is refused there with "not supported within Jupyter". The branch was re-created from `cells-and-expressions`. It replaces the December 2025 attempt (91bec26, still on `origin/jupyter-sync`), which deadlocked `test_nested_transformations_multi.py`.
+
+### Why the December attempt hung
+
+The December attempt sent every in-process computation to one shared background event loop. Transformer bodies run on that loop's default thread pool (`loop.run_in_executor(None, run_transformation_dict, ...)`), which holds `min(32, cpu+4)` threads: 18 on a 14-core machine. A nested sync `.run()` blocks its pool thread while it waits for its children. The nested multi test needs about 40 such threads at once (10 outer, 10 middle and 20 leaf), so the pool starves and everything deadlocks.
+
+- **Stack dump:** it shows exactly 18 threads, all waiting in a nested `run()` inside `_compute_sync`.
+- **Larger pool:** the same patch passes with a 200-thread pool.
+- **Still reproduces:** the hang still happens with that patch ported onto 5162312.
+- **Spawn and Dask:** those variants never hit it, because they don't share the in-process pool.
+
+### The fix (`transformation_class.py`)
+
+- **Only the Jupyter thread changes.** `_sync_task_loop()` sends work from a thread whose own loop is running (a notebook cell, or sync code inside a coroutine) to a shared background *driver* loop. Every other thread keeps its current behaviour, where each thread gets its own loop from `get_event_loop()`. Transformer bodies run on threads without a loop, so nested calls never share a pool and can't starve it. Loops patched by nest_asyncio keep their old code path.
+- **Dask.** The sync Dask path (`_try_database_cache_sync`, `_run_local_fallback_sync`) runs a private event loop on the calling thread. That fails in Jupyter with "Cannot run the event loop while another loop is running". When the caller's loop is running, `_compute_sync` now runs that path on `_COMPUTE_EXECUTOR`.
+- **Waiting across loops.** A task started in a cell now lives on the driver loop, so it can't simply be awaited from the cell's loop. `_await_task_any_loop()` handles this in two places:
+  - the Dask branch of `await tf.computation()`, which used to raise;
+  - `await tf.cancel_async()`, which used to return before the cancellation had finished.
+
+### Verification
+
+- **Real Jupyter kernel** (driven by `tests/manual/jupyter-wrapper`): all of the following work, in-process and on a local Dask cluster:
+  - direct calls, `.run()`, `.compute()` and dependencies;
+  - `start()` followed by `.run()`;
+  - nested transformations;
+  - `await tf.task()` and `await tf.computation()`.
+- **Spawned workers** already worked in a running loop before this branch.
+- **`tests/test_sync_in_running_loop.py`** has 6 tests. They include the nested stress case that deadlocked the December attempt, and `cancel_async`. They pass on Python 3.13 and on 3.14.
+- **`test_nested_transformations_multi.py`**, and **`test_nested_transformations_multi_async.py`** copied from the December branch, both pass (about 20 s each).
+- **Full suite:** run one pytest process per file, every file has the same pass/fail result as 5162312. The failures that also occur on 5162312 are environmental or come from work in progress:
+  - `target_celltype` errors in the expression tests;
+  - `seamless_dask` missing from the base environment;
+  - the service launcher rejecting conda env `base`;
+  - `seamless-signature` import errors in the compiled tests.
+- **In-process cancellation tests:** all pass.
+
+### Caveats
+
+- **Don't wake the loop in `start()`.** A task created from another thread only runs once someone waits for it, and `construct()` relies on that to stay lazy: `_run_dependencies()` calls `self.start()`, which schedules the whole computation. When a wake-up was added, `construct()` started computing eagerly and `test_is_cached` failed with an extra database query. This behaviour exists on `cells-and-expressions` too.
+- **Blocking now happens inside any running loop.** Sync calls inside `asyncio.run()` scripts now block instead of raising. To keep that guard outside Jupyter, `_sync_task_loop()` could check `running_in_jupyter()`. The plain-asyncio behaviour is what allows testing without a kernel.
+- **Not tested:** the jobserver remote path, and nest_asyncio.
+- `tests/dask/dask_sync.jupyter.py` is a manual notebook check on Dask. Run it from `tests/dask` with `tests/manual/jupyter-wrapper`.
+
 ## Core concepts
 
 A **transformation** in Seamless is a deterministic computation: given the same inputs and code (identified by their checksums), it always produces the same output. `seamless-transformer` is responsible for:
