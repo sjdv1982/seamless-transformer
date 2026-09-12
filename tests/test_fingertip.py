@@ -78,7 +78,7 @@ def test_fingertip_recovers_expression_over_transformation_result():
     tf = produce()
     tf_result = tf.compute()
     assert asyncio.run(tf_result.fingertip("plain")) == {"a": "via-transform"}
-    expression = Expression(tf_result, "a", "plain", "str")
+    expression = Expression(tf_result, "a", celltype="plain", target_celltype="str")
     expression_result = expression.compute()
 
     tf_result.tempref(scratch=True)
