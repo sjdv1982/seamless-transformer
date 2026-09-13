@@ -31,7 +31,7 @@ def test_transformation_consumes_expression_over_transformation_result():
 
     make_record.local = True
     add_one.local = True
-    expr = Expression(make_record(41), "value", input_celltype="plain", celltype="int")
+    expr = Expression(make_record(41), "value", celltype="int")
 
     assert add_one(expr).run() == 42
 
@@ -47,7 +47,7 @@ def test_expression_result_feeds_another_transformation():
 
     make_record.local = True
     double.local = True
-    first = Expression(make_record(21), "nested", input_celltype="plain", celltype="plain")
+    first = Expression(make_record(21), "nested", celltype="plain")
     second = Expression(first, "value", input_celltype="plain", celltype="int")
 
     assert double(second).run() == 42
