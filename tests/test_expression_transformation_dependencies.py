@@ -16,7 +16,7 @@ def test_expression_dependency_is_tempref_only_and_transformation_adopts_result(
     expression_result = expression._result_checksum_internal()
     assert expression_result is not None
     assert get_buffer_cache().reference_snapshot()[expression_result][0] == 1
-    assert not expression._refheld_checksums()
+    assert expression._refheld_checksums() == ((source_checksum, "input"),)
     # Expression dependency evaluation is internal; the downstream
     # Transformation owns its concrete input role.
     assert any(role == "input:value" for _cs, role in transformation._refheld_checksums())

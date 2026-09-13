@@ -21,11 +21,14 @@ def test_checksum_pin_is_refheld_and_replaced():
     assert cache.reference_snapshot().get(second, (0, 0, False))[0] == 0
 
 
-def test_literal_pin_is_not_checksum_refheld():
+def test_literal_pin_is_serialized_and_checksum_refheld():
     transformer = delayed(identity)
     transformer.args.value = "ordinary literal"
-    assert not get_buffer_cache().refholder_counts
+    checksum = Buffer("ordinary literal", "mixed").get_checksum()
+    assert transformer._refheld_checksums() == [(checksum, "pin:value")]
+    assert get_buffer_cache().reference_snapshot()[checksum][0] == 1
     transformer._release_refholds()
+    assert get_buffer_cache().reference_snapshot().get(checksum, (0, 0, False))[0] == 0
 
 
 def test_args_deletion_releases_checksum_pin():

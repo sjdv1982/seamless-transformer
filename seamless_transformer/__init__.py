@@ -18,6 +18,7 @@ global_lock = threading.Lock()
 
 
 _LAZY_EXPORTS = {
+    "Pin": (".pin_class", "Pin"),
     "direct": (".transformer_class", "direct"),
     "delayed": (".transformer_class", "delayed"),
     "Transformation": (".transformation_class", "Transformation"),
@@ -51,6 +52,7 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
+    "Pin",
     "direct",
     "delayed",
     "Transformation",

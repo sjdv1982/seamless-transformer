@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -27,6 +27,7 @@ class TransformerBuilderSnapshot:
     compilation: Any = None
     objects: Any = None
     header: str | None = None
+    input_celltypes: dict[str, str] = field(default_factory=dict)
     # Optional owning guards supplied by a bound backend during snapshot ingress.
     leases: tuple[Any, ...] = ()
 

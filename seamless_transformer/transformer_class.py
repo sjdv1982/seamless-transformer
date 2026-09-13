@@ -50,9 +50,9 @@ def _clone_transformer_builder(source, target_cls, language=None):
         target._celltypes = deepcopy(snapshot.celltypes)
         target._optional_pins = set(snapshot.optional_pins)
         target._args = {}
-        for key, value in snapshot.args.items():
+        for key, (value, input_celltype) in source._args.items():
             target._replace_checksum_field(None, value)
-            target._args[key] = target._copy_arguments({key: value})[key]
+            target._args[key] = (value, input_celltype)
         target._modules = {}
         for key, value in snapshot.modules.items():
             target._replace_checksum_field(None, value)
@@ -167,12 +167,14 @@ class TransformerCore(Generic[P, R]):
     def _snapshot_for_call(self) -> TransformerBuilderSnapshot:
         if self._workflow_backend is not None:
             return self._workflow_backend.snapshot_for_call()
+        pin_args, input_celltypes = self._snapshot_pin_inputs()
         return TransformerBuilderSnapshot(
             codebuf=self._get_codebuf(),
             language=self.language,
             celltypes=deepcopy(self._celltypes),
             optional_pins=frozenset(self._optional_pins),
-            args=self._copy_arguments(self._args),
+            args=pin_args,
+            input_celltypes=input_celltypes,
             modules=_snapshot_modules(self._modules),
             globals=deepcopy(self._globals),
             meta=deepcopy(self._meta),
@@ -184,6 +186,17 @@ class TransformerCore(Generic[P, R]):
             callable=self._workflow_callable,
             signature=self._get_signature(),
         )
+
+    def _snapshot_pin_inputs(self):
+        from seamless import Cell
+        from seamless.cell_class import _typed_input_celltype
+        arguments, input_celltypes = {}, {}
+        for name, (value, declared) in self._args.items():
+            if isinstance(value, Cell):
+                value = value.build()
+            arguments[name] = value
+            input_celltypes[name] = _typed_input_celltype(value) or declared
+        return arguments, input_celltypes
 
     @property
     def language(self):
@@ -207,7 +220,7 @@ class TransformerCore(Generic[P, R]):
         if self._workflow_backend is not None:
             return self._workflow_backend.celltypes
         return CelltypesWrapper(
-            self._celltypes, self._args, fixed=self._get_signature() is not None
+            self, self._celltypes, self._args, fixed=self._get_signature() is not None
         )
 
     @property
@@ -273,7 +286,7 @@ class TransformerCore(Generic[P, R]):
         return self._environment
 
     def _bind_arguments(self, *args, **kwargs):
-        all_args = self._args.copy()
+        all_args = {name: self.pins[name].build() for name in self._args}
         signature = self._get_signature()
         if signature is not None:
             all_args.update(signature.bind_partial(*args, **kwargs).arguments)
@@ -291,6 +304,10 @@ class TransformerCore(Generic[P, R]):
     @staticmethod
     def _bind_snapshot_arguments(snapshot, args, kwargs):
         all_args = TransformerCore._copy_arguments(snapshot.args)
+        from seamless import Expression
+        for name, input_celltype in snapshot.input_celltypes.items():
+            all_args[name] = Expression(all_args[name], input_celltype=input_celltype,
+                                        celltype=snapshot.celltypes[name])
         signature = snapshot.signature
         if signature is not None:
             all_args.update(signature.bind_partial(*args, **kwargs).arguments)
@@ -308,23 +325,31 @@ class TransformerCore(Generic[P, R]):
     @staticmethod
     def _copy_arguments(arguments):
         # Dependencies are references to computations, not mutable literal data.
-        from seamless import Expression
+        from seamless import Cell, Expression
 
         memo = {id(value): value for value in arguments.values()
-                if isinstance(value, (Transformation, Expression))}
+                if isinstance(value, (Transformation, Expression, Cell))}
         return deepcopy(arguments, memo)
+
+    @staticmethod
+    def _convert_pin_arguments(arguments, celltypes):
+        from seamless import Expression, CellBase
+        from seamless.cell_class import _check_input_ref
+
+        for argname, arg in tuple(arguments.items()):
+            if isinstance(arg, CellBase):
+                _check_input_ref(arg)
+            celltype = celltypes.get(argname, "mixed")
+            if isinstance(arg, (Transformation, Expression)) and arg.celltype != celltype:
+                arguments[argname] = Expression(
+                    arg, input_celltype=arg.celltype, celltype=celltype
+                )
 
     def _build_from_snapshot(self, snapshot, *args, **kwargs) -> Transformation[R]:
         ensure_open("transformer call")
         arguments = self._bind_snapshot_arguments(snapshot, args, kwargs)
         from seamless import Expression
-
-        for argname, arg in tuple(arguments.items()):
-            celltype = snapshot.celltypes.get(argname, "mixed")
-            if isinstance(arg, (Transformation, Expression)) and arg.celltype != celltype:
-                arguments[argname] = Expression(
-                    arg, input_celltype=arg.celltype, celltype=celltype
-                )
+        self._convert_pin_arguments(arguments, snapshot.celltypes)
 
         deps = {
             argname: arg
@@ -686,7 +711,7 @@ class TransformerCore(Generic[P, R]):
         if getattr(self, "_refholds_released", False):
             return ()
         claims = []
-        for name, value in getattr(self, "_args", {}).items():
+        for name, (value, _input_celltype) in getattr(self, "_args", {}).items():
             if isinstance(value, Checksum):
                 claims.append((value, f"pin:{name}"))
         code_checksum = getattr(self, "_code_checksum_ref", None)
@@ -702,7 +727,7 @@ class TransformerCore(Generic[P, R]):
             return
         object.__setattr__(self, "_refholds_released", True)
         from seamless import Checksum
-        for value in list(getattr(self, "_args", {}).values()):
+        for value, _input_celltype in list(getattr(self, "_args", {}).values()):
             if isinstance(value, Checksum):
                 value.decref_refholder()
         for value in list(getattr(self, "_modules", {}).values()):
@@ -853,7 +878,8 @@ class DirectTransformer(Transformer[P, R]):
 class CelltypesWrapper:
     """Wrapper around an imperative transformer's celltypes."""
 
-    def __init__(self, celltypes, args, fixed):
+    def __init__(self, owner, celltypes, args, fixed):
+        self._owner = owner
         self._celltypes = celltypes
         self._args = args
         self._fixed = fixed
@@ -875,9 +901,6 @@ class CelltypesWrapper:
         if key not in self._celltypes:
             if self._fixed:
                 raise AttributeError(key)
-            self._celltypes[key] = value
-            if "result" not in self._celltypes:
-                self._celltypes["result"] = "mixed"
 
         if isinstance(value, type):
             value = value.__name__
@@ -890,10 +913,8 @@ class CelltypesWrapper:
             all_celltypes = celltypes + ["deepcell", "deepfolder", "folder", "module"]
         if value not in all_celltypes:
             raise TypeError(value, all_celltypes)
-        old_arg = self._args.get(key)
-        if old_arg is not None:
-            pass
         self._celltypes[key] = value
+        self._celltypes.setdefault("result", "mixed")
 
     def __delattr__(self, attr: str) -> None:
         if attr.startswith("_"):
@@ -904,8 +925,10 @@ class CelltypesWrapper:
         if self._fixed or key not in self._celltypes:
             raise AttributeError(key)
         del self._celltypes[key]
-        if key in self._args:
-            del self._args[key]
+        entry = self._args.pop(key, None)
+        if entry is not None:
+            self._owner._replace_checksum_field(entry[0], None)
+        self._owner._optional_pins.discard(key)
 
     def __dir__(self):
         return sorted(set(super().__dir__()) | set(self._celltypes))
@@ -918,58 +941,57 @@ class CelltypesWrapper:
 
 
 class ArgsWrapper:
-    """Wrapper around an imperative transformer's arguments."""
+    """Fresh whole-pin handles over Transformer-owned input references."""
 
     def __init__(self, owner, args, celltypes, fixed):
-        self._owner = owner
-        self._args = args
-        self._celltypes = celltypes
-        self._fixed = fixed
+        self._owner, self._args = owner, args
+        self._celltypes, self._fixed = celltypes, fixed
 
     def __getattr__(self, attr):
-        return self._args.get(attr)
+        return self[attr]
 
     def __getitem__(self, key):
-        return self._args.get(key)
+        if key == "result" or key not in self._celltypes:
+            raise AttributeError(key)
+        from .pin_class import Pin
+        return Pin(self._owner, key)
 
     def __setattr__(self, attr, value):
         if attr.startswith("_"):
             return super().__setattr__(attr, value)
-        return self.__setitem__(attr, value)
+        self[attr] = value
 
     def __setitem__(self, key, value):
-        if key == "result":
+        if key == "result" or (key not in self._celltypes and self._fixed):
             raise AttributeError(key)
-        if key not in self._celltypes:
-            if self._fixed:
-                raise AttributeError(key)
+        created = key not in self._celltypes
+        if created:
             self._celltypes[key] = "mixed"
-            if "result" not in self._celltypes:
-                self._celltypes["result"] = "mixed"
-        old = self._args.get(key)
-        self._owner._replace_checksum_field(old, value)
-        self._args[key] = value
+            self._celltypes.setdefault("result", "mixed")
+        try:
+            self[key]._workflow_backend.write_value(value, detach=True)
+        except Exception:
+            if created:
+                self._celltypes.pop(key, None)
+            raise
 
-    def __delattr__(self, attr: str) -> None:
+    def __delattr__(self, attr):
         if attr.startswith("_"):
             return super().__delattr__(attr)
-        return self.__delitem__(attr)
+        del self[attr]
 
-    def __delitem__(self, key) -> None:
-        if self._fixed or key not in self._celltypes:
+    def __delitem__(self, key):
+        if self._fixed or key == "result" or key not in self._celltypes:
             raise AttributeError(key)
+        self[key].checksum = None
         del self._celltypes[key]
-        old = self._args.pop(key, None)
-        self._owner._replace_checksum_field(old, None)
+        self._owner._optional_pins.discard(key)
 
     def __dir__(self):
         return sorted(set(super().__dir__()) | (set(self._celltypes) - {"result"}))
 
-    def __str__(self):
-        return str(self._args)
-
     def __repr__(self):
-        return str(self)
+        return repr({name: self[name] for name in self._celltypes if name != "result"})
 
 
 class ModulesWrapper:
