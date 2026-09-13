@@ -52,7 +52,7 @@ def _clone_transformer_builder(source, target_cls, language=None):
         target._args = {}
         for key, value in snapshot.args.items():
             target._replace_checksum_field(None, value)
-            target._args[key] = deepcopy(value)
+            target._args[key] = target._copy_arguments({key: value})[key]
         target._modules = {}
         for key, value in snapshot.modules.items():
             target._replace_checksum_field(None, value)
@@ -172,7 +172,7 @@ class TransformerCore(Generic[P, R]):
             language=self.language,
             celltypes=deepcopy(self._celltypes),
             optional_pins=frozenset(self._optional_pins),
-            args=deepcopy(self._args),
+            args=self._copy_arguments(self._args),
             modules=_snapshot_modules(self._modules),
             globals=deepcopy(self._globals),
             meta=deepcopy(self._meta),
@@ -290,7 +290,7 @@ class TransformerCore(Generic[P, R]):
 
     @staticmethod
     def _bind_snapshot_arguments(snapshot, args, kwargs):
-        all_args = deepcopy(snapshot.args)
+        all_args = TransformerCore._copy_arguments(snapshot.args)
         signature = snapshot.signature
         if signature is not None:
             all_args.update(signature.bind_partial(*args, **kwargs).arguments)
@@ -305,10 +305,26 @@ class TransformerCore(Generic[P, R]):
                 raise TypeError(f"Missing argument: '{argname}'")
         return all_args
 
+    @staticmethod
+    def _copy_arguments(arguments):
+        # Dependencies are references to computations, not mutable literal data.
+        from seamless import Expression
+
+        memo = {id(value): value for value in arguments.values()
+                if isinstance(value, (Transformation, Expression))}
+        return deepcopy(arguments, memo)
+
     def _build_from_snapshot(self, snapshot, *args, **kwargs) -> Transformation[R]:
         ensure_open("transformer call")
         arguments = self._bind_snapshot_arguments(snapshot, args, kwargs)
         from seamless import Expression
+
+        for argname, arg in tuple(arguments.items()):
+            celltype = snapshot.celltypes.get(argname, "mixed")
+            if isinstance(arg, (Transformation, Expression)) and arg.celltype != celltype:
+                arguments[argname] = Expression(
+                    arg, input_celltype=arg.celltype, celltype=celltype
+                )
 
         deps = {
             argname: arg

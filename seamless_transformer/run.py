@@ -227,8 +227,8 @@ def run_transformation_dict(
             output_celltype,
             meta,
         )
-        if result is None:
-            raise RuntimeError("Result is empty")
+        if result is None and output_celltype not in ("plain", "mixed", "bytes"):
+            raise RuntimeError(f"Null result is not allowed for celltype {output_celltype!r}")
         if is_deep_celltype(output_celltype):
             if not PACK_DEEP_RESULTS:
                 raise NotImplementedError(
@@ -255,8 +255,8 @@ def run_transformation_dict(
         driver_active,
     )
 
-    if result is None:
-        raise RuntimeError("Result is empty")
+    if result is None and output_celltype not in ("plain", "mixed", "bytes"):
+        raise RuntimeError(f"Null result is not allowed for celltype {output_celltype!r}")
 
     if is_deep_celltype(output_celltype):
         if not PACK_DEEP_RESULTS:

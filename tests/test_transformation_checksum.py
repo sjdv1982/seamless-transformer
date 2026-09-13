@@ -82,21 +82,12 @@ def test_required_json_null_remains_present_in_identity():
     assert required_null_checksum != absent_optional
 
 
-def test_optional_json_null_rejects_non_null_encodable_celltype():
-    invalid = _base_dict()
-    invalid["x"] = ("binary", None, None)
-    pre = PreTransformation(invalid, optional_pins={"x"})
-    with pytest.raises(
-        TypeError,
-        match="Optional pin 'x' with celltype 'binary' cannot use JSON null as absence",
-    ):
-        transformation_from_pretransformation(
-            pre,
-            upstream_dependencies={},
-            meta={},
-            scratch=False,
-            tf_dunder={},
-        )
+def test_optional_binary_null_has_absent_identity():
+    absent = _checksum_for(_base_dict(), optional_pins={"x"})
+    connected = _base_dict()
+    connected["x"] = ("binary", None, None)
+    assert _checksum_for(connected, optional_pins={"x"}) == absent
+
 
 
 def test_sufficiently_connected_ignores_unwired_optional_pins():

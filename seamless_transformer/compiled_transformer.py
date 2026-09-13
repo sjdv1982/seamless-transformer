@@ -545,7 +545,7 @@ class CompiledMixin:
         return TransformerBuilderSnapshot(
             codebuf=Buffer(self._code_text, "text") if self._code_text is not None else None,
             language=self.language, celltypes=deepcopy(self._celltypes),
-            optional_pins=frozenset(self._optional_pins), args=deepcopy(self._args),
+            optional_pins=frozenset(self._optional_pins), args=self._copy_arguments(self._args),
             modules={}, globals={}, meta=meta, environment=self._environment._to_lowlevel(),
             scratch=self.scratch, direct_print=self.direct_print, local=self.local,
             call_mode="delayed", signature=self._call_signature,

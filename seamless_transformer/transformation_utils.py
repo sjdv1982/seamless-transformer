@@ -79,12 +79,11 @@ def normalize_optional_pins_for_construction(
 
     Optional pin metadata is intentionally external to the checksum-defining
     transformation payload. Connected optional pins still resolve normally; only
-    a successful plain/mixed JSON-null result is canonicalized to pin absence.
+    a successful JSON-null result is canonicalized to pin absence, for any type.
+    Required pins then enforce their declared function boundary.
     """
 
     optional_pin_names = frozenset(optional_pins or ())
-    if not optional_pin_names:
-        return transformation_dict
     null_checksum = json_null_checksum()
     null_checksum_hex = null_checksum.hex()
     for pinname in optional_pin_names:
@@ -100,13 +99,23 @@ def normalize_optional_pins_for_construction(
             checksum_hex = checksum
         if checksum_hex != null_checksum_hex:
             continue
-        if celltype not in ("plain", "mixed"):
-            raise TypeError(
-                f"Optional pin '{pinname}' with celltype '{celltype}' "
-                "cannot use JSON null as absence"
-            )
         transformation_dict.pop(pinname, None)
+    for pinname, value in transformation_dict.items():
+        if pinname.startswith("__"):
+            continue
+        celltype, _subcelltype, checksum = value
+        validate_pin_null(checksum, celltype, pinname, optional=False)
     return transformation_dict
+
+
+def validate_pin_null(checksum, celltype, pinname, *, optional):
+    """Enforce the function boundary without decoding the null buffer."""
+    from seamless.checksum.null import is_null
+
+    if is_null(checksum) and not optional and celltype not in ("plain", "mixed", "bytes"):
+        raise TypeError(
+            f"Required pin '{pinname}' with celltype '{celltype}' cannot accept null"
+        )
 
 
 def sufficiently_connected(required_pins, optional_pins, wired_pins) -> bool:

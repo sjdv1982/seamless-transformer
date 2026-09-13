@@ -36,4 +36,5 @@ def test_transformation_future_input_rejects_incompatible_hash_type_after_resolu
     with pytest.raises(TransformationError) as exc_info:
         text_length(produce_bytes()).run()
 
-    assert "Cannot deserialize" in str(exc_info.value)
+    assert "Cannot convert expression source to target celltype" in str(exc_info.value)
+    assert "Dependency 'value' has an exception" in str(exc_info.value)

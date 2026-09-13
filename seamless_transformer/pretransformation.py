@@ -186,14 +186,6 @@ class PreTransformation:
             if self._pretransformation_dict.get("__language__") == "python":
                 return self._prepare_code(value)
                 return self._to_checksum(value, celltype, "input:code")
-        if value is None and argname in self._optional_pins and celltype not in (
-            "plain",
-            "mixed",
-        ):
-            raise TypeError(
-                f"Optional pin '{argname}' with celltype '{celltype}' "
-                "cannot use JSON null as absence"
-            )
         checksum = self._to_checksum(value, celltype, f"input:{argname}")
         return checksum
 
@@ -261,7 +253,11 @@ class PreTransformation:
                 except Exception:
                     pass
         from seamless.checksum.hash_type_validation import validate_deserializable_as
+        from .transformation_utils import validate_pin_null
 
+        pinname = role.removeprefix("input:")
+        validate_pin_null(checksum, celltype or "mixed", pinname,
+                          optional=pinname in self._optional_pins)
         validate_deserializable_as(checksum, celltype or "mixed", buffer=buffer)
         if not is_worker():
             try:
