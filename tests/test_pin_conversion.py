@@ -121,3 +121,16 @@ def test_empty_bytes_result_and_required_pin_are_null():
     assert upstream.result_checksum == Buffer(None, 'plain').get_checksum()
     assert size(upstream).run() == 0
     assert size(None).run() == 0
+
+
+def test_bare_empty_bytes_checksum_is_optional_absence():
+    @delayed
+    def consume(value=None):
+        return value is None
+
+    consume.local = True
+    consume.celltypes.value = 'bytes'
+    consume.optional_pins.add('value')
+    empty = consume(Buffer(b'').get_checksum())
+    assert empty.construct() == consume().construct()
+    assert empty.run() is True

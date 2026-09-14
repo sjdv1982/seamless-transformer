@@ -255,6 +255,10 @@ class PreTransformation:
         from seamless.checksum.hash_type_validation import validate_deserializable_as
         from .transformation_utils import validate_pin_null
 
+        from seamless.checksum.null import canonicalize_checksum
+        normalized = canonicalize_checksum(checksum, celltype)
+        if normalized != checksum:
+            checksum, buffer = normalized, None
         pinname = role.removeprefix("input:")
         validate_pin_null(checksum, celltype or "mixed", pinname,
                           optional=pinname in self._optional_pins)

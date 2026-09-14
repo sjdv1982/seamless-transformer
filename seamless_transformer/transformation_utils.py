@@ -83,6 +83,14 @@ def normalize_optional_pins_for_construction(
     Required pins then enforce their declared function boundary.
     """
 
+    from seamless.checksum.null import canonicalize_checksum
+    for pinname, value in tuple(transformation_dict.items()):
+        if pinname.startswith("__"):
+            continue
+        celltype, subcelltype, checksum = value
+        normalized = canonicalize_checksum(checksum, celltype)
+        if normalized != checksum:
+            transformation_dict[pinname] = (celltype, subcelltype, normalized.hex())
     optional_pin_names = frozenset(optional_pins or ())
     null_checksum = json_null_checksum()
     null_checksum_hex = null_checksum.hex()

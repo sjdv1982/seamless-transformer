@@ -517,11 +517,15 @@ class CompiledMixin:
 
     @property
     def celltypes(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.celltypes
         return CompiledCelltypesWrapper(self)
 
     @property
     def args(self):
         """Pre-bound input arguments, same as for Python transformers."""
+        if self._workflow_backend is not None:
+            return self._workflow_backend.args
         return ArgsWrapper(self, self._args, self._celltypes, fixed=self._call_signature is not None)
 
     @property
