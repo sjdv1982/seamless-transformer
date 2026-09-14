@@ -11,6 +11,57 @@ A **transformation** in Seamless is a deterministic computation: given the same 
 3. **Executing** the code — either Python (via `exec`) or bash (via subprocess with file-mapped pins).
 4. **Returning** the result as a checksum, which can be cached and reused.
 
+## Transformer pins
+
+`tf.pins.x` (also `tf.args.x`) returns a fresh `Pin` handle in standalone and
+workflow-bound modes. An unset declared pin is an unwired Pin; undeclared names
+raise `AttributeError`. Pins share `CellBase` with Cells but are not Cells, have
+no projection/validator/mount API, and cannot be sources. Connect `pin.source`
+when you want its upstream source.
+
+```python
+from seamless_transformer import delayed
+
+@delayed
+def echo(value):
+    return value
+
+echo.celltypes.value = "str"
+echo.pins.value = "42"       # serializes now, with a retained input checksum
+echo.pins.value.celltype = int
+assert echo.pins.value.input_celltype == "str"
+assert echo.pins.value.value == 42
+assert echo().run() == 42
+```
+
+A pin's `celltype` and `tf.celltypes.x` are the same Transformer-owned setting.
+Its read-only `input_celltype` follows a typed input, or records its original
+serialization/declared checksum type. Retyping converts from that stored input.
+Prebound and call-time Transformation/Expression inputs convert to the pin type;
+the transformation identity contains the converted checksum. Pins store input
+references and checksum claims, never Python literal values. Compiled builders
+expose the same Pin API; the native schema still constrains accepted values.
+
+`pin.source` reports a connection; `pin.checksum`, `.buffer`, and `.value` read
+the produced value. Assigning any of those three declares the input and detaches
+a source. `.set()`, `.set_buffer()`, and `.set_checksum()` check ownership.
+`pin.set_checksum(cs, input_celltype="int")` declares a checksum's input type.
+Invalid literals fail at assignment. A bound pin conversion failure sets
+`pin.state == "failed"` and `pin.exception`; its Transformer blocks on that pin
+with `blocked-by-error`, before constructing a transformation.
+
+Null has one canonical checksum. Required plain/mixed/bytes pins accept it;
+other required types reject it. Optional pins of **any type** treat null as
+absence, comparing checksums and dropping the pin before conversion/decoding.
+A connected optional input with no checksum still blocks. Functions may return
+None for plain/mixed/bytes results; bytes null reads as `b""`. Other result types
+reject None. Empty bytes also canonicalize to null, so optional bytes pins cannot
+carry an empty byte string as a distinct present value.
+
+`.value = None` stores null. `.checksum = None` and `.buffer = None` clear the
+input and retain the declaration. `del tf.pins.x` removes the declaration only
+for signatureless code; a fixed Python/compiled signature refuses deletion.
+
 ## Worker pool
 
 For production use, `seamless-transformer` can spawn a pool of worker processes (`seamless_transformer.worker.spawn()`). Workers run in separate processes using the `spawn` multiprocessing context, and communicate with the parent via a custom IPC channel built on `multiprocessing.Connection` and shared memory.
