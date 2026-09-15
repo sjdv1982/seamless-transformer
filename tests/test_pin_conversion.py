@@ -92,16 +92,16 @@ def test_optional_binary_dependency_null_is_absent(monkeypatch):
     assert connected.construct() == absent.construct()
 
 
-def test_converted_pin_has_canonical_int_identity():
+def test_converted_pin_retains_string_checksum():
     identity.local = True
     identity.celltypes.value = identity.celltypes.result = 'str'
     upstream = identity('42')
     identity.celltypes.value = identity.celltypes.result = 'int'
     converted = identity(upstream)
     literal = identity(42)
-    assert converted.construct() == literal.construct()
+    assert converted.construct() != literal.construct()
     payload = converted.construct().resolve('plain')
-    assert payload['value'][2] == Buffer(42, 'int').get_checksum().hex()
+    assert payload['value'][2] == Buffer('42', 'str').get_checksum().hex()
     assert converted.run() == 42
 
 

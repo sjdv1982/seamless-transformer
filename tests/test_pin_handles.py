@@ -1,6 +1,10 @@
+import gc
+
 import pytest
-from seamless import AuthorityError, Buffer, Cell, CellBase, Expression
+from seamless import AuthorityError, Buffer, CacheMissError, Cell, CellBase, Expression
+from seamless.checksum.hash_type_validation import HashTypeValidationError
 from seamless_transformer import Pin, delayed
+from seamless_transformer.transformation_class import TransformationError
 
 
 def identity(value):
@@ -80,6 +84,10 @@ def test_source_ownership_and_pin_rejection():
             make()
     pin.value = 4
     assert pin.source is None and pin.value == 4
+    tf.pins.value = upstream.build()
+    assert isinstance(tf.pins.value.source, Expression)
+    tf.pins.value = 5
+    assert tf.pins.value.source is None and tf.pins.value.value == 5
     for name in ('item', 'slice', 'validator', 'mount', 'with_input', '_workflow_endpoint'):
         assert not hasattr(pin, name)
 
@@ -143,6 +151,44 @@ def test_failed_retype_reports_pin_exception_and_recovers():
     pin.celltype = 'text'
     assert pin.state == 'complete' and pin.exception is None
     assert pin.value == 'hello'
+
+
+def test_retype_converts_at_call():
+    tf = builder('int')
+    tf.pins.value = 42
+    tf.celltypes.value = tf.celltypes.result = 'str'
+    transformation = tf()
+    # int 42 is also a valid str, so the conversion keeps the checksum.
+    payload = transformation.construct().resolve('plain')
+    assert payload['value'] == ['str', None, Buffer(42, 'int').get_checksum().hex()]
+    assert transformation.run() == '42'
+    tf.pins.value = 'abc'
+    tf.celltypes.value = 'int'
+    assert isinstance(tf.pins.value.exception, HashTypeValidationError)
+    failed = tf()
+    assert failed.construct() is None
+    with pytest.raises(TransformationError, match="Dependency 'value' has an exception"):
+        failed.run()
+
+
+@pytest.mark.parametrize('write', ['buffer', 'set_buffer'])
+def test_buffer_writes_deposit_the_buffer(write):
+    # Without a tempref, a dropped buffer that nothing deposited can't be resolved.
+    control = Buffer(f'undeposited pin {write}', 'text')
+    checksum = control.get_checksum()
+    del control
+    gc.collect()
+    with pytest.raises(CacheMissError):
+        checksum.resolve('text')
+    tf = builder('text')
+    buffer = Buffer(f'deposited pin {write}', 'text')
+    if write == 'buffer':
+        tf.pins.value.buffer = buffer
+    else:
+        tf.pins.value.set_buffer(buffer)
+    del buffer
+    gc.collect()
+    assert tf.pins.value.value == f'deposited pin {write}'
 
 
 def test_retyped_clone_preserves_original_input():
