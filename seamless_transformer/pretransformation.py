@@ -141,6 +141,9 @@ class PreTransformation:
                 tf_dict[argname] = raw_value
                 continue
             celltype, subcelltype, value = raw_value
+            if self._prepared and isinstance(value, str):
+                # prepare_transformation() stored the prepared checksums as hex strings.
+                value = Checksum(value)
             prepared_value = self._prepare_pin_value_for_dask(argname, value, celltype)
             if isinstance(prepared_value, (Transformation, Expression)):
                 dependency = upstream_dependencies.get(argname, prepared_value)
@@ -237,8 +240,6 @@ class PreTransformation:
         buffer = None
         if isinstance(value, Checksum):
             checksum = value
-        elif isinstance(value, str) and len(value) == 64:
-            checksum = Checksum(value)
         else:
             buffer_celltype = "plain" if value is None else celltype or "mixed"
             buffer = (
@@ -310,6 +311,9 @@ class PreparedPreTransformation(PreTransformation):
             except Exception as exc:
                 msg = f"Dependency '{argname}' has an exception:\n{exc}"
                 raise RuntimeError(msg) from exc
+        # A prepared transformation dict holds checksums as hex strings.
+        if isinstance(value, str):
+            value = Checksum(value)
         return self._to_checksum(value, celltype, f"input:{argname}")
 
 
@@ -369,8 +373,6 @@ def direct_transformer_to_pretransformation(
                 "celltype": celltype,
                 "filesystem": {"mode": "directory"},
             }
-        elif celltype == "checksum":
-            pin = {"celltype": "plain", "subcelltype": "checksum"}
         else:
             pin = {"celltype": celltype}
         tf_pins[pinname] = pin

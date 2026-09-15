@@ -1,8 +1,10 @@
 import gc
+import re
 
 import pytest
 from seamless import AuthorityError, Buffer, CacheMissError, Cell, CellBase, Expression
 from seamless.checksum.hash_type_validation import HashTypeValidationError
+from seamless.retired_names import RETIRED_NAMES
 from seamless_transformer import Pin, delayed
 from seamless_transformer.transformation_class import TransformationError
 
@@ -90,6 +92,33 @@ def test_source_ownership_and_pin_rejection():
     assert tf.pins.value.source is None and tf.pins.value.value == 5
     for name in ('item', 'slice', 'validator', 'mount', 'with_input', '_workflow_endpoint'):
         assert not hasattr(pin, name)
+
+
+@pytest.mark.parametrize('name,replacement', sorted(RETIRED_NAMES.items()))
+def test_retired_names_are_guarded(name, replacement):
+    pin = builder().pins.value
+    message = re.escape(f"'{name}' has been retired; use {replacement} instead")
+    for operation in (lambda: getattr(pin, name), lambda: setattr(pin, name, 1),
+                      lambda: delattr(pin, name)):
+        with pytest.raises(AttributeError, match=message):
+            operation()
+
+
+def test_set_takes_values_only():
+    pin = builder().pins.value
+    upstream = Cell('int')
+    upstream.set(3)
+    for reference, message in [
+        (Buffer(3, 'int').get_checksum(), r'use \.set_checksum\(\)'),
+        (upstream, r'Cell\(source=\.\.\.\)'),
+        (upstream.build(), r'Cell\(source=\.\.\.\)'),
+        (builder().pins.value, r"Pin can't be a source.*pin\.source"),
+    ]:
+        with pytest.raises(TypeError, match=message):
+            pin.set(reference)
+        with pytest.raises(TypeError, match=message):
+            pin.value = reference
+    assert pin.state == 'unwired'
 
 
 def test_invalid_assignment_and_clear():

@@ -310,11 +310,18 @@ class TransformerCore(Generic[P, R]):
                                         celltype=snapshot.celltypes[name])
         signature = snapshot.signature
         if signature is not None:
-            all_args.update(signature.bind_partial(*args, **kwargs).arguments)
-            return signature.bind(**all_args).arguments
-        if args:
+            call_args = signature.bind_partial(*args, **kwargs).arguments
+        elif args:
             raise TypeError("No function signature: positional arguments not supported")
-        all_args.update(kwargs)
+        else:
+            call_args = dict(kwargs)
+        # A call-time Checksum is a value exactly when the pin's celltype is checksum.
+        for name, value in call_args.items():
+            if isinstance(value, Checksum) and snapshot.celltypes.get(name) == "checksum":
+                call_args[name] = Buffer(value, "checksum")
+        all_args.update(call_args)
+        if signature is not None:
+            return signature.bind(**all_args).arguments
         for argname in snapshot.celltypes:
             if argname == "result":
                 continue

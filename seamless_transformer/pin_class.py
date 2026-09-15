@@ -131,7 +131,9 @@ class StandalonePinBackend:
 
     def write_value(self, value, *, detach=False):
         self._check_write_authority(detach)
-        if value is not None and _is_input_ref(value):
+        # A Checksum is a value exactly when the pin's celltype is checksum.
+        checksum_value = isinstance(value, Checksum) and self.celltype == 'checksum'
+        if value is not None and not checksum_value and _is_input_ref(value):
             ref = value
             declared = _typed_input_celltype(ref) or self.celltype
         else:

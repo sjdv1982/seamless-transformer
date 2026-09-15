@@ -18,6 +18,11 @@ def write_future(
 ):
     filename = os.path.join(workdir, filename)
     try:
+        transformation_checksum = (
+            transformation_checksum.hex()
+            if isinstance(transformation_checksum, Checksum)
+            else str(transformation_checksum)
+        )
         with open(filename + ".FUTURE", "w") as f:
             f.write(f"{transformation_checksum}.{result_target}\n")
     except Exception:

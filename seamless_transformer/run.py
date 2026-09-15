@@ -185,10 +185,7 @@ def run_transformation_dict(
     code_checksum = transformation.get("__code_checksum__")
     if code_checksum is None:
         code_checksum = tf_checksum
-    try:
-        checksum_hex = code_checksum.hex()
-    except AttributeError:
-        checksum_hex = str(code_checksum) if code_checksum is not None else None
+    checksum_hex = Checksum(code_checksum).hex() if code_checksum is not None else None
     if checksum_hex:
         identifier = f"{identifier}-{checksum_hex}"
 

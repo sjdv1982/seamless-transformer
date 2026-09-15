@@ -1210,7 +1210,7 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         queue_command = {
             "queue_command": "SUBMIT",
             "original_command": original_command,
-            "transformation_checksum": str(transformation_checksum),
+            "transformation_checksum": transformation_checksum,
             "transformation_dict": transformation_dict,
             "result_targets": result_targets,
             "params": params,
