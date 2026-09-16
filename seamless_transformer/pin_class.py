@@ -2,7 +2,7 @@
 from seamless import CellBase, Checksum, Expression
 from seamless.cell_class import (
     _UNSET, _check_input_ref, _is_input_ref, _typed_input_celltype,
-    _serialize_value, _checksum_for_buffer,
+    _serialize_value, _checksum_for_buffer, _available_input_checksum,
 )
 from .transformation_utils import validate_pin_null
 
@@ -27,6 +27,8 @@ class StandalonePinBackend:
     def __init__(self, owner, name):
         self.owner, self.name = owner, name
         self._exception = None
+        self._result_checksum = None
+        self._result_identity = None
 
     def _entry(self):
         if self.name == 'result' or self.name not in self.owner._celltypes:
@@ -56,6 +58,9 @@ class StandalonePinBackend:
     def celltype(self, value):
         self._entry()
         self.owner.celltypes[self.name] = value
+        self._exception = None
+        self._result_checksum = None
+        self._result_identity = None
 
     def build(self, input_ref=_UNSET):
         ref = self._input_ref if input_ref is _UNSET else _check_input_ref(input_ref)
@@ -83,20 +88,51 @@ class StandalonePinBackend:
     def checksum(self):
         if self._input_ref is None:
             self._exception = None
+            self._result_checksum = None
+            self._result_identity = None
+            return None
+        ref = self._input_ref
+        identity = (
+            ("checksum", ref.hex()) if isinstance(ref, Checksum) else ("object", id(ref)),
+            self.input_celltype,
+            self.celltype,
+        )
+        if self._result_identity != identity:
+            self._exception = None
+            self._result_checksum = None
+            self._result_identity = identity
+        if self._result_checksum is not None:
+            return self._result_checksum
+        if self._exception is not None:
+            return None
+        input_checksum = _available_input_checksum(self._input_ref)
+        if input_checksum is None:
             return None
         try:
-            checksum = self.compute()
+            checksum = Expression(
+                input_checksum,
+                input_celltype=self.input_celltype,
+                celltype=self.celltype,
+            ).compute()
         except Exception as exc:
-            self._exception = exc
+            from seamless.error_envelope import execution_error
+            self._exception = execution_error(exc)
             return None
         self._exception = None
+        self._result_checksum = checksum
+        self._result_identity = identity
         return checksum
 
     @property
     def state(self):
         if self._input_ref is None:
             return 'unwired'
-        return 'complete' if self.checksum is not None else 'failed'
+        if self._exception is not None:
+            return 'failed'
+        checksum = self.checksum
+        if checksum is not None:
+            return 'complete'
+        return 'failed' if self._exception is not None else 'waiting'
 
     @property
     def exception(self):
@@ -106,13 +142,42 @@ class StandalonePinBackend:
     @property
     def buffer(self):
         checksum = self.checksum
-        return None if checksum is None else checksum.resolve()
+        if checksum is None:
+            return None
+        try:
+            from seamless.checksum.hash_type_validation import validate_deserializable_as
+            validate_deserializable_as(checksum, self.celltype)
+            buffer = checksum.resolve()
+            validate_deserializable_as(checksum, self.celltype, buffer=buffer)
+            return buffer
+        except Exception as exc:
+            return self._materialization_error(exc)
 
     @property
     def value(self):
         if self._input_ref is None:
             return None
-        return self.run()
+        checksum = self.checksum
+        if checksum is None:
+            if self._exception is not None:
+                raise self._exception
+            return None
+        try:
+            value = checksum.resolve(self.celltype)
+        except Exception as exc:
+            return self._materialization_error(exc)
+        return value.content if self.celltype == 'bytes' and hasattr(value, 'content') else value
+
+    def _materialization_error(self, exc):
+        from seamless import CacheMissError
+        if isinstance(exc, CacheMissError):
+            raise exc
+        from seamless.error_envelope import execution_error
+        self._exception = execution_error(exc)
+        raise self._exception
+
+    def clear_exception(self):
+        self._exception = None
 
     def _check_write_authority(self, detach):
         self._entry()
@@ -128,6 +193,8 @@ class StandalonePinBackend:
         else:
             self.owner._args[self.name] = (ref, declared)
         self._exception = None
+        self._result_checksum = None
+        self._result_identity = None
 
     def write_value(self, value, *, detach=False):
         self._check_write_authority(detach)

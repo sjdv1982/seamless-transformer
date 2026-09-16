@@ -177,6 +177,9 @@ def test_failed_retype_reports_pin_exception_and_recovers():
     assert pin.state == 'failed'
     assert pin.exception is not None
     assert pin.checksum is None
+    pin.clear_exception()
+    assert pin.state == 'failed'
+    assert pin.exception is not None
     pin.celltype = 'text'
     assert pin.state == 'complete' and pin.exception is None
     assert pin.value == 'hello'
