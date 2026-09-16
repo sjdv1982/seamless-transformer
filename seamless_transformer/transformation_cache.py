@@ -108,8 +108,7 @@ class SpawnedTransformationError(RuntimeError):
     """A spawned worker's already-formatted transformation traceback."""
 
 
-class TransformationCancelledError(RuntimeError):
-    pass
+from seamless.error_envelope import ExecutionCanceledError as TransformationCancelledError
 
 
 def _dunder_envelope_checksum(

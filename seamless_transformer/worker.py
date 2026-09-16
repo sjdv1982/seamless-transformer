@@ -687,6 +687,9 @@ def _execute_transformation_impl(
             result_checksum.tempref()
             return result_checksum
         except Exception as exc:
+            from seamless.error_envelope import encode_error, error_kind
+            if error_kind(exc) != "execution":
+                return encode_error(exc)
             return format_exc(exc)
     finally:
         _set_current_owner_dask_key(previous_owner)
@@ -1991,6 +1994,9 @@ class _WorkerManager:
                             )
                             raise
                         if exc:
+                            if isinstance(exc, dict):
+                                from seamless.error_envelope import decode_error
+                                raise decode_error(exc)
                             return exc
                         if result_checksum_hex is None:
                             return "Result checksum unavailable"
@@ -2075,7 +2081,10 @@ class _WorkerManager:
                 break
             else:
                 return _DELEGATION_REFUSED
-        except Exception:
+        except Exception as exc:
+            from seamless.error_envelope import encode_error, error_kind
+            if error_kind(exc) != "execution":
+                return encode_error(exc)
             return traceback.format_exc()
         if isinstance(result, Checksum):
             try:
@@ -2367,7 +2376,7 @@ async def dispatch_to_workers(
     owner_dask_priority: int | None = None,
 ) -> Checksum | str:
     manager = _require_manager()
-    return await manager.run_transformation_async(
+    result = await manager.run_transformation_async(
         transformation_dict,
         tf_checksum,
         tf_dunder,
@@ -2376,6 +2385,66 @@ async def dispatch_to_workers(
         owner_dask_key=owner_dask_key,
         owner_dask_priority=owner_dask_priority,
     )
+
+    if isinstance(result, dict) and "error" in result:
+        from seamless.error_envelope import decode_error
+
+        raise decode_error(result)
+    return result
+
+
+async def dispatch_expression(
+    input_checksum,
+    path,
+    input_celltype,
+    celltype,
+    *,
+    validator=None,
+    validator_language=None,
+):
+    """Dispatch checksum-level Expressions through the configured backend."""
+    from seamless.checksum.expression import evaluate_expression_async
+
+    try:
+        from seamless_dask.transformer_client import get_seamless_dask_client
+
+        client = get_seamless_dask_client()
+    except ImportError:
+        client = None
+    if client is None:
+        return await evaluate_expression_async(
+            input_checksum,
+            path,
+            input_celltype,
+            celltype,
+            validator=validator,
+            validator_language=validator_language,
+        )
+    from types import SimpleNamespace
+    from seamless.error_envelope import decode_error
+
+    expression = SimpleNamespace(
+        path=path,
+        input_celltype=input_celltype,
+        celltype=celltype,
+        validator=Checksum(validator) if validator is not None else None,
+        validator_language=validator_language,
+    )
+    input_future = client.get_fat_checksum_future(input_checksum)
+    future = client.get_expression_future(expression, input_future)
+    from seamless_dask.client import _expression_checksum_task
+
+    thin = client.client.submit(
+        _expression_checksum_task, future, key=future.key + "-checksum"
+    )
+    try:
+        result, error = await asyncio.to_thread(thin.result)
+        if error:
+            raise decode_error(error)
+        return Checksum(result)
+    finally:
+        thin.release()
+        future.release()
 
 
 async def forward_to_parent(
@@ -2408,6 +2477,9 @@ async def forward_to_parent(
                 raise RuntimeError("Missing delegation token")
             proxy_future = _register_delegate_token(str(token))
             result = await asyncio.wrap_future(proxy_future)
+            if isinstance(result, dict) and "error" in result:
+                from seamless.error_envelope import decode_error
+                raise decode_error(result)
             if isinstance(result, str):
                 if result == _DELEGATION_REFUSED:
                     loop = asyncio.get_running_loop()

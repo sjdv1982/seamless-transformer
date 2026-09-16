@@ -178,7 +178,7 @@ class PreTransformation:
             return result
         if isinstance(value, Expression):
             try:
-                result = value._evaluate_internal()
+                result = value._evaluate_internal(execution="auto")
                 if result is None:
                     raise RuntimeError("Expression result is empty")
                 return result
@@ -304,7 +304,7 @@ class PreparedPreTransformation(PreTransformation):
             return result
         if isinstance(value, Expression):
             try:
-                result = value._evaluate_internal()
+                result = value._evaluate_internal(execution="auto")
                 if result is None:
                     raise RuntimeError("Expression result is empty")
                 return result

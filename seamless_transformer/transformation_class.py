@@ -40,43 +40,25 @@ except Exception:  # pragma: no cover - allow operation without seamless-dask
             raise RuntimeError("Dask integration is unavailable")
 
 
+def _record_exception(exc):
+    from seamless.error_envelope import (
+        error_kind,
+        execution_error,
+        WorkflowExecutionError,
+    )
+
+    if error_kind(exc) != "execution" or isinstance(exc, WorkflowExecutionError):
+        return execution_error(exc)
+    return _format_exception(exc)
+
+
 def _format_exception(exc: BaseException) -> str:
     from .transformation_cache import SpawnedTransformationError
+    from seamless.error_envelope import format_exception
 
     if isinstance(exc, SpawnedTransformationError):
         return str(exc)
-    if isinstance(exc, AssertionError):
-        tb = exc.__traceback__
-        while tb is not None and tb.tb_next is not None:
-            tb = tb.tb_next
-        filename = tb.tb_frame.f_code.co_filename if tb is not None else ""
-        # Assertions in generated transformer code are user-code failures.
-        # Preserve full diagnostics for assertions elsewhere (or without frames).
-        if not (filename.startswith("transformer-") and not filename.endswith(".py")):
-            return traceback.format_exc().strip("\n") + "\n"
-    if isinstance(exc, ValueError) and "fromhex" in str(exc):
-        return traceback.format_exc().strip("\n") + "\n"
-    formatted = traceback.TracebackException.from_exception(exc)
-    pending = [formatted]
-    while pending:
-        current = pending.pop()
-        start = next(
-            (
-                index
-                for index, frame in enumerate(current.stack)
-                if frame.filename.startswith("transformer-")
-                and not frame.filename.endswith(".py")
-            ),
-            0,
-        )
-        current.stack = traceback.StackSummary.from_list(current.stack[start:])
-        # Keep exception chaining, with the same frame filtering throughout.
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
-        if current.__context__ is not None:
-            pending.append(current.__context__)
-        pending.extend(getattr(current, "exceptions", None) or ())
-    return "".join(formatted.format()).strip("\n") + "\n"
+    return format_exception(exc)
 
 
 def _readonly_recursive(value):
@@ -121,7 +103,7 @@ def _start_dependency(dep: Any, *, loop: asyncio.AbstractEventLoop | None = None
 
 def _dependency_result_checksum(dep: Any) -> Checksum:
     if _is_expression(dep):
-        result = dep._evaluate_internal()
+        result = dep._evaluate_internal(execution="auto")
         if result is None:
             raise RuntimeError("Expression result is empty")
         return Checksum(result)
@@ -135,7 +117,7 @@ def _dependency_result_checksum(dep: Any) -> Checksum:
 
 async def _dependency_computation(dep: Any, *, require_value: bool) -> Checksum | None:
     if _is_expression(dep):
-        result = await dep._evaluate_internal_async()
+        result = await dep._evaluate_internal_async(execution="auto")
         if result is None:
             raise RuntimeError("Expression result is empty")
         return Checksum(result)
@@ -630,7 +612,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
-            self._exception = _format_exception(exc)
+            self._exception = _record_exception(exc)
         finally:
             self._constructed = True
         return self._transformation_checksum
@@ -660,7 +642,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
-            self._exception = _format_exception(exc)
+            self._exception = _record_exception(exc)
         finally:
             self._constructed = True
         return self._transformation_checksum
@@ -672,7 +654,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             if self._exception is not None:
                 raise TransformationError(
                     "Transformation construction returned an exception:\n"
-                    + self._exception
+                    + str(self._exception)
                 )
             raise TransformationError("Transformation has not been constructed")
         from .transformation_cache import is_cached
@@ -686,7 +668,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             if self._exception is not None:
                 raise TransformationError(
                     "Transformation construction returned an exception:\n"
-                    + self._exception
+                    + str(self._exception)
                 )
             raise TransformationError("Transformation has not been constructed")
         from .transformation_cache import is_cached_sync
@@ -726,7 +708,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             ):
                 self._mark_cancelled(str(exc) or None)
                 raise
-            self._exception = _format_exception(exc)
+            self._exception = _record_exception(exc)
         finally:
             self._evaluated = True
         return self._result_checksum
@@ -740,7 +722,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
-            self._exception = _format_exception(exc)
+            self._exception = _record_exception(exc)
 
     async def _evaluation(self, require_value: bool) -> Checksum | None:
         if self._cancelled:
@@ -779,7 +761,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             ):
                 self._mark_cancelled(str(exc) or None)
                 raise
-            self._exception = _format_exception(exc)
+            self._exception = _record_exception(exc)
         finally:
             self._evaluated = True
         return self._result_checksum
@@ -805,7 +787,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
-            self._exception = _format_exception(exc)
+            self._exception = _record_exception(exc)
 
     async def _run_dependencies_async(self, require_value: bool) -> None:
         tasks = {}
@@ -846,7 +828,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
-            self._exception = _format_exception(exc)
+            self._exception = _record_exception(exc)
 
     @property
     def meta(self):
@@ -1237,7 +1219,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             if self._exception is not None:
                 raise TransformationError(
                     "Transformation construction returned an exception:\n"
-                    + self._exception
+                    + str(self._exception)
                 )
             raise TransformationError("Transformation has not been constructed")
         if self._result_checksum is not None:
@@ -1247,7 +1229,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
         if self._exception is not None:
             raise TransformationError(
-                "Transformation returned an exception:\n" + self._exception
+                "Transformation returned an exception:\n" + str(self._exception)
             )
 
         if self._computation_task is not None:
@@ -1259,7 +1241,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                     return self._result_checksum
                 if self._exception is not None:
                     raise TransformationError(
-                        "Transformation returned an exception:\n" + self._exception
+                        "Transformation returned an exception:\n" + str(self._exception)
                     )
             raise TransformationError("Transformation is still computing")
 
@@ -1291,7 +1273,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             if checksum is None:
                 if self._exception is not None:
                     raise TransformationError(
-                        "Transformation returned an exception:\n" + self._exception
+                        "Transformation returned an exception:\n" + str(self._exception)
                     )
                 raise TransformationError("Transformation result is empty")
             return await checksum.fingertip(self.celltype)
@@ -1322,7 +1304,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         if checksum is None:
             if self._exception is not None:
                 raise TransformationError(
-                    "Transformation returned an exception:\n" + self._exception
+                    "Transformation returned an exception:\n" + str(self._exception)
                 )
             raise TransformationError("Transformation result is empty")
         return checksum.fingertip_sync(self.celltype)
