@@ -134,7 +134,8 @@ def _validate_native_numpy_value(name: str, value, dtype_spec, is_array: bool):
 
 def _is_deferred_input(value) -> bool:
     """Return True if the input must be resolved before dtype validation."""
-    if isinstance(value, (Checksum, Transformation)):
+    from seamless import Expression
+    if isinstance(value, (Checksum, Transformation, Expression)):
         return True
     if isinstance(value, str) and len(value) == 64:
         try:
@@ -370,7 +371,9 @@ class CompiledCelltypesWrapper:
 
     def __setitem__(self, key, value):
         if key != "result":
-            raise AttributeError(key)
+            from .transformer_class import CelltypesWrapper
+            owner = self._transformer
+            return CelltypesWrapper(owner, owner._celltypes, owner._args, fixed=True).__setitem__(key, value)
         if isinstance(value, type):
             value = value.__name__
         value = str(value)
@@ -397,7 +400,7 @@ class CompiledMixin:
 
         lang_def = get_language(language)
         self._compiled_language = language
-        self.compilation = deepcopy(lang_def.compilation)
+        self._compilation = deepcopy(lang_def.compilation)
         self._environment = Environment()
         self._schema_text = None
         self._schema = None
@@ -405,6 +408,15 @@ class CompiledMixin:
         self._code_text = None
         self._metavars = MetaVars()
         self._objects = ObjectList()
+
+    @property
+    def compilation(self):
+        """Compiler binary, flags, and mode used to build this transformer."""
+        return self._compilation
+
+    @compilation.setter
+    def compilation(self, value):
+        self._compilation = value
 
     @property
     def language(self) -> str:
@@ -505,12 +517,16 @@ class CompiledMixin:
 
     @property
     def celltypes(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.celltypes
         return CompiledCelltypesWrapper(self)
 
     @property
     def args(self):
         """Pre-bound input arguments, same as for Python transformers."""
-        return ArgsWrapper(self._args, self._celltypes, fixed=self._call_signature is not None)
+        if self._workflow_backend is not None:
+            return self._workflow_backend.args
+        return ArgsWrapper(self, self._args, self._celltypes, fixed=self._call_signature is not None)
 
     @property
     def modules(self):
@@ -525,6 +541,25 @@ class CompiledMixin:
     def _get_signature(self):
         return self._call_signature
 
+    def _snapshot_for_call(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.snapshot_for_call()
+        from .builder_snapshot import TransformerBuilderSnapshot
+        from seamless import Buffer
+        objects, compilation = self._compiled_payloads()
+        meta = deepcopy(self._meta)
+        meta.setdefault("metavars", self._metavars.to_dict())
+        pin_args, input_celltypes = self._snapshot_pin_inputs()
+        return TransformerBuilderSnapshot(
+            codebuf=Buffer(self._code_text, "text") if self._code_text is not None else None,
+            language=self.language, celltypes=deepcopy(self._celltypes),
+            optional_pins=frozenset(self._optional_pins), args=pin_args,
+            input_celltypes=input_celltypes,
+            modules={}, globals={}, meta=meta, environment=self._environment._to_lowlevel(),
+            scratch=self.scratch, direct_print=self.direct_print, local=self.local,
+            call_mode="delayed", signature=self._call_signature,
+            schema=self._schema_text, compilation=compilation, objects=objects, header=self.header)
+
     def _bind_compiled_arguments(self, *args, **kwargs):
         if self._schema is None:
             raise ValueError("compiled transformer schema is not set")
@@ -533,7 +568,7 @@ class CompiledMixin:
         if not self._metavars.is_complete:
             missing = sorted(self._metavars._allowed - self._metavars._values.keys())
             raise ValueError(f"compiled transformer metavars are incomplete: {missing}")
-        all_args = self._args.copy()
+        all_args = {name: self.pins[name].build() for name in self._args}
         all_args.update(self._call_signature.bind_partial(*args, **kwargs).arguments)
         arguments = self._call_signature.bind(**all_args).arguments
         deferred_validations: list[tuple[str, Any, bool]] = []
@@ -665,13 +700,17 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
 
     def __call__(self, *args, **kwargs) -> Transformation:
         ensure_open("compiled transformer call")
+        if self._workflow_backend is not None:
+            return self._build_from_snapshot(self._snapshot_for_call(), *args, **kwargs)
         if self._modules or self._globals:
             raise NotImplementedError("modules/globals are not supported for compiled transformers")
         arguments, deferred_validations = self._bind_compiled_arguments(*args, **kwargs)
+        self._convert_pin_arguments(arguments, self._celltypes)
+        from seamless import Expression
         deps = {
             argname: arg
             for argname, arg in arguments.items()
-            if isinstance(arg, Transformation)
+            if isinstance(arg, (Transformation, Expression))
         }
         meta = deepcopy(self._meta)
         meta.setdefault("metavars", self._metavars.to_dict())
@@ -688,6 +727,7 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
             arguments=arguments,
             env=self._environment._to_lowlevel(),
             language=self.language,
+            optional_pins=self._optional_pins,
         )
         deferred_prepare_sync = None
         deferred_prepare_async = None

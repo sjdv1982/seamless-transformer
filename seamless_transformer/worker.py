@@ -473,6 +473,14 @@ def _buffer_decref(self: Buffer) -> None:
     _buffer_ref_op(self, "decref")
 
 
+def _buffer_incref_refholder(self: Buffer, **_kwargs: Any) -> None:
+    return None
+
+
+def _buffer_decref_refholder(self: Buffer) -> None:
+    return None
+
+
 def _buffer_tempref(self: Buffer, **_kwargs: Any) -> None:
     _buffer_ref_op(self, "tempref")
 
@@ -522,6 +530,12 @@ def _patch_worker_primitives() -> None:
         def decref(self, *args: Any, **kwargs: Any) -> None:
             return None
 
+        def incref_refholder(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def decref_refholder(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
         def tempref(self, *args: Any, **kwargs: Any) -> None:
             return None
 
@@ -540,6 +554,10 @@ def _patch_worker_primitives() -> None:
     # Checksum refcounting is disabled inside a worker.
     Checksum.incref = lambda self, *args, **kwargs: None  # type: ignore[assignment]
     Checksum.decref = lambda self, *args, **kwargs: None  # type: ignore[assignment]
+    Checksum.incref_refholder = lambda self, *args, **kwargs: None  # type: ignore[assignment]
+    Checksum.decref_refholder = lambda self, *args, **kwargs: None  # type: ignore[assignment]
+    Buffer.incref_refholder = _buffer_incref_refholder  # type: ignore[assignment]
+    Buffer.decref_refholder = _buffer_decref_refholder  # type: ignore[assignment]
     Checksum.tempref = (  # type: ignore[assignment]
         lambda self, interest=128.0, fade_factor=2.0, fade_interval=2.0, **kwargs: None
     )
@@ -669,27 +687,23 @@ def _execute_transformation_impl(
             result_checksum.tempref()
             return result_checksum
         except Exception as exc:
+            from seamless.error_envelope import encode_error, error_kind
+            if error_kind(exc) != "execution":
+                return encode_error(exc)
             return format_exc(exc)
     finally:
         _set_current_owner_dask_key(previous_owner)
         _set_current_owner_dask_priority(previous_priority)
 
 
-def _format_pruned_exec_traceback() -> str:
-    exc_type, exc, tb = sys.exc_info()
-    if exc_type is None or exc is None:
+def _format_pruned_exec_traceback(exc: BaseException | None = None) -> str:
+    from .transformation_class import _format_exception
+
+    if exc is None:
+        exc = sys.exc_info()[1]
+    if exc is None:
         return traceback.format_exc()
-    if tb is None:
-        return "".join(traceback.format_exception_only(exc_type, exc))
-    frames = traceback.extract_tb(tb)
-    # Drop the outer frames so user tracebacks start at user code (exec_code is 4th frame).
-    frames = frames[4:]
-    if not frames:
-        return "".join(traceback.format_exception_only(exc_type, exc))
-    formatted = ["Traceback (most recent call last):\n"]
-    formatted.extend(traceback.format_list(frames))
-    formatted.extend(traceback.format_exception_only(exc_type, exc))
-    return "".join(formatted)
+    return _format_exception(exc)
 
 
 async def _child_initializer(channel: ChildChannel) -> None:
@@ -1980,6 +1994,9 @@ class _WorkerManager:
                             )
                             raise
                         if exc:
+                            if isinstance(exc, dict):
+                                from seamless.error_envelope import decode_error
+                                raise decode_error(exc)
                             return exc
                         if result_checksum_hex is None:
                             return "Result checksum unavailable"
@@ -2064,7 +2081,10 @@ class _WorkerManager:
                 break
             else:
                 return _DELEGATION_REFUSED
-        except Exception:
+        except Exception as exc:
+            from seamless.error_envelope import encode_error, error_kind
+            if error_kind(exc) != "execution":
+                return encode_error(exc)
             return traceback.format_exc()
         if isinstance(result, Checksum):
             try:
@@ -2356,7 +2376,7 @@ async def dispatch_to_workers(
     owner_dask_priority: int | None = None,
 ) -> Checksum | str:
     manager = _require_manager()
-    return await manager.run_transformation_async(
+    result = await manager.run_transformation_async(
         transformation_dict,
         tf_checksum,
         tf_dunder,
@@ -2365,6 +2385,66 @@ async def dispatch_to_workers(
         owner_dask_key=owner_dask_key,
         owner_dask_priority=owner_dask_priority,
     )
+
+    if isinstance(result, dict) and "error" in result:
+        from seamless.error_envelope import decode_error
+
+        raise decode_error(result)
+    return result
+
+
+async def dispatch_expression(
+    input_checksum,
+    path,
+    input_celltype,
+    celltype,
+    *,
+    validator=None,
+    validator_language=None,
+):
+    """Dispatch checksum-level Expressions through the configured backend."""
+    from seamless.checksum.expression import evaluate_expression_async
+
+    try:
+        from seamless_dask.transformer_client import get_seamless_dask_client
+
+        client = get_seamless_dask_client()
+    except ImportError:
+        client = None
+    if client is None:
+        return await evaluate_expression_async(
+            input_checksum,
+            path,
+            input_celltype,
+            celltype,
+            validator=validator,
+            validator_language=validator_language,
+        )
+    from types import SimpleNamespace
+    from seamless.error_envelope import decode_error
+
+    expression = SimpleNamespace(
+        path=path,
+        input_celltype=input_celltype,
+        celltype=celltype,
+        validator=Checksum(validator) if validator is not None else None,
+        validator_language=validator_language,
+    )
+    input_future = client.get_fat_checksum_future(input_checksum)
+    future = client.get_expression_future(expression, input_future)
+    from seamless_dask.client import _expression_checksum_task
+
+    thin = client.client.submit(
+        _expression_checksum_task, future, key=future.key + "-checksum"
+    )
+    try:
+        result, error = await asyncio.to_thread(thin.result)
+        if error:
+            raise decode_error(error)
+        return Checksum(result)
+    finally:
+        thin.release()
+        future.release()
 
 
 async def forward_to_parent(
@@ -2397,6 +2477,9 @@ async def forward_to_parent(
                 raise RuntimeError("Missing delegation token")
             proxy_future = _register_delegate_token(str(token))
             result = await asyncio.wrap_future(proxy_future)
+            if isinstance(result, dict) and "error" in result:
+                from seamless.error_envelope import decode_error
+                raise decode_error(result)
             if isinstance(result, str):
                 if result == _DELEGATION_REFUSED:
                     loop = asyncio.get_running_loop()

@@ -59,6 +59,13 @@ _VALIDATION_SNAPSHOT_COUNTS: dict[tuple, int] = {}
 _COMPILED_VALIDATION_CACHE: dict[str, dict[str, Any]] = {}
 
 
+def _checksum_hex(checksum):
+    """Return a checksum's wire spelling, independent of its display form."""
+    if checksum is None:
+        return None
+    return Checksum(checksum).hex()
+
+
 def _resolve_remote_target(execution: str) -> str | None:
     return _record_utils._resolve_remote_target(
         execution,
@@ -308,15 +315,11 @@ async def build_compilation_context_checksum(
         "schema_version": 1,
         "language": language,
         "target": completed.get("target", "profile"),
-        "schema_checksum": str(schema_checksum) if schema_checksum is not None else None,
-        "header_checksum": str(header_checksum) if header_checksum is not None else None,
-        "code_checksum": str(code_checksum) if code_checksum is not None else None,
-        "objects_checksum": (
-            str(objects_checksum) if objects_checksum is not None else None
-        ),
-        "compilation_checksum": (
-            str(compilation_checksum) if compilation_checksum is not None else None
-        ),
+        "schema_checksum": _checksum_hex(schema_checksum),
+        "header_checksum": _checksum_hex(header_checksum),
+        "code_checksum": _checksum_hex(code_checksum),
+        "objects_checksum": _checksum_hex(objects_checksum),
+        "compilation_checksum": _checksum_hex(compilation_checksum),
         "object_names": sorted(completed["objects"].keys()),
         "link_options": list(completed.get("link_options", [])),
         "objects": objects_payload,

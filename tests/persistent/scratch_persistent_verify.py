@@ -160,6 +160,12 @@ def main() -> None:
             _undo_transformation(tf_ok.transformation_checksum, tf_ok.result_checksum)
         )
 
+        # Completed transformations retain their concrete inputs until their
+        # lifecycle is explicitly released.  Drop both temporary producers
+        # before asserting that scratch purge can evict the input again.
+        tf_fail._release_refholds()
+        tf_ok._release_refholds()
+
         get_buffer_cache().purge_scratch(result_checksum)
         try:
             result_checksum.resolve()
@@ -179,6 +185,8 @@ def main() -> None:
             raise RuntimeError(
                 tf_cli.exception or "CLI transformation checksum unavailable"
             )
+
+        tf_cli._release_refholds()
 
         proc = _run_cli(tf_cli_checksum, fingertip=False, workdir=workdir)
         if proc.returncode == 0:

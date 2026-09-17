@@ -30,14 +30,20 @@ class PreTransformation:
         pretransformation_dict: Dict[str, Any],
         *,
         code_manager: Optional[CodeManager] = None,
+        optional_pins=None,
     ):
         if "__language__" not in pretransformation_dict:
             raise ValueError("pretransformation dict must include __language__")
         self._pretransformation_dict = pretransformation_dict
         self._code_manager = code_manager or get_code_manager()
+        self._optional_pins = frozenset(optional_pins or ())
         self._prepared = False
         self._code_refs: list[tuple[Checksum, Checksum]] = []
-        self._value_refs: list[Checksum] = []
+        self._value_refs: list[tuple[Checksum, str]] = []
+        self._refholds_released = False
+        from seamless.reference_lifecycle import register_refholder
+
+        register_refholder(self)
 
     @property
     def pretransformation_dict(self) -> Dict[str, Any]:
@@ -49,23 +55,34 @@ class PreTransformation:
         """True when `prepare_transformation` has run."""
         return self._prepared
 
+    @property
+    def optional_pins(self) -> frozenset[str]:
+        """Names of pins whose JSON null value is canonicalized to absence."""
+        return self._optional_pins
+
     def prepare_transformation(self) -> Dict[str, Any]:
         """Prepare all pins by ensuring they reference checksums."""
         if self._prepared:
             return self._pretransformation_dict
 
-        for argname in list(self._pretransformation_dict.keys()):
-            if argname in TRANSFORMATION_DUNDER_ITEMS:
-                continue
-            celltype, subcelltype, value = self._pretransformation_dict[argname]
-            prepared_value = self._prepare_pin_value(argname, value, celltype)
-            if isinstance(prepared_value, Checksum):
-                prepared_value = prepared_value.hex()
-            self._pretransformation_dict[argname] = (
-                celltype,
-                subcelltype,
-                prepared_value,
-            )
+        try:
+            for argname in list(self._pretransformation_dict.keys()):
+                if argname in TRANSFORMATION_DUNDER_ITEMS:
+                    continue
+                celltype, subcelltype, value = self._pretransformation_dict[argname]
+                prepared_value = self._prepare_pin_value(argname, value, celltype)
+                if isinstance(prepared_value, Checksum):
+                    prepared_value = prepared_value.hex()
+                self._pretransformation_dict[argname] = (
+                    celltype,
+                    subcelltype,
+                    prepared_value,
+                )
+        except Exception:
+            # A failed preparation must not leave the successfully converted
+            # prefix holding checksums after its caller abandons the object.
+            self.release()
+            raise
 
         self._prepared = True
         return self._pretransformation_dict
@@ -81,29 +98,42 @@ class PreTransformation:
             self._code_manager.decref_semantic(semantic_checksum)
         self._code_refs.clear()
 
-        for checksum in self._value_refs:
-            checksum.decref()
+        for checksum, _role in self._value_refs:
+            checksum.decref_refholder()
         self._value_refs.clear()
+        self._refholds_released = True
+
+    def _release_refholds(self) -> None:
+        """Release lifecycle references through the common holder protocol."""
+
+        self.release()
+
+    def _refheld_checksums(self):
+        if self._refholds_released:
+            return ()
+        return tuple(self._value_refs)
 
     def __del__(self):
         try:
-            self.release()
+            from seamless.reference_lifecycle import safe_release_refholder
+
+            safe_release_refholder(self)
         except Exception:
-            # Suppress destructor errors
             pass
 
     def build_partial_transformation(
-        self, upstream_dependencies: Optional[Dict[str, "Transformation"]] = None
-    ) -> tuple[Dict[str, Any], Dict[str, "Transformation"]]:
-        """Prepare a transformation dict, keeping upstream transformations unresolved.
+        self, upstream_dependencies: Optional[Dict[str, Any]] = None
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """Prepare a transformation dict, keeping upstream dependencies unresolved.
 
-        Non-transformation inputs are converted to checksums, while dependencies are
-        left as placeholders so they can be resolved lazily by a Dask client.
+        Non-dependency inputs are converted to checksums, while dependencies are
+        left as placeholders so they can be resolved lazily by the transformation.
         """
         from .transformation_class import Transformation
+        from seamless import Expression
 
         tf_dict: Dict[str, Any] = {}
-        dependencies: Dict[str, Transformation] = {}
+        dependencies: Dict[str, Any] = {}
         upstream_dependencies = upstream_dependencies or {}
         for argname in list(self._pretransformation_dict.keys()):
             raw_value = self._pretransformation_dict[argname]
@@ -111,8 +141,11 @@ class PreTransformation:
                 tf_dict[argname] = raw_value
                 continue
             celltype, subcelltype, value = raw_value
+            if self._prepared and isinstance(value, str):
+                # prepare_transformation() stored the prepared checksums as hex strings.
+                value = Checksum(value)
             prepared_value = self._prepare_pin_value_for_dask(argname, value, celltype)
-            if isinstance(prepared_value, Transformation):
+            if isinstance(prepared_value, (Transformation, Expression)):
                 dependency = upstream_dependencies.get(argname, prepared_value)
                 dependencies[argname] = dependency
                 tf_dict[argname] = (celltype, subcelltype, None)
@@ -128,27 +161,43 @@ class PreTransformation:
 
     # --- helpers --------------------------------------------------------------
     def _prepare_pin_value(self, argname: str, value, celltype: str):
-        # Convert upstream Transformation dependencies into their result checksum.
+        # Convert upstream dependencies into their result checksum.
         # Dependencies are ensured to have been computed earlier.
         from .transformation_class import Transformation
+        from seamless import Expression
 
         if isinstance(value, Transformation):
             if value.exception is not None:
                 msg = f"Dependency '{argname}' has an exception:\n{value.exception}"
                 raise RuntimeError(msg)
-            return value.result_checksum
+            if value._result_checksum_internal() is None:
+                value._compute_dependency()
+            result = value._result_checksum_internal()
+            if result is None:
+                raise RuntimeError(f"Dependency '{argname}' has no result")
+            return result
+        if isinstance(value, Expression):
+            try:
+                result = value._evaluate_internal(execution="auto")
+                if result is None:
+                    raise RuntimeError("Expression result is empty")
+                return result
+            except Exception as exc:
+                msg = f"Dependency '{argname}' has an exception:\n{exc}"
+                raise RuntimeError(msg) from exc
         if argname == "code":
             if self._pretransformation_dict.get("__language__") == "python":
                 return self._prepare_code(value)
-            return self._to_checksum(value, celltype)
-        checksum = self._to_checksum(value, celltype)
+                return self._to_checksum(value, celltype, "input:code")
+        checksum = self._to_checksum(value, celltype, f"input:{argname}")
         return checksum
 
     def _prepare_pin_value_for_dask(self, argname: str, value, celltype: str):
         """Like `_prepare_pin_value` but leaves dependencies unresolved."""
         from .transformation_class import Transformation
+        from seamless import Expression
 
-        if isinstance(value, Transformation):
+        if isinstance(value, (Transformation, Expression)):
             return value
         return self._prepare_pin_value(argname, value, celltype)
 
@@ -187,18 +236,16 @@ class PreTransformation:
         # Prefer syntactic checksum for execution; semantic guard remains tracked.
         return syntactic_checksum
 
-    def _to_checksum(self, value, celltype: str) -> Checksum | None:
-        if value is None:
-            return None
+    def _to_checksum(self, value, celltype: str, role: str) -> Checksum | None:
+        buffer = None
         if isinstance(value, Checksum):
             checksum = value
-        elif isinstance(value, str) and len(value) == 64:
-            checksum = Checksum(value)
         else:
+            buffer_celltype = "plain" if value is None else celltype or "mixed"
             buffer = (
                 value
                 if isinstance(value, Buffer)
-                else Buffer(value, celltype or "mixed")
+                else Buffer(value, buffer_celltype)
             )
             checksum = buffer.get_checksum()
             if is_worker():
@@ -206,6 +253,17 @@ class PreTransformation:
                     buffer.tempref()  # ensure parent sees worker-created buffers
                 except Exception:
                     pass
+        from seamless.checksum.hash_type_validation import validate_deserializable_as
+        from .transformation_utils import validate_pin_null
+
+        from seamless.checksum.null import canonicalize_checksum
+        normalized = canonicalize_checksum(checksum, celltype)
+        if normalized != checksum:
+            checksum, buffer = normalized, None
+        pinname = role.removeprefix("input:")
+        validate_pin_null(checksum, celltype or "mixed", pinname,
+                          optional=pinname in self._optional_pins)
+        validate_deserializable_as(checksum, celltype or "mixed", buffer=buffer)
         if not is_worker():
             try:
                 from seamless.caching.buffer_cache import get_buffer_cache
@@ -219,8 +277,8 @@ class PreTransformation:
             if scratch_ref:
                 checksum.tempref(scratch=True)
             else:
-                checksum.incref()
-        self._value_refs.append(checksum)
+                checksum.incref_refholder(scratch=False)
+                self._value_refs.append((checksum, role))
         return checksum
 
 
@@ -232,13 +290,31 @@ class PreparedPreTransformation(PreTransformation):
 
     def _prepare_pin_value(self, argname: str, value, celltype: str):
         from .transformation_class import Transformation
+        from seamless import Expression
 
         if isinstance(value, Transformation):
             if value.exception is not None:
                 msg = f"Dependency '{argname}' has an exception:\n{value.exception}"
                 raise RuntimeError(msg)
-            return value.result_checksum
-        return self._to_checksum(value, celltype)
+            if value._result_checksum_internal() is None:
+                value._compute_dependency()
+            result = value._result_checksum_internal()
+            if result is None:
+                raise RuntimeError(f"Dependency '{argname}' has no result")
+            return result
+        if isinstance(value, Expression):
+            try:
+                result = value._evaluate_internal(execution="auto")
+                if result is None:
+                    raise RuntimeError("Expression result is empty")
+                return result
+            except Exception as exc:
+                msg = f"Dependency '{argname}' has an exception:\n{exc}"
+                raise RuntimeError(msg) from exc
+        # A prepared transformation dict holds checksums as hex strings.
+        if isinstance(value, str):
+            value = Checksum(value)
+        return self._to_checksum(value, celltype, f"input:{argname}")
 
 
 def direct_transformer_to_pretransformation(
@@ -251,6 +327,7 @@ def direct_transformer_to_pretransformation(
     *,
     language,
     code_manager: Optional[CodeManager] = None,
+    optional_pins=None,
 ) -> PreTransformation:
     """Create a PreTransformation instance for a direct transformer call."""
     result_celltype = celltypes["result"]
@@ -265,6 +342,7 @@ def direct_transformer_to_pretransformation(
     if env is not None:
         envbuf = Buffer(env, "plain")
         checksum = envbuf.get_checksum()
+        envbuf.tempref()
         pretransformation_dict["__env__"] = checksum.hex()
 
     if meta:
@@ -295,8 +373,6 @@ def direct_transformer_to_pretransformation(
                 "celltype": celltype,
                 "filesystem": {"mode": "directory"},
             }
-        elif celltype == "checksum":
-            pin = {"celltype": "plain", "subcelltype": "checksum"}
         else:
             pin = {"celltype": celltype}
         tf_pins[pinname] = pin
@@ -327,7 +403,11 @@ def direct_transformer_to_pretransformation(
     if format_section:
         pretransformation_dict["__format__"] = format_section
 
-    return PreTransformation(pretransformation_dict, code_manager=code_manager)
+    return PreTransformation(
+        pretransformation_dict,
+        code_manager=code_manager,
+        optional_pins=optional_pins,
+    )
 
 
 def _buffer_checksum_hex(value, celltype: str) -> str:
@@ -350,6 +430,7 @@ def compiled_transformer_to_pretransformation(
     env,
     language: str,
     code_manager: Optional[CodeManager] = None,
+    optional_pins=None,
 ) -> PreTransformation:
     """Create a PreTransformation for a compiled transformer call."""
 
@@ -377,7 +458,11 @@ def compiled_transformer_to_pretransformation(
     for pinname, value in arguments.items():
         pretransformation_dict[pinname] = ("mixed", None, value)
 
-    return PreTransformation(pretransformation_dict, code_manager=code_manager)
+    return PreTransformation(
+        pretransformation_dict,
+        code_manager=code_manager,
+        optional_pins=optional_pins,
+    )
 
 
 __all__ = [

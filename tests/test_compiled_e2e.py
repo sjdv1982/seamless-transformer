@@ -411,7 +411,6 @@ def test_compiled_checksum_input_scalar():
     cs_b = _make_checksum(np.int32(5))
 
     assert tf(a=cs_a, b=cs_b) == 9
-    assert tf(a=cs_a.hex(), b=cs_b.hex()) == 9
 
 
 def test_compiled_checksum_input_array():

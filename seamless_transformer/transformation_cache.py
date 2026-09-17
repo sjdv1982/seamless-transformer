@@ -10,9 +10,11 @@ import os
 import subprocess
 import time
 import threading
+import uuid
 
 from seamless import Buffer, CacheMissError, Checksum, is_worker
 
+from . import observation
 from . import record_utils as _record_utils
 from . import worker
 from .probe_index import ensure_record_bucket_preconditions, is_record_probe
@@ -95,12 +97,18 @@ def _resolve_remote_target(execution: str) -> str | None:
 @dataclass
 class _ActiveSubmission:
     envelope_checksum: str
-    future: concurrent.futures.Future
+    result_future: concurrent.futures.Future
+    background_task: asyncio.Task | None
+    awaiters: set[object]
+    loop: asyncio.AbstractEventLoop
     canceled: bool = False
 
 
-class TransformationCancelledError(RuntimeError):
-    pass
+class SpawnedTransformationError(RuntimeError):
+    """A spawned worker's already-formatted transformation traceback."""
+
+
+from seamless.error_envelope import ExecutionCanceledError as TransformationCancelledError
 
 
 def _dunder_envelope_checksum(
@@ -114,33 +122,9 @@ def _dunder_envelope_checksum(
 
 
 async def _await_with_active_cancellation(awaitable, active_submission):
-    """Await backend work, but let checksum cancellation release the owner wait."""
+    """Await backend work owned by the active submission background task."""
 
-    if active_submission is None:
-        return await awaitable
-
-    work_future = asyncio.ensure_future(awaitable)
-    cancel_future = asyncio.wrap_future(active_submission.future)
-    cancel_future.add_done_callback(_retrieve_future_exception)
-    try:
-        done, _pending = await asyncio.wait(
-            {work_future, cancel_future}, return_when=asyncio.FIRST_COMPLETED
-        )
-    except asyncio.CancelledError:
-        work_future.cancel()
-        cancel_future.cancel()
-        raise
-    if cancel_future in done:
-        work_future.cancel()
-        try:
-            await work_future
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-        return cancel_future.result()
-
-    return work_future.result()
+    return await awaitable
 
 
 def _retrieve_future_exception(future) -> None:
@@ -232,6 +216,11 @@ class TransformationCache:
                     cached_result = None
             if cached_result is not None:
                 _debug(f"cache hit {tf_checksum.hex()}")
+                observation.observe(
+                    tf_checksum,
+                    observation.CACHE_HIT,
+                    transformation_dict=transformation_dict,
+                )
                 if scratch:
                     cached_result.tempref(scratch=True)
                 else:
@@ -258,6 +247,11 @@ class TransformationCache:
                         remote_result = None
                 if remote_result is not None:
                     _debug("using remote result")
+                    observation.observe(
+                        tf_checksum,
+                        observation.CACHE_HIT,
+                        transformation_dict=transformation_dict,
+                    )
                     if scratch:
                         remote_result.tempref(scratch=True)
                     else:
@@ -267,6 +261,11 @@ class TransformationCache:
                     )
                     return remote_result
 
+        observation.observe(
+            tf_checksum,
+            observation.CACHE_MISS,
+            transformation_dict=transformation_dict,
+        )
         return await self._run_active_or_execute(
             transformation_dict,
             tf_checksum=tf_checksum,
@@ -293,11 +292,11 @@ class TransformationCache:
         record_mode: bool,
     ) -> Checksum:
         envelope_checksum = _dunder_envelope_checksum(tf_dunder, scratch=scratch)
-        active: _ActiveSubmission
-        owner = False
+        member = object()
+        active: _ActiveSubmission | None
         with self._active_lock:
             active = self._active_submissions.get(tf_checksum)
-            if active is not None and active.future.done():
+            if active is not None and active.result_future.done():
                 self._active_submissions.pop(tf_checksum, None)
                 active = None
             if active is not None:
@@ -309,16 +308,58 @@ class TransformationCache:
                         "before strict re-submission"
                     )
             else:
+                loop = asyncio.get_running_loop()
+                result_future = concurrent.futures.Future()
                 active = _ActiveSubmission(
                     envelope_checksum=envelope_checksum,
-                    future=concurrent.futures.Future(),
+                    result_future=result_future,
+                    background_task=None,
+                    awaiters=set(),
+                    loop=loop,
                 )
+                active.background_task = asyncio.create_task(
+                    self._execute_active_submission(
+                        transformation_dict,
+                        tf_checksum=tf_checksum,
+                        tf_dunder=tf_dunder,
+                        scratch=scratch,
+                        require_value=require_value,
+                        force_local=force_local,
+                        store_execution_record=store_execution_record,
+                        strict_dunder=strict_dunder,
+                        record_mode=record_mode,
+                        active_submission=active,
+                    )
+                )
+                active.background_task.add_done_callback(_retrieve_future_exception)
                 self._active_submissions[tf_checksum] = active
-                owner = True
+            active.awaiters.add(member)
 
-        if not owner:
-            return await asyncio.wrap_future(active.future)
+        result = asyncio.wrap_future(active.result_future)
+        result.add_done_callback(_retrieve_future_exception)
+        try:
+            # wait() leaves the shared result alive when this member detaches.
+            # Unlike shield(), it does not log an expected late cancellation
+            # exception after the caller has gone away (Python 3.14).
+            await asyncio.wait((result,))
+            return result.result()
+        finally:
+            await self.softcancel_by_checksum_async(tf_checksum, member=member)
 
+    async def _execute_active_submission(
+        self,
+        transformation_dict: Dict[str, Any],
+        *,
+        tf_checksum: Checksum,
+        tf_dunder,
+        scratch: bool,
+        require_value: bool,
+        force_local: bool,
+        store_execution_record: bool,
+        strict_dunder: bool,
+        record_mode: bool,
+        active_submission: _ActiveSubmission,
+    ) -> None:
         try:
             result = await self._run_uncached(
                 transformation_dict,
@@ -330,20 +371,193 @@ class TransformationCache:
                 store_execution_record=store_execution_record,
                 strict_dunder=strict_dunder,
                 record_mode=record_mode,
-                active_submission=active,
+                active_submission=active_submission,
             )
+        except asyncio.CancelledError as exc:
+            active_submission.canceled = True
+            if not active_submission.result_future.done():
+                active_submission.result_future.set_exception(
+                    TransformationCancelledError("Transformation was canceled")
+                )
+            raise exc
         except BaseException as exc:
-            if not active.future.done():
-                active.future.set_exception(exc)
-            raise
+            if not active_submission.result_future.done():
+                active_submission.result_future.set_exception(exc)
         else:
-            if not active.future.done():
-                active.future.set_result(result)
-            return result
+            if not active_submission.result_future.done():
+                active_submission.result_future.set_result(result)
         finally:
             with self._active_lock:
-                if self._active_submissions.get(tf_checksum) is active:
+                if self._active_submissions.get(tf_checksum) is active_submission:
                     self._active_submissions.pop(tf_checksum, None)
+
+    def _detach_active_member(
+        self,
+        tf_checksum: Checksum | str,
+        member: object | None = None,
+    ) -> tuple[bool, bool, _ActiveSubmission | None]:
+        if member is None:
+            return False, False, None
+        tf_checksum = Checksum(tf_checksum)
+        active: _ActiveSubmission | None
+        should_cancel = False
+        with self._active_lock:
+            active = self._active_submissions.get(tf_checksum)
+            if active is None or member not in active.awaiters:
+                return False, False, None
+            active.awaiters.remove(member)
+            should_cancel = not active.awaiters and not active.result_future.done()
+            if should_cancel:
+                active.canceled = True
+        return True, should_cancel, active
+
+    def softcancel_by_checksum(
+        self,
+        tf_checksum: Checksum | str,
+        member: object | None = None,
+        *,
+        remote: bool = True,
+    ) -> bool:
+        tf_checksum = Checksum(tf_checksum)
+        removed, should_cancel, active = self._detach_active_member(
+            tf_checksum, member
+        )
+        if not removed:
+            return False
+        if not should_cancel:
+            return True
+        assert active is not None
+        self._softcancel_leaf(tf_checksum, active, remote=remote)
+        return True
+
+    async def softcancel_by_checksum_async(
+        self,
+        tf_checksum: Checksum | str,
+        member: object | None = None,
+        *,
+        remote: bool = True,
+    ) -> bool:
+        tf_checksum = Checksum(tf_checksum)
+        removed, should_cancel, active = self._detach_active_member(
+            tf_checksum, member
+        )
+        if not removed:
+            return False
+        if not should_cancel:
+            return True
+        assert active is not None
+        await self._softcancel_leaf_async(tf_checksum, active, remote=remote)
+        return True
+
+    def _softcancel_leaf(
+        self,
+        tf_checksum: Checksum,
+        active: _ActiveSubmission,
+        *,
+        remote: bool,
+    ) -> None:
+        if active.background_task is not None and not active.background_task.done():
+            active.background_task.cancel()
+        if not active.result_future.done():
+            active.result_future.set_exception(
+                TransformationCancelledError("Transformation was canceled")
+            )
+        try:
+            worker.cancel_by_checksum(tf_checksum)
+        except Exception:
+            pass
+        if remote:
+            try:
+                from seamless_dask.transformer_client import get_seamless_dask_client
+            except Exception:
+                dask_client = None
+            else:
+                dask_client = get_seamless_dask_client()
+            if dask_client is not None:
+                softcancel = getattr(dask_client, "softcancel_by_checksum", None)
+                if callable(softcancel):
+                    try:
+                        softcancel(
+                            tf_checksum, getattr(active, "dask_member_id", None)
+                        )
+                    except Exception:
+                        pass
+            if jobserver_remote is not None:
+                softcancel = getattr(jobserver_remote, "softcancel_transformation", None)
+                if callable(softcancel):
+                    try:
+                        softcancel(
+                            tf_checksum, getattr(active, "jobserver_member_id", None)
+                        )
+                    except Exception:
+                        pass
+
+    async def _softcancel_leaf_async(
+        self,
+        tf_checksum: Checksum,
+        active: _ActiveSubmission,
+        *,
+        remote: bool,
+    ) -> None:
+        if active.background_task is not None and not active.background_task.done():
+            active.background_task.cancel()
+        if not active.result_future.done():
+            active.result_future.set_exception(
+                TransformationCancelledError("Transformation was canceled")
+            )
+        try:
+            worker.cancel_by_checksum(tf_checksum)
+        except Exception:
+            pass
+        if not remote:
+            return
+        try:
+            from seamless_dask.transformer_client import get_seamless_dask_client
+        except Exception:
+            dask_client = None
+        else:
+            dask_client = get_seamless_dask_client()
+            if dask_client is not None:
+                softcancel = getattr(dask_client, "softcancel_by_checksum", None)
+                if callable(softcancel):
+                    try:
+                        softcancel(
+                            tf_checksum, getattr(active, "dask_member_id", None)
+                        )
+                    except Exception:
+                        pass
+        if jobserver_remote is not None:
+            softcancel_async = getattr(
+                jobserver_remote, "softcancel_transformation_async", None
+            )
+            if callable(softcancel_async):
+                try:
+                    await softcancel_async(
+                        tf_checksum, getattr(active, "jobserver_member_id", None)
+                    )
+                    return
+                except Exception:
+                    pass
+            softcancel = getattr(jobserver_remote, "softcancel_transformation", None)
+            if callable(softcancel):
+                try:
+                    softcancel(
+                        tf_checksum, getattr(active, "jobserver_member_id", None)
+                    )
+                except Exception:
+                    pass
+
+    def _hard_cancel_active(self, active: _ActiveSubmission) -> bool:
+        if active.result_future.done():
+            return False
+        active.canceled = True
+        active.awaiters.clear()
+        active.result_future.set_exception(
+            TransformationCancelledError("Transformation was canceled")
+        )
+        if active.background_task is not None and not active.background_task.done():
+            active.background_task.cancel()
+        return True
 
     def cancel_by_checksum(
         self, tf_checksum: Checksum | str, *, remote: bool = True
@@ -352,12 +566,8 @@ class TransformationCache:
         canceled = False
         with self._active_lock:
             active = self._active_submissions.pop(tf_checksum, None)
-        if active is not None and not active.future.done():
-            active.canceled = True
-            active.future.set_exception(
-                TransformationCancelledError("Transformation was canceled")
-            )
-            canceled = True
+        if active is not None:
+            canceled = self._hard_cancel_active(active)
         try:
             canceled = worker.cancel_by_checksum(tf_checksum) or canceled
         except Exception:
@@ -393,10 +603,10 @@ class TransformationCache:
             return "not-running"
         if active.canceled:
             return "canceled"
-        if not active.future.done():
+        if not active.result_future.done():
             return "running"
         try:
-            active.future.result()
+            active.result_future.result()
         except TransformationCancelledError:
             return "canceled"
         except Exception:
@@ -458,6 +668,9 @@ class TransformationCache:
                     "Remote execution requires an active database server"
                 )
             _debug("dispatching transformation to remote jobserver")
+            jobserver_member_id = uuid.uuid4().hex
+            if active_submission is not None:
+                active_submission.jobserver_member_id = jobserver_member_id
 
             ### NOTE: flushing the entire buffer_writer queue, just to be sure that
             ###   the jobserver has it available.
@@ -475,6 +688,7 @@ class TransformationCache:
                     tf_dunder=tf_dunder,
                     scratch=scratch,
                     strict_dunder=strict_dunder,
+                    member_id=jobserver_member_id,
                 ),
                 active_submission,
             )
@@ -492,6 +706,8 @@ class TransformationCache:
                 remote_job_dir = parse_remote_job_written(result_checksum)
                 if remote_job_dir is not None:
                     raise RemoteJobWritten(remote_job_dir)
+                if isinstance(result_checksum, str) and result_checksum == "Transformation was canceled":
+                    raise TransformationCancelledError(result_checksum)
                 raise RuntimeError(result_checksum)
             result_checksum = Checksum(result_checksum)
         elif worker.has_spawned() and not is_worker() and not force_local:
@@ -510,7 +726,9 @@ class TransformationCache:
                 remote_job_dir = parse_remote_job_written(result_checksum)
                 if remote_job_dir is not None:
                     raise RemoteJobWritten(remote_job_dir)
-                raise RuntimeError(result_checksum)
+                if isinstance(result_checksum, str) and result_checksum == "Transformation was canceled":
+                    raise TransformationCancelledError(result_checksum)
+                raise SpawnedTransformationError(result_checksum)
             result_checksum = Checksum(result_checksum)
         elif is_worker() and not force_local:
             assert not worker.has_spawned()
@@ -534,6 +752,8 @@ class TransformationCache:
                 remote_job_dir = parse_remote_job_written(result_checksum)
                 if remote_job_dir is not None:
                     raise RemoteJobWritten(remote_job_dir)
+                if isinstance(result_checksum, str) and result_checksum == "Transformation was canceled":
+                    raise TransformationCancelledError(result_checksum)
                 raise RuntimeError(result_checksum)
             try:
                 result_checksum = Checksum(result_checksum)
@@ -563,6 +783,8 @@ class TransformationCache:
             remote_job_dir = parse_remote_job_written(result_checksum)
             if remote_job_dir is not None:
                 raise RemoteJobWritten(remote_job_dir)
+            if isinstance(result_checksum, str) and result_checksum == "Transformation was canceled":
+                raise TransformationCancelledError(result_checksum)
             result_checksum = Checksum(result_checksum)
 
         finished_at = _utcnow_iso()
@@ -742,6 +964,11 @@ class TransformationCache:
                 except CacheMissError:
                     cached_result = None
             if cached_result is not None:
+                observation.observe(
+                    tf_checksum,
+                    observation.CACHE_HIT,
+                    transformation_dict=transformation_dict,
+                )
                 self._register_transformation_result(
                     tf_checksum, cached_result, tf_dunder=tf_dunder
                 )

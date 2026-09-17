@@ -136,6 +136,10 @@ def run_transformation_dict(
             env_dict = env_buffer.get_value("plain")
         if not isinstance(env_dict, dict):
             env_dict = {}
+        import shutil
+        missing = [binary for binary in env_dict.get("which", ()) if shutil.which(binary) is None]
+        if missing:
+            raise RuntimeError("Required environment binaries are unavailable: " + ", ".join(missing))
 
     if get_record_mode() and not is_record_probe(transformation, tf_dunder):
         ensure_record_bucket_preconditions_sync(transformation, tf_dunder)
@@ -181,10 +185,7 @@ def run_transformation_dict(
     code_checksum = transformation.get("__code_checksum__")
     if code_checksum is None:
         code_checksum = tf_checksum
-    try:
-        checksum_hex = code_checksum.hex()
-    except AttributeError:
-        checksum_hex = str(code_checksum) if code_checksum is not None else None
+    checksum_hex = Checksum(code_checksum).hex() if code_checksum is not None else None
     if checksum_hex:
         identifier = f"{identifier}-{checksum_hex}"
 
@@ -223,8 +224,8 @@ def run_transformation_dict(
             output_celltype,
             meta,
         )
-        if result is None:
-            raise RuntimeError("Result is empty")
+        if result is None and output_celltype not in ("plain", "mixed", "bytes"):
+            raise RuntimeError(f"Null result is not allowed for celltype {output_celltype!r}")
         if is_deep_celltype(output_celltype):
             if not PACK_DEEP_RESULTS:
                 raise NotImplementedError(
@@ -251,8 +252,8 @@ def run_transformation_dict(
         driver_active,
     )
 
-    if result is None:
-        raise RuntimeError("Result is empty")
+    if result is None and output_celltype not in ("plain", "mixed", "bytes"):
+        raise RuntimeError(f"Null result is not allowed for celltype {output_celltype!r}")
 
     if is_deep_celltype(output_celltype):
         if not PACK_DEEP_RESULTS:

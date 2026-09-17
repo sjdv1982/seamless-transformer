@@ -1,7 +1,6 @@
 import os
 import pathlib
 import threading
-import time
 
 from seamless import Buffer, Checksum, CacheMissError
 from seamless.caching.buffer_cache import get_buffer_cache
@@ -19,6 +18,11 @@ def write_future(
 ):
     filename = os.path.join(workdir, filename)
     try:
+        transformation_checksum = (
+            transformation_checksum.hex()
+            if isinstance(transformation_checksum, Checksum)
+            else str(transformation_checksum)
+        )
         with open(filename + ".FUTURE", "w") as f:
             f.write(f"{transformation_checksum}.{result_target}\n")
     except Exception:
@@ -60,7 +64,8 @@ def maintain_futures(
 
     count = 0
     while not delete_futures_event.is_set():
-        time.sleep(1)
+        if delete_futures_event.wait(1):
+            break
         count += 1
         if count == 30:
             count = 0

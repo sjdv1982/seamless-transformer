@@ -9,6 +9,8 @@ import json
 import os
 import tempfile
 import time
+import threading
+from functools import wraps
 from types import ModuleType
 from typing import Any
 
@@ -19,6 +21,17 @@ from .cffi_wrapper import build_extension_cffi
 _BINARY_CACHE: dict[str, dict[str, bytes]] = {}
 _MODULE_CACHE: dict[str, ModuleType] = {}
 _MODULE_INFO_CACHE: dict[str, dict[str, Any]] = {}
+_compile_lock = threading.RLock()
+
+
+def _serialized_build(function):
+    @wraps(function)
+    def call(*args, **kwargs):
+        with _compile_lock:
+            return function(*args, **kwargs)
+    return call
+
+
 _SO_CACHE_DIR = tempfile.mkdtemp(prefix="seamless-compiled-modules-")
 
 
@@ -32,8 +45,15 @@ def _stable_digest(value: Any) -> str:
 
 def _import_extension_module(full_module_name: str, so_bytes: bytes) -> ModuleType:
     path = os.path.join(_SO_CACHE_DIR, full_module_name + ".so")
-    with open(path, "wb") as f:
-        f.write(so_bytes)
+    # Forked workers share this directory. Never truncate a library another
+    # worker may be importing (or already has mapped).
+    fd, temporary = tempfile.mkstemp(dir=_SO_CACHE_DIR, suffix=".so.tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(so_bytes)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
     spec = importlib.util.spec_from_file_location(full_module_name, path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot import extension module {full_module_name!r}")
@@ -52,6 +72,7 @@ def build_compiled_module(
     return get_compiled_module_info(module_definition, module_name=module_name)["module"]
 
 
+@_serialized_build
 def get_compiled_module_info(
     module_definition: dict,
     *,

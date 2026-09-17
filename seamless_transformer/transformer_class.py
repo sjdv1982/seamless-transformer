@@ -8,15 +8,69 @@ from copy import deepcopy
 from functools import update_wrapper
 from typing import Callable, Generic, Optional, ParamSpec, TypeVar, cast, overload
 
-from seamless import Buffer, ensure_open
+from seamless import Buffer, Checksum, ensure_open
 
 from .environment import Environment
 from .pretransformation import direct_transformer_to_pretransformation
 from .transformation_class import Transformation, transformation_from_pretransformation
+from .builder_snapshot import TransformerBuilderSnapshot
 
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+def _snapshot_modules(modules):
+    """Copy module mappings without attempting to pickle module objects."""
+
+    return {
+        name: value if isinstance(value, ModuleType) else deepcopy(value)
+        for name, value in modules.items()
+    }
+
+
+def _clone_transformer_builder(source, target_cls, language=None):
+    """Clone a standalone builder with independent lifecycle ownership."""
+
+    snapshot = source._snapshot_for_call()
+    code = snapshot.callable
+    if code is None:
+        codebuf = snapshot.codebuf
+        if isinstance(codebuf, Checksum):
+            codebuf = codebuf.resolve()
+        code = codebuf.decode() if isinstance(codebuf, Buffer) else codebuf
+    target = target_cls(
+        code,
+        scratch=snapshot.scratch,
+        direct_print=snapshot.direct_print,
+        local=bool(snapshot.local) if snapshot.local is not None else False,
+        language=snapshot.language if language is None else language,
+    )
+    try:
+        target._celltypes = deepcopy(snapshot.celltypes)
+        target._optional_pins = set(snapshot.optional_pins)
+        target._args = {}
+        for key, (value, input_celltype) in source._args.items():
+            target._replace_checksum_field(None, value)
+            target._args[key] = (value, input_celltype)
+        target._modules = {}
+        for key, value in snapshot.modules.items():
+            target._replace_checksum_field(None, value)
+            target._modules[key] = value if isinstance(value, ModuleType) else deepcopy(value)
+        target._globals = deepcopy(snapshot.globals)
+        target._meta = deepcopy(snapshot.meta)
+        source_environment = getattr(source, "_environment", snapshot.environment)
+        target._environment = deepcopy(source_environment)
+        target._workflow_callable = snapshot.callable
+        if isinstance(snapshot.codebuf, Checksum):
+            target._codebuf = snapshot.codebuf
+            target._replace_code_ref(snapshot.codebuf)
+        if language is not None:
+            target.language = language
+        return target
+    except Exception:
+        target._release_refholds()
+        raise
 
 
 @overload
@@ -37,11 +91,7 @@ def direct(
     """Execute immediately, returning the result value."""
 
     if isinstance(func, Transformer):
-        result = DirectTransformer.__new__(DirectTransformer)
-        for k, v in func.__dict__.items():
-            setattr(result, k, deepcopy(v))
-        if language is not None:
-            result.language = language
+        result = _clone_transformer_builder(func, DirectTransformer, language)
     else:
         if language is None:
             language = "python"
@@ -63,11 +113,7 @@ def delayed(
     """Return a Transformation object that can be executed later."""
 
     if isinstance(func, Transformer):
-        result = Transformer.__new__(Transformer)
-        for k, v in func.__dict__.items():
-            setattr(result, k, v)
-        if language is not None:
-            result.language = language
+        result = _clone_transformer_builder(func, Transformer, language)
     else:
         if language is None:
             language = "python"
@@ -99,10 +145,18 @@ class TransformerCore(Generic[P, R]):
         self._modules = {}
         self._globals = {}
         self._celltypes = {}
+        self._optional_pins = set()
         self._environment = Environment()
         self._meta = {"transformer_path": ["tf", "tf"], "local": local}
+        self._workflow_backend = None
+        self._workflow_callable = None
+        self._code_checksum_ref = None
+        self._refholds_released = False
         self.scratch = scratch
         self.direct_print = direct_print
+        from seamless.reference_lifecycle import register_refholder
+
+        register_refholder(self)
 
     def _get_signature(self):
         return None
@@ -110,12 +164,51 @@ class TransformerCore(Generic[P, R]):
     def _get_codebuf(self):
         raise NotImplementedError
 
+    def _snapshot_for_call(self) -> TransformerBuilderSnapshot:
+        if self._workflow_backend is not None:
+            return self._workflow_backend.snapshot_for_call()
+        pin_args, input_celltypes = self._snapshot_pin_inputs()
+        return TransformerBuilderSnapshot(
+            codebuf=self._get_codebuf(),
+            language=self.language,
+            celltypes=deepcopy(self._celltypes),
+            optional_pins=frozenset(self._optional_pins),
+            args=pin_args,
+            input_celltypes=input_celltypes,
+            modules=_snapshot_modules(self._modules),
+            globals=deepcopy(self._globals),
+            meta=deepcopy(self._meta),
+            environment=self._environment._to_lowlevel(),
+            scratch=bool(self.scratch),
+            direct_print=bool(self.direct_print),
+            local=self.local,
+            call_mode="direct" if isinstance(self, DirectTransformer) else "delayed",
+            callable=self._workflow_callable,
+            signature=self._get_signature(),
+        )
+
+    def _snapshot_pin_inputs(self):
+        from seamless import Cell
+        from seamless.cell_class import _typed_input_celltype
+        arguments, input_celltypes = {}, {}
+        for name, (value, declared) in self._args.items():
+            if isinstance(value, Cell):
+                value = value.build()
+            arguments[name] = value
+            input_celltypes[name] = _typed_input_celltype(value) or declared
+        return arguments, input_celltypes
+
     @property
     def language(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.language
         return self._language
 
     @language.setter
     def language(self, lang):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.language = lang
+            return
         if lang is None:
             lang = "python"
         self._language = lang
@@ -124,38 +217,76 @@ class TransformerCore(Generic[P, R]):
     def celltypes(self):
         """The celltypes."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.celltypes
         return CelltypesWrapper(
-            self._celltypes, self._args, fixed=self._get_signature() is not None
+            self, self._celltypes, self._args, fixed=self._get_signature() is not None
         )
 
     @property
     def args(self):
         """Pre-bound transformer arguments."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.args
         return ArgsWrapper(
-            self._args, self._celltypes, fixed=self._get_signature() is not None
+            self, self._args, self._celltypes, fixed=self._get_signature() is not None
         )
+
+    @property
+    def pins(self):
+        """Pre-bound transformer inputs."""
+
+        if self._workflow_backend is not None:
+            return self._workflow_backend.pins
+        return self.args
 
     @property
     def modules(self):
         """Imported Python modules."""
 
-        return ModulesWrapper(self._modules)
+        if self._workflow_backend is not None:
+            return self._workflow_backend.modules
+        return ModulesWrapper(self, self._modules)
 
     @property
     def globals(self):
         """Global symbols injected via modules.main."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.globals
         return GlobalsWrapper(self._globals)
+
+    @property
+    def optional_pins(self) -> set[str]:
+        """Input pins where JSON null means absence.
+
+        Connected optional pins still compute and still fail on upstream errors.
+        Optional pins can be tricky: for these pins, JSON null is reserved as
+        absence and only plain/mixed pins can use that absence value.
+        """
+
+        if self._workflow_backend is not None:
+            return self._workflow_backend.optional_pins
+        return self._optional_pins
+
+    @optional_pins.setter
+    def optional_pins(self, value) -> None:
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.optional_pins = value
+            return
+        self._optional_pins = set(value or ())
 
     @property
     def environment(self) -> Environment:
         """Execution environment for this transformer."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.environment
         return self._environment
 
     def _bind_arguments(self, *args, **kwargs):
-        all_args = self._args.copy()
+        all_args = {name: self.pins[name].build() for name in self._args}
         signature = self._get_signature()
         if signature is not None:
             all_args.update(signature.bind_partial(*args, **kwargs).arguments)
@@ -170,68 +301,241 @@ class TransformerCore(Generic[P, R]):
                 raise TypeError(f"Missing argument: '{argname}'")
         return all_args
 
-    def __call__(self, *args, **kwargs) -> Transformation[R]:
-        """Build a delayed Transformation from the current transformer state."""
+    @staticmethod
+    def _bind_snapshot_arguments(snapshot, args, kwargs):
+        all_args = TransformerCore._copy_arguments(snapshot.args)
+        from seamless import Expression
+        for name, input_celltype in snapshot.input_celltypes.items():
+            all_args[name] = Expression(all_args[name], input_celltype=input_celltype,
+                                        celltype=snapshot.celltypes[name])
+        signature = snapshot.signature
+        if signature is not None:
+            call_args = signature.bind_partial(*args, **kwargs).arguments
+        elif args:
+            raise TypeError("No function signature: positional arguments not supported")
+        else:
+            call_args = dict(kwargs)
+        # A call-time Checksum is a value exactly when the pin's celltype is checksum.
+        for name, value in call_args.items():
+            if isinstance(value, Checksum) and snapshot.celltypes.get(name) == "checksum":
+                call_args[name] = Buffer(value, "checksum")
+        all_args.update(call_args)
+        if signature is not None:
+            return signature.bind(**all_args).arguments
+        for argname in snapshot.celltypes:
+            if argname == "result":
+                continue
+            if argname not in all_args and argname not in snapshot.optional_pins:
+                raise TypeError(f"Missing argument: '{argname}'")
+        return all_args
 
+    @staticmethod
+    def _copy_arguments(arguments):
+        # Dependencies are references to computations, not mutable literal data.
+        from seamless import Cell, Expression
+
+        memo = {id(value): value for value in arguments.values()
+                if isinstance(value, (Transformation, Expression, Cell))}
+        return deepcopy(arguments, memo)
+
+    @staticmethod
+    def _convert_pin_arguments(arguments, celltypes):
+        from seamless import Expression, CellBase
+        from seamless.cell_class import _check_input_ref
+
+        for argname, arg in tuple(arguments.items()):
+            if isinstance(arg, CellBase):
+                _check_input_ref(arg)
+            celltype = celltypes.get(argname, "mixed")
+            if isinstance(arg, (Transformation, Expression)) and arg.celltype != celltype:
+                arguments[argname] = Expression(
+                    arg, input_celltype=arg.celltype, celltype=celltype
+                )
+
+    def _build_from_snapshot(self, snapshot, *args, **kwargs) -> Transformation[R]:
         ensure_open("transformer call")
-        arguments = self._bind_arguments(*args, **kwargs)
+        arguments = self._bind_snapshot_arguments(snapshot, args, kwargs)
+        from seamless import Expression
+        self._convert_pin_arguments(arguments, snapshot.celltypes)
+
         deps = {
             argname: arg
             for argname, arg in arguments.items()
-            if isinstance(arg, Transformation)
+            if isinstance(arg, (Transformation, Expression))
         }
-        env = self._environment._to_lowlevel()
-
-        meta = deepcopy(self._meta)
-        modules = {}
+        if snapshot.schema is not None:
+            from .pretransformation import compiled_transformer_to_pretransformation
+            from .compiled_transformer import (
+                _deferred_validation_hooks, _validate_derived_compiled_dunders,
+                _compose_post_prepare_hooks, _compose_post_prepare_async_hooks,
+                _require_signature_package,
+            )
+            import yaml
+            signature = _require_signature_package().Signature.from_dict(yaml.safe_load(snapshot.schema))
+            validations = [(p.name, p.dtype, p.shape is not None) for p in signature.inputs]
+            sync_validate, async_validate = _deferred_validation_hooks(validations)
+            code = snapshot.codebuf
+            if isinstance(code, Checksum): code = code.resolve()
+            if isinstance(code, Buffer): code = code.decode()
+            pre = compiled_transformer_to_pretransformation(
+                code=code, schema_text=snapshot.schema, header=snapshot.header,
+                compilation=deepcopy(snapshot.compilation), objects=deepcopy(snapshot.objects),
+                meta=deepcopy(snapshot.meta), celltypes=deepcopy(snapshot.celltypes),
+                arguments=arguments, env=deepcopy(snapshot.environment), language=snapshot.language,
+                optional_pins=snapshot.optional_pins)
+            def validate_dunders(prepared):
+                _validate_derived_compiled_dunders(prepared, header=snapshot.header)
+            return transformation_from_pretransformation(
+                pre, upstream_dependencies=deps, meta=deepcopy(snapshot.meta),
+                scratch=snapshot.scratch, tf_dunder={},
+                post_prepare_sync=_compose_post_prepare_hooks(validate_dunders, sync_validate),
+                post_prepare_async=_compose_post_prepare_async_hooks(validate_dunders, async_validate))
         from .module_builder import (
             build_globals_module_definition,
             get_module_definition,
             merge_module_definitions,
         )
 
-        for module_name, module in self._modules.items():
+        modules = {}
+        for module_name, module in snapshot.modules.items():
             if isinstance(module, dict):
-                module_definition = module
+                module_definition = deepcopy(module)
             else:
                 module_definition = get_module_definition(module)
             modules[module_name] = module_definition
-
-        if self._globals:
-            globals_def = build_globals_module_definition(self._globals)
+        if snapshot.globals:
+            globals_def = build_globals_module_definition(snapshot.globals)
             if "main" in modules:
                 modules["main"] = merge_module_definitions(modules["main"], globals_def)
             else:
                 modules["main"] = globals_def
 
         pre_transformation = direct_transformer_to_pretransformation(
-            self._get_codebuf(),
-            meta,
-            self._celltypes,
+            snapshot.codebuf,
+            deepcopy(snapshot.meta),
+            deepcopy(snapshot.celltypes),
             modules,
             arguments,
-            env,
-            language=self.language,
+            deepcopy(snapshot.environment),
+            language=snapshot.language,
+            optional_pins=snapshot.optional_pins,
         )
         return cast(
             Transformation[R],
             transformation_from_pretransformation(
                 pre_transformation,
                 upstream_dependencies=deps,
-                meta=meta,
-                scratch=self.scratch,
+                meta=deepcopy(snapshot.meta),
+                scratch=snapshot.scratch,
                 tf_dunder={},
             ),
         )
+
+    def __call__(self, *args, **kwargs) -> Transformation[R]:
+        """Build a delayed Transformation from the current transformer state."""
+        return self._build_from_snapshot(self._snapshot_for_call(), *args, **kwargs)
+
+    def transformation(self):
+        return self()
+
+    get_transformation = transformation
+
+    @property
+    def result(self):
+        if self._workflow_backend is None:
+            raise AttributeError("result is only available for bound workflow transformers")
+        return self._workflow_backend.result
+
+    @property
+    def state(self) -> str:
+        """Return the node state of a bound workflow transformer.
+
+        The six-state vocabulary of the node itself: ``unwired``, ``blocked``,
+        ``waiting``, ``computing``, ``complete``, ``failed``.  With
+        :attr:`block_reason` this is the whole of a node's lifecycle report;
+        the display string ``status`` used to return is gone, because it
+        collapsed ``waiting`` and ``computing`` into one word.  For a summary,
+        ``repr`` of the handle carries the state.
+        """
+
+        if self._workflow_backend is None:
+            raise AttributeError(
+                "state is only available for bound workflow transformers"
+            )
+        return self._workflow_backend.state
+
+    @property
+    def block_reason(self) -> list[str] | None:
+        """Return sorted input pins responsible for the current pending state.
+
+        Applies to ``unwired``, ``blocked``, and ``waiting``; includes ``code``
+        when applicable. Mixed inputs use precedence ``unwired``, then
+        ``blocked``, then ``waiting``; only pins in that category are listed.
+        Returns None for other states.
+        """
+
+        if self._workflow_backend is None:
+            raise AttributeError(
+                "block_reason is only available for bound workflow transformers"
+            )
+        return self._workflow_backend.block_reason
+
+    @property
+    def exception(self):
+        """Return the exception associated with a failed workflow transformer."""
+
+        if self._workflow_backend is None:
+            raise AttributeError(
+                "exception is only available for bound workflow transformers"
+            )
+        return self._workflow_backend.exception
+
+    def compute(self, timeout=None):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.compute(timeout=timeout)
+        return self().compute()
+
+    async def computation(self, timeout=None):
+        if self._workflow_backend is not None:
+            return await self._workflow_backend.computation(timeout=timeout)
+        import asyncio
+        return await asyncio.wait_for(self().computation(), timeout)
+
+    def run(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.run()
+        return self().run()
+
+    def task(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.task()
+        return self().task()
+
+    def prune(self):
+        if self._workflow_backend is None:
+            raise AttributeError("prune is only available for bound workflow transformers")
+        return self._workflow_backend.prune()
+
+    def clear_exception(self):
+        if self._workflow_backend is None:
+            raise AttributeError(
+                "clear_exception is only available for bound workflow transformers"
+            )
+        return self._workflow_backend.clear_exception()
 
     @property
     def meta(self):
         """Transformation metadata."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.meta
         return self._meta
 
     @meta.setter
     def meta(self, meta: dict):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.meta = meta
+            return
         self._meta.update(meta)
         for k in list(self._meta.keys()):
             if self._meta[k] is None and k != "local":
@@ -241,22 +545,32 @@ class TransformerCore(Generic[P, R]):
     def scratch(self) -> bool:
         """If True, the transformation result buffer will not be saved."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.scratch
         return self._scratch
 
     @scratch.setter
     def scratch(self, value: bool):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.scratch = value
+            return
         self._scratch = value
 
     @property
     def allow_input_fingertip(self) -> bool:
         """If True, inputs may be fingertipped when resolving their buffers."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.allow_input_fingertip
         return bool(self._meta.get("allow_input_fingertip", False))
 
     @allow_input_fingertip.setter
     def allow_input_fingertip(self, value: bool):
         if not isinstance(value, bool):
             raise TypeError(type(value))
+        if self._workflow_backend is not None:
+            self._workflow_backend.allow_input_fingertip = value
+            return
         if value:
             self.meta = {"allow_input_fingertip": True}
         else:
@@ -266,10 +580,15 @@ class TransformerCore(Generic[P, R]):
     def direct_print(self):
         """Print stdout/stderr directly instead of only storing logs."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.direct_print
         return self._meta.get("__direct_print__", False)
 
     @direct_print.setter
     def direct_print(self, value):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.direct_print = value
+            return
         if not isinstance(value, bool) and value is not None:
             raise TypeError(type(value))
         self.meta = {"__direct_print__": value}
@@ -278,23 +597,175 @@ class TransformerCore(Generic[P, R]):
     def driver(self) -> bool:
         """Marks the transformer as a driver script."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.driver
         return self._meta.get("driver", False)
 
     @driver.setter
     def driver(self, value):
         if not isinstance(value, bool) and value is not None:
             raise TypeError(type(value))
+        if self._workflow_backend is not None:
+            self._workflow_backend.driver = value
+            return
         self.meta = {"driver": value}
 
     @property
     def local(self) -> bool | None:
         """Local execution preference."""
 
+        if self._workflow_backend is not None:
+            return self._workflow_backend.local
         return self.meta.get("local")
 
     @local.setter
     def local(self, value: bool | None):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.local = value
+            return
         self.meta["local"] = value
+
+    def __repr__(self):
+        """A REPL summary, including node state for a bound transformer.
+
+        ``status`` used to be the thing you typed in Jupyter to see how a
+        transformer was doing; it is gone, and the six-state vocabulary of
+        :attr:`state` replaced it.  A bare ``ctx.tf`` should therefore say so
+        rather than printing an object address.  Never raises: a stale or
+        standalone handle omits the fields it cannot read.
+        """
+
+        cls = type(self).__name__
+        parts = []
+        backend = self._workflow_backend
+        try:
+            if backend is not None:
+                parts.append(repr(".".join(backend.node_path)))
+            else:
+                name = getattr(self.code, "__name__", None)
+                if name:
+                    parts.append(repr(name))
+        except Exception:
+            pass
+        try:
+            parts.append(f"language={self.language!r}")
+        except Exception:
+            pass
+        try:
+            if backend is not None:
+                parts.append(f"state={backend.state!r}")
+                reason = backend.block_reason
+                if reason is not None:
+                    parts.append(f"block_reason={reason!r}")
+        except Exception:
+            pass
+        return f"{cls}({', '.join(parts)})"
+
+    def _workflow_endpoint(self):
+        backend = self._workflow_backend
+        return backend._workflow_endpoint() if backend is not None else None
+
+    def _workflow_capture_source(self):
+        backend = self._workflow_backend
+        if backend is None:
+            return self
+        return backend.capture_source()
+
+    # Input pins are reached through `.pins` (or its `.args` alias) only.  There is
+    # deliberately no attribute or item pin sugar and no `__getattr__` fallback:
+    # every Transformer attribute name is configuration API, so a pin can never be
+    # shadowed by a class name such as `scratch`, `local`, `code` or `result`, and a
+    # bound-only property keeps its own error instead of decaying into a pin read.
+
+    def __setattr__(self, name, value):
+        if name.startswith("_") or _class_attribute(type(self), name) is not None:
+            object.__setattr__(self, name, value)
+            return
+        raise AttributeError(_no_such_attribute(self, name))
+
+    def __delattr__(self, name):
+        if name.startswith("_") or _class_attribute(type(self), name) is not None:
+            object.__delattr__(self, name)
+            return
+        raise AttributeError(_no_such_attribute(self, name))
+
+    def _replace_checksum_field(self, old, new) -> None:
+        from seamless import Checksum
+
+        old_checksum = old if isinstance(old, Checksum) else None
+        new_checksum = new if isinstance(new, Checksum) else None
+        if new_checksum is not None:
+            new_checksum.incref_refholder()
+        if old_checksum is not None:
+            old_checksum.decref_refholder()
+
+    def _replace_code_ref(self, codebuf) -> None:
+        new = None
+        # A normal source Buffer is owned directly by the builder.  Only an
+        # explicitly checksum-backed code field needs a lifecycle claim.
+        if isinstance(codebuf, Checksum):
+            new = codebuf
+        old = getattr(self, "_code_checksum_ref", None)
+        if new is not None and not getattr(self, "_refholds_released", False):
+            new.incref_refholder()
+        self._code_checksum_ref = new
+        if old is not None:
+            old.decref_refholder()
+
+    def _refheld_checksums(self):
+        from seamless import Checksum
+
+        if getattr(self, "_refholds_released", False):
+            return ()
+        claims = []
+        for name, (value, _input_celltype) in getattr(self, "_args", {}).items():
+            if isinstance(value, Checksum):
+                claims.append((value, f"pin:{name}"))
+        code_checksum = getattr(self, "_code_checksum_ref", None)
+        if isinstance(code_checksum, Checksum):
+            claims.append((code_checksum, "code"))
+        for name, value in getattr(self, "_modules", {}).items():
+            if isinstance(value, Checksum):
+                claims.append((value, f"module:{name}"))
+        return claims
+
+    def _release_refholds(self) -> None:
+        if getattr(self, "_refholds_released", False):
+            return
+        object.__setattr__(self, "_refholds_released", True)
+        from seamless import Checksum
+        for value, _input_celltype in list(getattr(self, "_args", {}).values()):
+            if isinstance(value, Checksum):
+                value.decref_refholder()
+        for value in list(getattr(self, "_modules", {}).values()):
+            if isinstance(value, Checksum):
+                value.decref_refholder()
+        code_checksum = getattr(self, "_code_checksum_ref", None)
+        if isinstance(code_checksum, Checksum):
+            code_checksum.decref_refholder()
+        self._code_checksum_ref = None
+
+    def __del__(self):
+        try:
+            from seamless.reference_lifecycle import safe_release_refholder
+
+            safe_release_refholder(self)
+        except Exception:
+            pass
+
+
+def _class_attribute(cls, name):
+    for parent in cls.__mro__:
+        if name in parent.__dict__:
+            return parent.__dict__[name]
+    return None
+
+
+def _no_such_attribute(obj, name: str) -> str:
+    return (
+        f"'{type(obj).__name__}' object has no attribute '{name}'; "
+        f"transformer input pins are reached as .pins['{name}']"
+    )
 
 
 class PythonMixin(Generic[P, R]):
@@ -319,43 +790,78 @@ class PythonMixin(Generic[P, R]):
         if callable(code):
             update_wrapper(self, code)
 
-    def _set_code(self, code: Callable[P, R] | str):
+    def _set_code(self, code: Callable[P, R] | str | Checksum):
         from .getsource import getsource
 
         signature = None
         if callable(code):
             assert isinstance(code, FunctionType)
+            self._workflow_callable = code
             signature = inspect.signature(code)
             code = getsource(code)
             codebuf = Buffer(code, "python")
             self._codebuf = codebuf
             self._celltypes = {k: "mixed" for k in signature.parameters}
             self._celltypes["result"] = "mixed"
+            self._optional_pins = {
+                name
+                for name, parameter in signature.parameters.items()
+                if parameter.default is not inspect.Parameter.empty
+            }
+        elif isinstance(code, Checksum):
+            # A checksum-backed code field is an explicit lifecycle role.  Keep
+            # the checksum as the builder's source so cloning/binding can adopt
+            # it independently; snapshot construction resolves it only when a
+            # transformation payload is assembled.
+            self._workflow_callable = None
+            self._codebuf = code
+            self._replace_code_ref(self._codebuf)
+            self._signature = None
+            return
         else:
+            self._workflow_callable = None
             assert isinstance(code, str)
             self._codebuf = Buffer(code, "text")
+        self._replace_code_ref(self._codebuf)
         self._signature = signature
 
     def _get_signature(self):
+        if self._workflow_backend is not None:
+            cfg = self._workflow_backend.cfg
+            if callable(cfg.callable):
+                return inspect.signature(cfg.callable)
+            return None
         return self._signature
 
     def _get_codebuf(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.code
         return self._codebuf
 
     @property
     def code(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.code
         return self._codebuf
 
     @code.setter
-    def code(self, code: Callable[P, R] | str):
+    def code(self, code: Callable[P, R] | str | Checksum):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.code = code
+            return
         return self._set_code(code)
 
     @property
     def language(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.language
         return self._language
 
     @language.setter
     def language(self, lang):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.language = lang
+            return
         if lang is None:
             lang = "python"
         self._language = lang
@@ -379,7 +885,8 @@ class DirectTransformer(Transformer[P, R]):
 class CelltypesWrapper:
     """Wrapper around an imperative transformer's celltypes."""
 
-    def __init__(self, celltypes, args, fixed):
+    def __init__(self, owner, celltypes, args, fixed):
+        self._owner = owner
         self._celltypes = celltypes
         self._args = args
         self._fixed = fixed
@@ -401,9 +908,6 @@ class CelltypesWrapper:
         if key not in self._celltypes:
             if self._fixed:
                 raise AttributeError(key)
-            self._celltypes[key] = value
-            if "result" not in self._celltypes:
-                self._celltypes["result"] = "mixed"
 
         if isinstance(value, type):
             value = value.__name__
@@ -416,10 +920,8 @@ class CelltypesWrapper:
             all_celltypes = celltypes + ["deepcell", "deepfolder", "folder", "module"]
         if value not in all_celltypes:
             raise TypeError(value, all_celltypes)
-        old_arg = self._args.get(key)
-        if old_arg is not None:
-            pass
         self._celltypes[key] = value
+        self._celltypes.setdefault("result", "mixed")
 
     def __delattr__(self, attr: str) -> None:
         if attr.startswith("_"):
@@ -430,11 +932,13 @@ class CelltypesWrapper:
         if self._fixed or key not in self._celltypes:
             raise AttributeError(key)
         del self._celltypes[key]
-        if key in self._args:
-            del self._args[key]
+        entry = self._args.pop(key, None)
+        if entry is not None:
+            self._owner._replace_checksum_field(entry[0], None)
+        self._owner._optional_pins.discard(key)
 
     def __dir__(self):
-        return sorted(self._celltypes.keys())
+        return sorted(set(super().__dir__()) | set(self._celltypes))
 
     def __str__(self):
         return str(self._celltypes)
@@ -444,61 +948,64 @@ class CelltypesWrapper:
 
 
 class ArgsWrapper:
-    """Wrapper around an imperative transformer's arguments."""
+    """Fresh whole-pin handles over Transformer-owned input references."""
 
-    def __init__(self, args, celltypes, fixed):
-        self._args = args
-        self._celltypes = celltypes
-        self._fixed = fixed
+    def __init__(self, owner, args, celltypes, fixed):
+        self._owner, self._args = owner, args
+        self._celltypes, self._fixed = celltypes, fixed
 
     def __getattr__(self, attr):
-        return self._args.get(attr)
+        return self[attr]
 
     def __getitem__(self, key):
-        return self._args.get(key)
+        if key == "result" or key not in self._celltypes:
+            raise AttributeError(key)
+        from .pin_class import Pin
+        return Pin(self._owner, key)
 
     def __setattr__(self, attr, value):
         if attr.startswith("_"):
             return super().__setattr__(attr, value)
-        return self.__setitem__(attr, value)
+        self[attr] = value
 
     def __setitem__(self, key, value):
-        if key == "result":
+        if key == "result" or (key not in self._celltypes and self._fixed):
             raise AttributeError(key)
-        if key not in self._celltypes:
-            if self._fixed:
-                raise AttributeError(key)
+        created = key not in self._celltypes
+        if created:
             self._celltypes[key] = "mixed"
-            if "result" not in self._celltypes:
-                self._celltypes["result"] = "mixed"
-        self._args[key] = value
+            self._celltypes.setdefault("result", "mixed")
+        try:
+            self[key]._workflow_backend.write_value(value, detach=True)
+        except Exception:
+            if created:
+                self._celltypes.pop(key, None)
+            raise
 
-    def __delattr__(self, attr: str) -> None:
+    def __delattr__(self, attr):
         if attr.startswith("_"):
             return super().__delattr__(attr)
-        return self.__delitem__(attr)
+        del self[attr]
 
-    def __delitem__(self, key) -> None:
-        if self._fixed or key not in self._celltypes:
+    def __delitem__(self, key):
+        if self._fixed or key == "result" or key not in self._celltypes:
             raise AttributeError(key)
+        self[key].checksum = None
         del self._celltypes[key]
-        if key in self._args:
-            del self._args[key]
+        self._owner._optional_pins.discard(key)
 
     def __dir__(self):
-        return sorted(self._args.keys())
-
-    def __str__(self):
-        return str(self._args)
+        return sorted(set(super().__dir__()) | (set(self._celltypes) - {"result"}))
 
     def __repr__(self):
-        return str(self)
+        return repr({name: self[name] for name in self._celltypes if name != "result"})
 
 
 class ModulesWrapper:
     """Wrapper around an imperative transformer's imported modules."""
 
-    def __init__(self, modules):
+    def __init__(self, owner, modules):
+        self._owner = owner
         self._modules = modules
 
     def __getattr__(self, attr):
@@ -513,8 +1020,10 @@ class ModulesWrapper:
         return self.__setitem__(attr, value)
 
     def __setitem__(self, key, value):
-        if not isinstance(value, (ModuleType, dict)):
+        if not isinstance(value, (ModuleType, dict, Checksum)):
             raise TypeError(type(value))
+        old = self._modules.get(key)
+        self._owner._replace_checksum_field(old, value)
         self._modules[key] = value
 
     def __delattr__(self, attr: str) -> None:
@@ -523,10 +1032,11 @@ class ModulesWrapper:
         return self.__delitem__(attr)
 
     def __delitem__(self, key) -> None:
-        self._modules.pop(key, None)
+        old = self._modules.pop(key, None)
+        self._owner._replace_checksum_field(old, None)
 
     def __dir__(self):
-        return sorted(self._modules.keys())
+        return sorted(set(super().__dir__()) | set(self._modules))
 
     def __str__(self):
         return str(self._modules)
@@ -564,7 +1074,7 @@ class GlobalsWrapper:
         self._globals.pop(key, None)
 
     def __dir__(self):
-        return sorted(self._globals.keys())
+        return sorted(set(super().__dir__()) | set(self._globals))
 
     def __str__(self):
         return str(self._globals)

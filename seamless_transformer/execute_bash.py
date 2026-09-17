@@ -64,6 +64,8 @@ def write_bash_job(
         v = PINS[pin]
         if isinstance(v, Buffer):
             v = v.content
+        elif isinstance(v, Checksum):
+            v = v.hex()
         if pin.startswith(META_FILE_PREFIX):
             actual_name = pin[len(META_FILE_PREFIX):]
             _write_file(actual_name, v if isinstance(v, bytes) else v.encode(), "bw")
@@ -283,7 +285,8 @@ Error: Result file/folder RESULT does not exist
             )
             raise SeamlessStreamTransformationError(msg)
 
-        if os.path.isdir(resultfile):
+        result_is_dir = os.path.isdir(resultfile)
+        if result_is_dir:
             result = {}
             for dirpath, _, filenames in os.walk(resultfile):
                 for filename in filenames:

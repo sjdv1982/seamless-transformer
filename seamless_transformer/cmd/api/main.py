@@ -22,7 +22,6 @@ import seamless
 import seamless.config
 
 from seamless import Checksum, Buffer
-from seamless.caching.buffer_cache import get_buffer_cache
 from seamless.util import unchecksum
 from seamless_transformer.cmd.message import (
     set_header,
@@ -36,26 +35,15 @@ from seamless_transformer.cmd.file_mapping import get_file_mapping
 from seamless_transformer.cmd.file_load import files_to_checksums
 from seamless_transformer.cmd.bash_transformation import (
     prepare_bash_transformation,
-    run_transformation,
 )
 from seamless_transformer.cmd import interface
 from seamless_transformer.cmd.exceptions import SeamlessSystemExit
 from seamless_transformer.cmd.bytes2human import human2bytes
-from seamless_transformer.cmd.get_results import (
-    get_results,
-    get_result_buffer,
-    maintain_futures,
-)
 from seamless_transformer.remote_job import REMOTE_JOB_META_KEY, RemoteJobWritten
+from seamless_transformer.transformation_cache import get_transformation_cache
 
 from seamless_transformer.environment import Environment
 from seamless.checksum.json_ import json_dumps_bytes
-from seamless_transformer.transformation_cache import get_transformation_cache, run_sync
-from seamless_transformer.transformation_utils import (
-    extract_job_dunder,
-    extract_tf_dunder,
-    tf_get_buffer,
-)
 
 try:
     from seamless_config import get_seamless_cache
@@ -901,7 +889,8 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         include_dask = False
     try:
         set_workdir(os.getcwd())
-        if not set_remote_clients_from_env(include_dask=include_dask):
+        has_remote_clients = set_remote_clients_from_env(include_dask=include_dask)
+        if not has_remote_clients:
             load_config_files()
             if (args.dry_run and not remote_job_write) or args.qsubmit:
                 import seamless_remote.database_remote
@@ -1066,6 +1055,7 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
 
     if probe_mode:
         from seamless_transformer.probe_capture import refresh_required_buckets_sync
+        from seamless_transformer.transformation_utils import extract_tf_dunder
 
         tf_dunder = extract_tf_dunder(transformation_dict)
         try:
@@ -1101,8 +1091,28 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
             buf = buf.content
         handle.write(buf)
 
+    def hold_buffer_until_close(buffer):
+        """Keep an uploaded CLI buffer alive until the normal close audit."""
+
+        released = False
+        buffer.incref()
+
+        def release():
+            nonlocal released
+            if not released:
+                released = True
+                buffer.decref()
+
+        seamless.register_close_hook(release)
+
     if args.dry_run:
         if args.write_job is not None:
+            from seamless.caching.buffer_cache import get_buffer_cache
+            from seamless_transformer.transformation_utils import (
+                extract_job_dunder,
+                tf_get_buffer,
+            )
+
             os.mkdir(args.write_job)
             transformation_buffer = tf_get_buffer(transformation_dict)
             dunder = extract_job_dunder(transformation_dict)
@@ -1136,11 +1146,15 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
                         file_write(_f, env_buffer)
 
         if args.write_remote_job:
+            from seamless_transformer.transformation_cache import run_sync
+            from seamless_transformer.transformation_utils import extract_tf_dunder
+
             print("Transformation submitted to remote server")
+            transformation_buffer = None
             if args.upload:
                 transformation_buffer = Checksum(transformation_checksum).resolve()
                 assert isinstance(transformation_buffer, Buffer)
-                transformation_buffer.incref()
+                hold_buffer_until_close(transformation_buffer)
             tf_dunder = extract_tf_dunder(transformation_dict)
             try:
                 run_sync(
@@ -1160,11 +1174,13 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
             )
 
         if args.upload or args.write_job:
-            print(transformation_checksum)
             if args.upload:
                 transformation_buffer = Checksum(transformation_checksum).resolve()
                 assert isinstance(transformation_buffer, Buffer)
-                transformation_buffer.incref()
+                hold_buffer_until_close(transformation_buffer)
+                print(transformation_checksum)
+            else:
+                print(transformation_checksum)
 
         return 0
 
@@ -1194,7 +1210,7 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         queue_command = {
             "queue_command": "SUBMIT",
             "original_command": original_command,
-            "transformation_checksum": str(transformation_checksum),
+            "transformation_checksum": transformation_checksum,
             "transformation_dict": transformation_dict,
             "result_targets": result_targets,
             "params": params,
@@ -1230,6 +1246,8 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         return 0
 
     delete_futures_event = threading.Event()
+    maintain_futures_thread = None
+    from seamless_transformer.cmd.get_results import maintain_futures
 
     maintain_fut = functools.partial(
         maintain_futures,
@@ -1253,6 +1271,8 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         if result_targets:
             result_fingertip = True
         with _cancel_current_on_termination(transformation_checksum):
+            from seamless_transformer.cmd.bash_transformation import run_transformation
+
             result_checksum = run_transformation(
                 transformation_dict,
                 undo=args.undo,
@@ -1267,6 +1287,8 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         return 1
     finally:
         delete_futures_event.set()
+        if maintain_futures_thread is not None:
+            maintain_futures_thread.join()
     ################################################################
 
     if not args.undo:
@@ -1281,6 +1303,8 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
             return 0
 
     else:
+        from seamless_transformer.cmd.get_results import get_result_buffer, get_results
+
         result_buffer = get_result_buffer(
             result_checksum,
             do_fingertip=args.fingertip,
