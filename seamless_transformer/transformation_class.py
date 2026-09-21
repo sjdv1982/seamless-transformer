@@ -222,6 +222,61 @@ def _ensure_loop_running(loop: asyncio.AbstractEventLoop) -> None:
     thread.start()
 
 
+_DRIVER_LOOP: asyncio.AbstractEventLoop | None = None
+_DRIVER_LOOP_LOCK = threading.Lock()
+
+
+def _sync_task_loop() -> asyncio.AbstractEventLoop:
+    """Return the loop on which a sync caller schedules in-process computations.
+
+    A thread without a running loop uses its own loop, run in a background
+    thread. Transformer bodies run in executor threads, so nested sync calls
+    each get a separate loop and default executor: blocked parents never
+    starve their children of executor threads.
+
+    A thread whose own loop is running (Jupyter, or sync code inside a
+    coroutine) cannot block on a task of that loop. Its computations go to a
+    shared background driver loop instead. Only such top-level callers use it,
+    which is what the plain-script main-thread loop is used for as well.
+    """
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return get_event_loop()
+    if loop_is_nested(running_loop):
+        # nest_asyncio is running. Deadlocks are now the user's responsibility, not ours
+        return running_loop
+    global _DRIVER_LOOP
+    with _DRIVER_LOOP_LOCK:
+        if _DRIVER_LOOP is None or _DRIVER_LOOP.is_closed():
+            _DRIVER_LOOP = asyncio.new_event_loop()
+        _ensure_loop_running(_DRIVER_LOOP)
+        return _DRIVER_LOOP
+
+
+def _thread_loop_is_running() -> bool:
+    """Whether the calling thread runs an event loop it cannot block on."""
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return not loop_is_nested(running_loop)
+
+
+async def _await_task_any_loop(task: asyncio.Task):
+    """Await a task that may belong to a loop running in another thread."""
+    task_loop = task.get_loop()
+    if task_loop is not asyncio.get_running_loop() and task_loop.is_running():
+
+        async def _await_task():
+            return await task
+
+        return await asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(_await_task(), task_loop)
+        )
+    return await task
+
+
 def _dask_available() -> bool:
     if is_worker():
         return False
@@ -521,7 +576,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         task = self._computation_task
         if task is not None:
             try:
-                await task
+                await _await_task_any_loop(task)
             except asyncio.CancelledError:
                 transitioned = True
             except Exception:
@@ -768,7 +823,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     def _run_dependencies(self) -> None:
         try:
-            loop = get_event_loop()
+            loop = _sync_task_loop()
             self._verify_sync_construct(loop)
             self.start(loop=loop, _internal=True)
             for depname, dep in self._upstream_dependencies.items():
@@ -914,8 +969,14 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             return self._result_checksum
         if self._computation_task is None and self._computation_future is None:
             if _dask_available() and not self._prefer_local_execution():
+                if _thread_loop_is_running():
+                    # The sync Dask path runs private event loops on the calling
+                    # thread, which cannot happen while that thread's loop runs.
+                    return _COMPUTE_EXECUTOR.submit(
+                        self._compute_with_dask, False
+                    ).result()
                 return self._compute_with_dask(require_value=False)
-            task_loop = get_event_loop()
+            task_loop = _sync_task_loop()
             self.start(loop=task_loop, _internal=True)
 
         if self._computation_future is not None:
@@ -1076,7 +1137,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             return None
         if _dask_available() and not self._prefer_local_execution():
             if self._computation_task is not None:
-                await self._computation_task
+                await _await_task_any_loop(self._computation_task)
                 self._computation_task = None
                 if require_value:
                     await self._ensure_result_value()
@@ -1135,7 +1196,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             _start_dependency(dep)
         if _dask_available() and not self._prefer_local_execution():
             if self._computation_task is None:
-                loop = loop or get_event_loop()
+                loop = loop or _sync_task_loop()
                 self._computation_task = loop.create_task(
                     self._compute_with_dask_async(require_value=False)
                 )
@@ -1187,7 +1248,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                 self._compute_in_thread, False, driver_context
             )
             return self
-        loop = loop or get_event_loop()
+        loop = loop or _sync_task_loop()
         _ensure_loop_running(loop)
         self._computation_task = loop.create_task(
             self._computation(require_value=False)
