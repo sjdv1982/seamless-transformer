@@ -311,8 +311,7 @@ int transform(unsigned int N, const SamplesStruct *samples, double *result) {
     assert tf(samples=samples) == 433.0
 
 
-def test_multi_output_mixed_and_deepcell():
-    schema = """\
+MULTI_OUTPUT_SCHEMA = """\
 inputs:
   - {name: a, dtype: int32}
   - {name: b, dtype: int32}
@@ -320,7 +319,7 @@ outputs:
   - {name: sum, dtype: int32}
   - {name: product, dtype: int32}
 """
-    code = """\
+MULTI_OUTPUT_CODE = """\
 #include <stdint.h>
 int transform(int32_t a, int32_t b, int32_t *sum, int32_t *product) {
     *sum = a + b;
@@ -328,25 +327,37 @@ int transform(int32_t a, int32_t b, int32_t *sum, int32_t *product) {
     return 0;
 }
 """
+
+
+def test_multi_output_mixed():
     tf = DirectCompiledTransformer("c")
-    tf.schema = schema
-    tf.code = code
+    tf.schema = MULTI_OUTPUT_SCHEMA
+    tf.code = MULTI_OUTPUT_CODE
     assert tf(a=2, b=3) == {"sum": 5, "product": 6}
 
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="contract ahead of code: deep result values are indexes of Checksum objects",
+)
+def test_multi_output_deepcell_is_an_unresolved_index():
     delayed = CompiledTransformer("c")
-    delayed.schema = schema
+    delayed.schema = MULTI_OUTPUT_SCHEMA
     delayed.celltypes.result = "deepcell"
-    delayed.code = code
+    delayed.code = MULTI_OUTPUT_CODE
     transformation = delayed(a=2, b=3)
     packed = transformation.run()
-    assert set(packed) == {"sum", "product"}
-    assert all(Checksum(value) for value in packed.values())
+    expected_index = {
+        "sum": Buffer(5, "mixed").get_checksum(),
+        "product": Buffer(6, "mixed").get_checksum(),
+    }
+    assert {name: Checksum(value) for name, value in packed.items()} == expected_index
 
     direct = DirectCompiledTransformer("c")
-    direct.schema = schema
+    direct.schema = MULTI_OUTPUT_SCHEMA
     direct.celltypes.result = "deepcell"
-    direct.code = code
-    assert direct(a=2, b=3) == {"sum": 5, "product": 6}
+    direct.code = MULTI_OUTPUT_CODE
+    assert direct(a=2, b=3) == expected_index
 
 
 @pytest.mark.skipif(not shutil.which("gfortran"), reason="gfortran required")
@@ -411,6 +422,72 @@ def test_compiled_checksum_input_scalar():
     cs_b = _make_checksum(np.int32(5))
 
     assert tf(a=cs_a, b=cs_b) == 9
+
+
+@pytest.mark.parametrize("dtype, c_type, celltype", [("int32", "int32_t", "int"), ("float64", "double", "float")])
+@pytest.mark.parametrize("source", ["checksum", "transformation"])
+@pytest.mark.xfail(
+    strict=False,
+    reason="contract ahead of code: required compiled inputs do not yet reject null at the pin boundary",
+)
+def test_compiled_required_input_rejects_null_at_pin_boundary(
+    dtype, c_type, celltype, source
+):
+    """Known issues 3.4(1): null must not reach C argument marshalling.
+
+    Use deferred inputs so that concrete-value schema validation cannot mask
+    the required-pin check.  A generic dtype or CFFI error is insufficient:
+    the failure must identify the required pin and its declared celltype.
+    These contract assertions intentionally expose the current mixed-pin bug.
+    """
+    import re
+
+    from seamless.checksum.null import is_null
+
+    if source == "checksum":
+        value = _make_checksum(None, "plain")
+        assert is_null(value)
+    else:
+        @delayed_py
+        def make_null():
+            return None
+
+        make_null.local = True
+        make_null.celltypes.result = "plain"
+        value = make_null()
+        # Establish that the dependency really produced canonical null, rather
+        # than mistaking an upstream execution failure for input rejection.
+        value.compute()
+        assert value.exception is None
+        assert is_null(value.checksum)
+
+    tf = CompiledTransformer("c", local=True)
+    tf.schema = f"""\
+inputs:
+  - {{name: value, dtype: {dtype}}}
+outputs:
+  - {{name: result, dtype: {dtype}}}
+"""
+    tf.code = f"""\
+#include <stdint.h>
+int transform({c_type} value, {c_type} *result) {{
+    *result = value;
+    return 0;
+}}
+"""
+    message = rf"Required pin 'value'.*'{celltype}'.*cannot accept null"
+    try:
+        transformation = tf(value=value)
+    except TypeError as exc:
+        # Checksums may be rejected eagerly; dependencies can be checked once
+        # resolved.  Either way, demand the pin-level diagnostic.
+        assert re.search(message, str(exc)), str(exc)
+    else:
+        transformation.compute()
+        assert transformation.exception is not None
+        assert "TypeError" in transformation.exception
+        assert re.search(message, transformation.exception), transformation.exception
+        assert transformation.checksum is None
 
 
 def test_compiled_checksum_input_array():
