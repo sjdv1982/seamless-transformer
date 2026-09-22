@@ -31,10 +31,6 @@ def test_transformer_result_admits_only_the_producible_deep_celltypes():
             produce.celltypes.result = forbidden
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: transformer dispatch does not carry scratch",
-)
 def test_dask_dispatch_carries_the_requesters_scratch_decision(monkeypatch):
     from seamless_dask import transformer_client
 
@@ -86,10 +82,6 @@ def test_dask_dispatch_carries_the_requesters_scratch_decision(monkeypatch):
     assert observed == [True]
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: pin packing still accepts nested deep structures",
-)
 @pytest.mark.parametrize("celltype", ["deepcell", "folder"])
 def test_pin_packing_rejects_nested_deep_structures(celltype):
     with pytest.raises(ValueError, match="outer|nested"):
@@ -98,10 +90,6 @@ def test_pin_packing_rejects_nested_deep_structures(celltype):
         )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: pin unpacking still accepts nested deep structures",
-)
 @pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
 def test_pin_unpacking_rejects_nested_deep_structures(celltype):
     child = Buffer("child", "mixed" if celltype == "deepcell" else "bytes")

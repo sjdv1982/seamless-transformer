@@ -194,47 +194,39 @@ def is_deep_celltype(celltype: str | None) -> bool:
 
 
 def unpack_deep_structure(structure, celltype: str):
-    """Resolve a deep structure (dict/list of checksums) into concrete values."""
-
+    """Present a flat index to a pin, resolving only folder contents."""
     if not is_deep_celltype(celltype) or structure is None:
         return structure
+    from seamless.checksum.deep import validate_deep_structure
 
-    def _convert(value):
-        if isinstance(value, dict):
-            return {k: _convert(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [_convert(v) for v in value]
-        checksum = Checksum(value)
-        buffer = checksum.resolve()
-        assert isinstance(buffer, Buffer)
-        if celltype == "deepcell":
-            content = buffer.get_value("mixed")
-        else:
-            content = buffer.content
-        return content
-
-    return _convert(structure)
+    index = validate_deep_structure(structure)
+    if celltype != "folder":
+        return index
+    return {key: checksum.resolve().content for key, checksum in index.items()}
 
 
 def pack_deep_structure(structure, celltype: str):
-    """Convert a deep value into a dict/list of checksum hex strings."""
-
+    """Pack flat produced members into the deep index's wire form."""
     if not is_deep_celltype(celltype) or structure is None:
         return structure
+    from seamless.checksum.deep import validate_deep_structure
 
-    def _pack(value):
-        if isinstance(value, dict):
-            return {k: _pack(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [_pack(v) for v in value]
-        if isinstance(value, str) and len(value) == 64:
-            return value
-        buffer = Buffer(value, "mixed" if celltype == "deepcell" else None)
-        checksum = buffer.get_checksum()
-        buffer.tempref()
-        return checksum.hex()
-
-    return _pack(structure)
+    members = validate_deep_structure(structure, index=False)
+    result = {}
+    for key, value in members.items():
+        if isinstance(value, Checksum):
+            result[key] = value.hex()
+        elif (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(c in "0123456789abcdef" for c in value)
+        ):
+            result[key] = value
+        else:
+            buffer = Buffer(value, "mixed" if celltype == "deepcell" else None)
+            result[key] = buffer.get_checksum().hex()
+            buffer.tempref()
+    return result
 
 
 __all__ = [
