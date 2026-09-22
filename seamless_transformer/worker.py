@@ -2401,6 +2401,7 @@ async def dispatch_expression(
     *,
     validator=None,
     validator_language=None,
+    scratch=True,
 ):
     """Dispatch checksum-level Expressions through the configured backend."""
     from seamless.checksum.expression import evaluate_expression_async
@@ -2412,7 +2413,7 @@ async def dispatch_expression(
     except ImportError:
         client = None
     if client is None:
-        return await evaluate_expression_async(
+        result = await evaluate_expression_async(
             input_checksum,
             path,
             input_celltype,
@@ -2420,6 +2421,12 @@ async def dispatch_expression(
             validator=validator,
             validator_language=validator_language,
         )
+        if not scratch:
+            from seamless_remote import buffer_remote
+
+            buffer = await result.resolution()
+            await buffer_remote.write_buffer(result, buffer)
+        return result
     from types import SimpleNamespace
     from seamless.error_envelope import decode_error
 
@@ -2429,6 +2436,7 @@ async def dispatch_expression(
         celltype=celltype,
         validator=Checksum(validator) if validator is not None else None,
         validator_language=validator_language,
+        scratch=scratch,
     )
     input_future = client.get_fat_checksum_future(input_checksum)
     future = client.get_expression_future(expression, input_future)
