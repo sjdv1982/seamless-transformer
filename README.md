@@ -56,6 +56,29 @@ A **transformation** in Seamless is a deterministic computation: given the same 
 3. **Executing** the code — either Python (via `exec`) or bash (via subprocess with file-mapped pins).
 4. **Returning** the result as a checksum, which can be cached and reused.
 
+## Transformer construction
+
+There are three canonical construction paths:
+
+- `direct(function)` and `delayed(function)` create non-workflow Python Transformers;
+- assigning a function to a workflow Context (`ctx.tf = function`) creates a bound Python Transformer;
+- `Transformer(language="python", compiled=False, direct=False)` creates a code-less configurable builder for any scenario.
+
+`direct` and `delayed` are Python-only and have no `language` argument. The factory accepts `"python"` or `"bash"` when `compiled=False`; when `compiled=True`, it forwards the language to the compiled implementation. Set `direct=True` for immediate call semantics.
+
+```python
+from seamless_transformer import Transformer
+
+bash = Transformer("bash", direct=True)
+bash.code = "cat input > RESULT"
+
+c = Transformer("c", compiled=True)
+c.schema = "..."
+c.code = "..."
+```
+
+Python and Bash builder languages are fixed and read-only. The factory is also available as `seamless.transformer.Transformer`; `seamless.workflow` exports `Transformer`, `Context`, and `Cell` together.
+
 ## Transformer pins
 
 `tf.pins.x` (also `tf.args.x`) returns a fresh `Pin` handle in standalone and

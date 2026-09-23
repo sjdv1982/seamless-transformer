@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 import seamless_transformer.compiled_transformer as compiled_module
-from seamless_transformer import CompiledObject, CompiledTransformer
+from seamless_transformer import CompiledObject, Transformer
 from seamless_transformer.transformation_class import Transformation
 
 
@@ -52,7 +52,7 @@ outputs:
 
 
 def test_compiled_transformer_api(tmp_path):
-    tf = CompiledTransformer("c")
+    tf = Transformer("c", compiled=True)
     assert tf.language == "c"
     with pytest.raises(AttributeError):
         tf.language = "cpp"
@@ -73,7 +73,7 @@ def test_compiled_transformer_api(tmp_path):
 
 def test_unregistered_language_and_missing_signature(monkeypatch):
     with pytest.raises(KeyError):
-        CompiledTransformer("not-a-language")
+        Transformer("not-a-language", compiled=True)
 
     original_import = builtins.__import__
 
@@ -84,11 +84,11 @@ def test_unregistered_language_and_missing_signature(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(ImportError, match="seamless-signature is required"):
-        CompiledTransformer("c")
+        Transformer("c", compiled=True)
 
 
 def test_metavars_rebuild_and_schema_validation():
-    tf = CompiledTransformer("c")
+    tf = Transformer("c", compiled=True)
     tf.schema = WILDCARD_SCHEMA
     tf.metavars.maxK = 10
     assert tf.metavars.maxK == 10
@@ -98,7 +98,7 @@ def test_metavars_rebuild_and_schema_validation():
 
 
 def test_structured_dtype_schema_and_validation():
-    tf = CompiledTransformer("c")
+    tf = Transformer("c", compiled=True)
     tf.schema = STRUCT_SCHEMA
     tf.code = "int transform(ItemStruct item, ResultStruct *result) { return 0; }"
     assert "typedef struct" in tf.header
@@ -114,7 +114,7 @@ def test_structured_dtype_schema_and_validation():
 
 
 def test_multi_output_result_celltypes():
-    tf = CompiledTransformer("c")
+    tf = Transformer("c", compiled=True)
     tf.schema = MULTI_SCHEMA
     tf.celltypes.result = "mixed"
     tf.celltypes.result = "deepcell"
@@ -123,7 +123,7 @@ def test_multi_output_result_celltypes():
 
 
 def test_incomplete_transformer_and_objects():
-    tf = CompiledTransformer("c")
+    tf = Transformer("c", compiled=True)
     with pytest.raises(ValueError):
         tf(a=1)
 
@@ -151,7 +151,7 @@ def test_compiled_rejects_mismatched_supplied_header(monkeypatch):
         "compiled_transformer_to_pretransformation",
         tampered_pretransformation,
     )
-    tf = CompiledTransformer("c")
+    tf = Transformer("c", compiled=True)
     tf.schema = SCALAR_SCHEMA
     tf.code = "int transform(int a, int b, int *result) { return 0; }"
     result = tf(a=1, b=2)
@@ -173,7 +173,7 @@ def test_compiled_rejects_mismatched_supplied_compiled_flag(monkeypatch):
         "compiled_transformer_to_pretransformation",
         tampered_pretransformation,
     )
-    tf = CompiledTransformer("c")
+    tf = Transformer("c", compiled=True)
     tf.schema = SCALAR_SCHEMA
     tf.code = "int transform(int a, int b, int *result) { return 0; }"
     result = tf(a=1, b=2)

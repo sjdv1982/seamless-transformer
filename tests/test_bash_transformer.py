@@ -1,4 +1,4 @@
-from seamless.transformer import direct
+from seamless.transformer import Transformer
 
 
 def test_bash_transformer():
@@ -11,7 +11,8 @@ def test_bash_transformer():
         "cp testdata RESULT/input"
     )
 
-    tf = direct(bashcode, "bash")
+    tf = Transformer("bash", direct=True)
+    tf.code = bashcode
     tf.args.testdata = testdata
     tf.celltypes.lines = int
 

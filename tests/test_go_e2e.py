@@ -2,7 +2,7 @@ import shutil
 
 import pytest
 
-from seamless_transformer import DirectCompiledTransformer
+from seamless_transformer import Transformer
 
 pytestmark = pytest.mark.skipif(not shutil.which("go"), reason="go required")
 
@@ -38,14 +38,14 @@ func main() {}
 
 
 def test_go_scalar():
-    tf = DirectCompiledTransformer("go")
+    tf = Transformer("go", compiled=True, direct=True)
     tf.schema = ADD_SCHEMA
     tf.code = ADD_GO
     assert tf(a=13, b=16) == 29
 
 
 def test_go_scalar_larger_values():
-    tf = DirectCompiledTransformer("go")
+    tf = Transformer("go", compiled=True, direct=True)
     tf.schema = ADD_SCHEMA
     tf.code = ADD_GO
     assert tf(a=80, b=100) == 180

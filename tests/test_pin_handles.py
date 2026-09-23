@@ -135,9 +135,9 @@ def test_invalid_assignment_and_clear():
 
 
 def test_compiled_pins():
-    from seamless_transformer import CompiledTransformer
+    from seamless_transformer import Transformer
     from test_compiled_e2e import ADD_C, ADD_SCHEMA
-    tf = CompiledTransformer('c')
+    tf = Transformer('c', compiled=True)
     tf.schema = ADD_SCHEMA
     tf.code = ADD_C
     tf.local = True

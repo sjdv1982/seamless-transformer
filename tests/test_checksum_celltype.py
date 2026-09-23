@@ -1,6 +1,6 @@
 """Transformation pins and results of celltype checksum."""
 from seamless import Buffer, Checksum
-from seamless_transformer import delayed, direct
+from seamless_transformer import Transformer, delayed
 
 
 def test_checksum_pin_receives_a_checksum():
@@ -30,7 +30,8 @@ def test_checksum_result_serializes_to_the_bare_digest():
 
 
 def test_bash_checksum_pin_is_the_hex_digest():
-    tf = direct("cat pointer > RESULT", "bash")
+    tf = Transformer("bash", direct=True)
+    tf.code = "cat pointer > RESULT"
     tf.celltypes.pointer = "checksum"
     tf.celltypes.result = "text"
     pointer = Checksum("ef" * 32)

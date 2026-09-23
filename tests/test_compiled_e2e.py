@@ -6,8 +6,7 @@ import pytest
 from seamless import Buffer, Checksum
 from seamless_transformer import (
     CompiledObject,
-    CompiledTransformer,
-    DirectCompiledTransformer,
+    Transformer,
 )
 from seamless_transformer.transformation_class import Transformation
 from seamless_transformer import delayed as delayed_py
@@ -98,7 +97,7 @@ int transform(int32_t a, int32_t b, int32_t *result) {
 
 
 def test_c_scalar_python_and_numpy_inputs():
-    tf = DirectCompiledTransformer("c")
+    tf = Transformer("c", compiled=True, direct=True)
     tf.schema = ADD_SCHEMA
     tf.code = ADD_C
     assert tf(a=2, b=3) == 5
@@ -107,7 +106,7 @@ def test_c_scalar_python_and_numpy_inputs():
 
 @pytest.mark.skipif(not shutil.which("g++"), reason="g++ required")
 def test_cpp_scalar():
-    tf = DirectCompiledTransformer("cpp")
+    tf = Transformer("cpp", compiled=True, direct=True)
     tf.schema = ADD_SCHEMA
     tf.code = """\
 #include <stdint.h>
@@ -121,7 +120,7 @@ extern "C" int transform(int32_t a, int32_t b, int32_t *result) {
 
 @pytest.mark.skipif(not shutil.which("rustc"), reason="rustc required")
 def test_rust_scalar_archive_mode():
-    tf = DirectCompiledTransformer("rust")
+    tf = Transformer("rust", compiled=True, direct=True)
     tf.schema = ADD_SCHEMA
     tf.code = """\
 #[no_mangle]
@@ -136,7 +135,7 @@ pub unsafe extern "C" fn transform(a: i32, b: i32, result: *mut i32) -> i32 {
 
 
 def test_delayed_compiled_transformer():
-    tf = CompiledTransformer("c")
+    tf = Transformer("c", compiled=True)
     tf.schema = ADD_SCHEMA
     tf.code = ADD_C
     result = tf(a=2, b=9)
@@ -145,7 +144,9 @@ def test_delayed_compiled_transformer():
 
 
 def test_delayed_compiled_transformer_scratch_run():
-    tf = CompiledTransformer("c", scratch=True, local=True)
+    tf = Transformer("c", compiled=True)
+    tf.scratch = True
+    tf.local = True
     tf.schema = ADD_SCHEMA
     tf.code = ADD_C
     result = tf(a=2, b=9)
@@ -154,7 +155,7 @@ def test_delayed_compiled_transformer_scratch_run():
 
 
 def test_array_input_output_and_non_contiguous_normalization():
-    tf = DirectCompiledTransformer("c")
+    tf = Transformer("c", compiled=True, direct=True)
     tf.schema = """\
 inputs:
   - {name: arr, dtype: float64, shape: [N]}
@@ -174,7 +175,7 @@ int transform(unsigned int N, const double *arr, double factor, double *result) 
 
 
 def test_output_only_wildcard_slicing():
-    tf = DirectCompiledTransformer("c")
+    tf = Transformer("c", compiled=True, direct=True)
     tf.schema = """\
 inputs:
   - {name: arr, dtype: int32, shape: [N]}
@@ -200,7 +201,7 @@ int transform(unsigned int N, unsigned int maxK, const int32_t *arr, unsigned in
 
 
 def test_structured_scalar_input_output():
-    tf = DirectCompiledTransformer("c")
+    tf = Transformer("c", compiled=True, direct=True)
     tf.schema = """\
 inputs:
   - name: item
@@ -231,7 +232,7 @@ int transform(ItemStruct item, ResultStruct *result) {
 
 
 def test_structured_array_with_fixed_field_shape():
-    tf = DirectCompiledTransformer("c")
+    tf = Transformer("c", compiled=True, direct=True)
     tf.schema = """\
 inputs:
   - name: points
@@ -274,7 +275,7 @@ int transform(unsigned int N, const PointsStruct *points, ShiftedStruct *shifted
 
 
 def test_nested_structured_array_input():
-    tf = DirectCompiledTransformer("c")
+    tf = Transformer("c", compiled=True, direct=True)
     tf.schema = """\
 inputs:
   - name: samples
@@ -330,7 +331,7 @@ int transform(int32_t a, int32_t b, int32_t *sum, int32_t *product) {
 
 
 def test_multi_output_mixed():
-    tf = DirectCompiledTransformer("c")
+    tf = Transformer("c", compiled=True, direct=True)
     tf.schema = MULTI_OUTPUT_SCHEMA
     tf.code = MULTI_OUTPUT_CODE
     assert tf(a=2, b=3) == {"sum": 5, "product": 6}
@@ -341,7 +342,7 @@ def test_multi_output_mixed():
     reason="contract ahead of code: deep result values are indexes of Checksum objects",
 )
 def test_multi_output_deepcell_is_an_unresolved_index():
-    delayed = CompiledTransformer("c")
+    delayed = Transformer("c", compiled=True)
     delayed.schema = MULTI_OUTPUT_SCHEMA
     delayed.celltypes.result = "deepcell"
     delayed.code = MULTI_OUTPUT_CODE
@@ -353,7 +354,7 @@ def test_multi_output_deepcell_is_an_unresolved_index():
     }
     assert {name: Checksum(value) for name, value in packed.items()} == expected_index
 
-    direct = DirectCompiledTransformer("c")
+    direct = Transformer("c", compiled=True, direct=True)
     direct.schema = MULTI_OUTPUT_SCHEMA
     direct.celltypes.result = "deepcell"
     direct.code = MULTI_OUTPUT_CODE
@@ -362,7 +363,7 @@ def test_multi_output_deepcell_is_an_unresolved_index():
 
 @pytest.mark.skipif(not shutil.which("gfortran"), reason="gfortran required")
 def test_multi_object_c_fortran():
-    tf = DirectCompiledTransformer("c")
+    tf = Transformer("c", compiled=True, direct=True)
     tf.schema = ADD_SCHEMA
     tf.code = """\
 #include <stdint.h>
@@ -386,7 +387,7 @@ end subroutine
 
 
 def test_non_native_endian_array_rejected():
-    tf = DirectCompiledTransformer("c")
+    tf = Transformer("c", compiled=True, direct=True)
     tf.schema = """\
 inputs:
   - {name: arr, dtype: int32, shape: [N]}
@@ -414,7 +415,8 @@ def _make_checksum(value, celltype="mixed"):
 
 
 def test_compiled_checksum_input_scalar():
-    tf = DirectCompiledTransformer("c", local=True)
+    tf = Transformer("c", compiled=True, direct=True)
+    tf.local = True
     tf.schema = ADD_SCHEMA
     tf.code = ADD_C
 
@@ -461,7 +463,8 @@ def test_compiled_required_input_rejects_null_at_pin_boundary(
         assert value.exception is None
         assert is_null(value.checksum)
 
-    tf = CompiledTransformer("c", local=True)
+    tf = Transformer("c", compiled=True)
+    tf.local = True
     tf.schema = f"""\
 inputs:
   - {{name: value, dtype: {dtype}}}
@@ -491,7 +494,8 @@ int transform({c_type} value, {c_type} *result) {{
 
 
 def test_compiled_checksum_input_array():
-    tf = DirectCompiledTransformer("c", local=True)
+    tf = Transformer("c", compiled=True, direct=True)
+    tf.local = True
     tf.schema = """\
 inputs:
   - {name: arr, dtype: float64, shape: [N]}
@@ -518,7 +522,8 @@ def test_compiled_transformation_input_scalar():
 
     make_value.local = True
 
-    tf = DirectCompiledTransformer("c", local=True)
+    tf = Transformer("c", compiled=True, direct=True)
+    tf.local = True
     tf.schema = ADD_SCHEMA
     tf.code = ADD_C
 
@@ -536,7 +541,8 @@ def test_compiled_delayed_transformation_input():
 
     upstream = make_value(7)  # -> 14
 
-    tf = CompiledTransformer("c", local=True)
+    tf = Transformer("c", compiled=True)
+    tf.local = True
     tf.schema = ADD_SCHEMA
     tf.code = ADD_C
     t = tf(a=upstream, b=3)
@@ -550,7 +556,8 @@ def test_compiled_deferred_input_dtype_mismatch():
     # A checksum carrying a float64 array, where the schema demands int32.
     bad_arr = _make_checksum(np.arange(3, dtype=np.float64))
 
-    tf = CompiledTransformer("c", local=True)
+    tf = Transformer("c", compiled=True)
+    tf.local = True
     tf.schema = """\
 inputs:
   - {name: arr, dtype: int32, shape: [N]}
@@ -578,7 +585,8 @@ int transform(unsigned int N, const int32_t *arr, int32_t *result) {
 def test_compiled_concrete_input_dtype_mismatch_immediate():
     """Concrete (non-deferred) inputs must still fail eagerly."""
 
-    tf = DirectCompiledTransformer("c", local=True)
+    tf = Transformer("c", compiled=True, direct=True)
+    tf.local = True
     tf.schema = ADD_SCHEMA
     tf.code = ADD_C
     with pytest.raises(TypeError):
