@@ -91,6 +91,22 @@ def normalize_optional_pins_for_construction(
         normalized = canonicalize_checksum(checksum, celltype)
         if normalized != checksum:
             transformation_dict[pinname] = (celltype, subcelltype, normalized.hex())
+    if transformation_dict.get("__schema__") is not None:
+        # Distributed construction also enters here, after dependencies resolve.
+        # Resolve only schema metadata: input validation remains checksum-only.
+        import yaml
+        from seamless_signature import Signature
+        from .compiled_validation import (
+            CompiledPinCelltypeError, validate_declarations, validate_prepared,
+        )
+        if optional_pins:
+            raise CompiledPinCelltypeError("compiled inputs cannot be optional")
+        schema = Checksum(transformation_dict["__schema__"]).resolve("text")
+        signature = Signature.from_dict(yaml.safe_load(schema))
+        validate_declarations(signature, {p.name: transformation_dict[p.name][0]
+                                          for p in signature.inputs if p.name in transformation_dict})
+        validate_prepared(signature, transformation_dict)
+        return transformation_dict
     optional_pin_names = frozenset(optional_pins or ())
     null_checksum = json_null_checksum()
     null_checksum_hex = null_checksum.hex()

@@ -296,7 +296,12 @@ def build_transformation_namespace_sync(
             namespace[pinname_as] = value
             continue
 
-        value = buffer.get_value(celltype or "mixed")
+        if transformation.get("__compiled__") and pinname not in ("code", "objects"):
+            # Compiled inputs must be read by the pin-aware validator, so even
+            # malformed replay buffers receive its stable diagnostic.
+            value = buffer
+        else:
+            value = buffer.get_value(celltype or "mixed")
 
         if (celltype, subcelltype) == ("plain", "module"):
             modules_to_build[pinname] = value

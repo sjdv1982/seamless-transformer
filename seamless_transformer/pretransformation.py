@@ -31,6 +31,7 @@ class PreTransformation:
         *,
         code_manager: Optional[CodeManager] = None,
         optional_pins=None,
+        compiled_signature=None,
     ):
         if "__language__" not in pretransformation_dict:
             raise ValueError("pretransformation dict must include __language__")
@@ -38,6 +39,8 @@ class PreTransformation:
         self._code_manager = code_manager or get_code_manager()
         self._optional_pins = frozenset(optional_pins or ())
         self._prepared = False
+        self._compiled_wildcards = {}
+        self._compiled_signature = compiled_signature
         self._code_refs: list[tuple[Checksum, Checksum]] = []
         self._value_refs: list[tuple[Checksum, str]] = []
         self._refholds_released = False
@@ -183,7 +186,7 @@ class PreTransformation:
                     raise RuntimeError("Expression result is empty")
                 return result
             except Exception as exc:
-                msg = f"Dependency '{argname}' has an exception:\n{exc}"
+                msg = f"Dependency {argname!r} conversion from {value.input_celltype!r} to {value.celltype!r} has an exception:\n{exc}"
                 raise RuntimeError(msg) from exc
         if argname == "code":
             if self._pretransformation_dict.get("__language__") == "python":
@@ -242,11 +245,12 @@ class PreTransformation:
             checksum = value
         else:
             buffer_celltype = "plain" if value is None else celltype or "mixed"
-            buffer = (
-                value
-                if isinstance(value, Buffer)
-                else Buffer(value, buffer_celltype)
-            )
+            try:
+                buffer = value if isinstance(value, Buffer) else Buffer(value, buffer_celltype)
+            except Exception as exc:
+                if self._pretransformation_dict.get("__compiled__"):
+                    raise type(exc)(f"Compiled pin {role.removeprefix('input:')!r}: {exc}") from exc
+                raise
             checksum = buffer.get_checksum()
             if is_worker():
                 try:
@@ -261,9 +265,22 @@ class PreTransformation:
         if normalized != checksum:
             checksum, buffer = normalized, None
         pinname = role.removeprefix("input:")
-        validate_pin_null(checksum, celltype or "mixed", pinname,
-                          optional=pinname in self._optional_pins)
-        validate_deserializable_as(checksum, celltype or "mixed", buffer=buffer)
+        if self._pretransformation_dict.get("__compiled__") and pinname not in ("code", "objects"):
+            import yaml
+            from seamless_signature import Signature
+            from .compiled_validation import validate_pin
+            sig = self._compiled_signature
+            if sig is None:
+                schema = Checksum(self._pretransformation_dict["__schema__"]).resolve().get_value("text")
+                sig = Signature.from_dict(yaml.safe_load(schema))
+                self._compiled_signature = sig
+            parameter = next(p for p in sig.inputs if p.name == pinname)
+            validate_pin(parameter, celltype, checksum, buffer=buffer,
+                         wildcards=self._compiled_wildcards)
+        else:
+            validate_pin_null(checksum, celltype or "mixed", pinname,
+                              optional=pinname in self._optional_pins)
+            validate_deserializable_as(checksum, celltype or "mixed", buffer=buffer)
         if not is_worker():
             try:
                 from seamless.caching.buffer_cache import get_buffer_cache
@@ -309,7 +326,7 @@ class PreparedPreTransformation(PreTransformation):
                     raise RuntimeError("Expression result is empty")
                 return result
             except Exception as exc:
-                msg = f"Dependency '{argname}' has an exception:\n{exc}"
+                msg = f"Dependency {argname!r} conversion from {value.input_celltype!r} to {value.celltype!r} has an exception:\n{exc}"
                 raise RuntimeError(msg) from exc
         # A prepared transformation dict holds checksums as hex strings.
         if isinstance(value, str):
@@ -434,6 +451,8 @@ def compiled_transformer_to_pretransformation(
 ) -> PreTransformation:
     """Create a PreTransformation for a compiled transformer call."""
 
+    from .compiled_validation import validate_stage1
+    signature = validate_stage1(schema_text, celltypes, optional_pins, meta.get("metavars", {}))
     result_celltype = celltypes.get("result", "mixed")
     if result_celltype not in ("mixed", "deepcell"):
         raise TypeError("compiled transformer result celltype must be 'mixed' or 'deepcell'")
@@ -456,12 +475,13 @@ def compiled_transformer_to_pretransformation(
         pretransformation_dict["__meta__"] = deepcopy(meta)
 
     for pinname, value in arguments.items():
-        pretransformation_dict[pinname] = ("mixed", None, value)
+        pretransformation_dict[pinname] = (celltypes.get(pinname, "mixed"), None, value)
 
     return PreTransformation(
         pretransformation_dict,
         code_manager=code_manager,
         optional_pins=optional_pins,
+        compiled_signature=signature,
     )
 
 

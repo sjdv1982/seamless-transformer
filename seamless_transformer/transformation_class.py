@@ -83,6 +83,14 @@ def _is_expression(value: Any) -> bool:
     return isinstance(value, Expression)
 
 
+
+def _dependency_message(name, dependency, error):
+    if _is_expression(dependency):
+        return (f"Dependency {name!r} has an exception "
+                f"(conversion from {dependency.input_celltype!r} to {dependency.celltype!r}):\n{error}")
+    return f"Dependency {name!r} has an exception:\n{error}"
+
+
 def _dependency_exception(dep: Any) -> str | None:
     if _is_expression(dep):
         return None
@@ -833,12 +841,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                     result = _dependency_result_checksum(dep)
                     self._adopt_input_checksum(depname, result)
                 except Exception as exc:
-                    msg = "Dependency '{}' has an exception:\n{}"
-                    raise RuntimeError(msg.format(depname, exc)) from exc
+                    raise RuntimeError(_dependency_message(depname, dep, exc)) from exc
                 dep_exception = _dependency_exception(dep)
                 if dep_exception is not None:
-                    msg = "Dependency '{}' has an exception:\n{}"
-                    raise RuntimeError(msg.format(depname, dep_exception))
+                    raise RuntimeError(_dependency_message(depname, dep, dep_exception))
         except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
@@ -872,14 +878,13 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         try:
             for depname, task_result in task_errors.items():
                 if isinstance(task_result, BaseException):
-                    msg = "Dependency '{}' has an exception:\n{}"
-                    raise RuntimeError(msg.format(depname, task_result)) from task_result
+                    dep = self._upstream_dependencies[depname]
+                    raise RuntimeError(_dependency_message(depname, dep, task_result)) from task_result
             for depname in tasks:
                 dep = self._upstream_dependencies[depname]
                 dep_exception = _dependency_exception(dep)
                 if dep_exception is not None:
-                    msg = "Dependency '{}' has an exception:\n{}"
-                    raise RuntimeError(msg.format(depname, dep_exception))
+                    raise RuntimeError(_dependency_message(depname, dep, dep_exception))
         except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
@@ -1490,16 +1495,19 @@ def transformation_from_pretransformation(
         for pinname, dep in transformation_obj._upstream_dependencies.items():
             dep_exception = _dependency_exception(dep)
             if dep_exception is not None:
-                msg = f"Dependency '{pinname}' has an exception:\n{dep_exception}"
-                raise RuntimeError(msg)
+                raise RuntimeError(_dependency_message(pinname, dep, dep_exception))
             celltype, subcelltype, _value = transformation_dict[pinname]
             result_checksum = _dependency_result_checksum(dep)
+            if transformation_dict.get("__compiled__"):
+                from seamless.checksum.null import canonicalize_checksum
+                result_checksum = canonicalize_checksum(result_checksum, celltype)
             transformation_dict[pinname] = (
                 celltype,
                 subcelltype,
                 result_checksum.hex(),
             )
-        normalize_optional_pins_for_construction(transformation_dict, optional_pins)
+        if not transformation_dict.get("__compiled__"):
+            normalize_optional_pins_for_construction(transformation_dict, optional_pins)
         from seamless.checksum.hash_type_validation import validate_deserializable_as
 
         for pinname, value in transformation_dict.items():
@@ -1508,7 +1516,8 @@ def transformation_from_pretransformation(
             celltype, _subcelltype, checksum_hex = value
             if checksum_hex is None:
                 continue
-            validate_deserializable_as(checksum_hex, celltype)
+            if not transformation_dict.get("__compiled__") or pinname in ("code", "objects"):
+                validate_deserializable_as(checksum_hex, celltype)
         return transformation_dict
 
     def _inject_dependency_dunder(

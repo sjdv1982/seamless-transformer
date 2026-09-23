@@ -574,12 +574,7 @@ def _coerce_scalar_input(ffi, value, parameter, keepalive):
         keepalive.extend([array, ptr])
         return ptr[0]
 
-    if isinstance(value, np.generic):
-        if value.dtype != expected:
-            raise TypeError(
-                f"Input {parameter.name!r} dtype is {value.dtype}, expected {expected}"
-            )
-        _require_native_dtype(value.dtype, parameter.name)
+    if isinstance(value, (np.generic, np.ndarray)):
         return value.item()
     return value
 
@@ -593,6 +588,11 @@ def _coerce_array_input(ffi, value, parameter):
         ) from None
 
     expected = _numpy_dtype(parameter.dtype)
+    if isinstance(value, bytes):
+        # Keep a real allocation for empty inputs as well: NULL is not a valid
+        # pointer for Rust slices, even when their length is zero.
+        cdata = ffi.from_buffer("const unsigned char[]", value) if value else ffi.new("unsigned char[1]")
+        return cdata, cdata
     array = np.asarray(value)
     if not _numpy_dtype_matches(array.dtype, expected):
         raise TypeError(
@@ -727,6 +727,24 @@ def call_compiled_transform(
         transformation, tf_dunder, "__compilation__", "plain"
     )
     sig = Signature.from_dict(yaml.safe_load(schema_text))
+    from .compiled_validation import validate_stage1, validate_pin, CompiledPinSchemaError
+    validate_stage1(schema_text, {p.name: transformation[p.name][0]
+                                 for p in sig.inputs if p.name in transformation},
+                    metavars=(meta or {}).get("metavars", {}))
+    from seamless_signature import generate_header
+    if header.rstrip("\n") != generate_header(sig).rstrip("\n"):
+        raise RuntimeError("Compiled header does not match the schema")
+    resolved_wildcards = {}
+    for parameter in sig.inputs:
+        if parameter.name not in transformation:
+            raise CompiledPinSchemaError(f"Compiled pin {parameter.name!r}: missing input")
+        celltype, _, checksum = transformation[parameter.name]
+        validate_pin(parameter, celltype, checksum)
+        buffer = namespace.get(parameter.name)
+        if not isinstance(buffer, Buffer):
+            buffer = Checksum(checksum).resolve()
+        namespace[parameter.name] = validate_pin(parameter, celltype, checksum,
+                                                  buffer=buffer, wildcards=resolved_wildcards)
     objects = namespace.get("objects", {})
     language = transformation.get("__language__")
     module_definition = _module_definition_from_payload(
@@ -736,7 +754,6 @@ def call_compiled_transform(
     ffi = module.ffi
     lib = module.lib
 
-    resolved_wildcards = _resolve_input_wildcards(sig, namespace)
     metavars = {}
     if isinstance(meta, dict):
         metavars = dict(meta.get("metavars") or {})
@@ -754,12 +771,15 @@ def call_compiled_transform(
 
     for parameter in sig.inputs:
         value = namespace[parameter.name]
-        if parameter.shape is None:
-            call_args.append(_coerce_scalar_input(ffi, value, parameter, keepalive))
-        else:
-            array, cdata = _coerce_array_input(ffi, value, parameter)
-            keepalive.append(array)
-            call_args.append(cdata)
+        try:
+            if parameter.shape is None:
+                call_args.append(_coerce_scalar_input(ffi, value, parameter, keepalive))
+            else:
+                array, cdata = _coerce_array_input(ffi, value, parameter)
+                keepalive.append(array)
+                call_args.append(cdata)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RuntimeError(f"Compiled validator gap while marshalling pin {parameter.name!r}: {exc}") from exc
 
     output_size_ptrs = {}
     for wildcard in sig.output_wildcards:
@@ -780,7 +800,10 @@ def call_compiled_transform(
             output_values[parameter.name] = ("array", array, parameter)
             call_args.append(cdata)
 
-    status = lib.transform(*call_args)
+    try:
+        status = lib.transform(*call_args)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError(f"Compiled validator/ABI contract failure for inputs {[p.name for p in sig.inputs]}: {exc}") from exc
     if status != 0:
         raise RuntimeError(f"Compiled transform returned non-zero status {status}")
 
@@ -794,6 +817,8 @@ def call_compiled_transform(
                 item = _struct_scalar_from_pointer(ffi, value, parameter)
             else:
                 item = value[0]
+                if getattr(parameter.dtype, "name", None) == "char":
+                    item = bytes([item])
                 try:
                     item = item.item()
                 except AttributeError:

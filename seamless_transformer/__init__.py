@@ -18,6 +18,11 @@ global_lock = threading.Lock()
 
 
 _LAZY_EXPORTS = {
+    "CompiledPinCelltypeError": (".compiled_validation", "CompiledPinCelltypeError"),
+    "CompiledPinCelltypeWarning": (".compiled_validation", "CompiledPinCelltypeWarning"),
+    "CompiledMixedValueError": (".compiled_validation", "CompiledMixedValueError"),
+    "CompiledPinSchemaError": (".compiled_validation", "CompiledPinSchemaError"),
+
     "Pin": (".pin_class", "Pin"),
     "direct": (".transformer_class", "direct"),
     "delayed": (".transformer_class", "delayed"),
@@ -48,6 +53,10 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
+    "CompiledPinCelltypeError",
+    "CompiledPinCelltypeWarning",
+    "CompiledMixedValueError",
+    "CompiledPinSchemaError",
     "Pin",
     "direct",
     "delayed",

@@ -98,11 +98,23 @@ class StandalonePinBackend:
     def build(self, input_ref=_UNSET):
         ref = self._input_ref if input_ref is _UNSET else _check_input_ref(input_ref)
         declared = self.input_celltype if input_ref is _UNSET else _typed_input_celltype(ref) or self.celltype
-        return Expression(ref, input_celltype=declared, celltype=self.celltype)
+        try:
+            return Expression(ref, input_celltype=declared, celltype=self.celltype)
+        except Exception as exc:
+            raise type(exc)(f"Pin {self.name!r} conversion from {declared!r} to {self.celltype!r}: {exc}") from exc
+
+    def _validate_checksum(self, checksum, *, buffer=None):
+        if hasattr(self.owner, '_schema') and self.owner._schema is not None:
+            from .compiled_validation import validate_pin
+            parameter = next(p for p in self.owner._schema.inputs if p.name == self.name)
+            if checksum is not None:
+                validate_pin(parameter, self.celltype, checksum, buffer=buffer)
+        else:
+            validate_pin_null(checksum, self.celltype, self.name,
+                              optional=self.name in self.owner._optional_pins)
 
     def _computed(self, checksum, input_ref):
-        validate_pin_null(checksum, self.celltype, self.name,
-                          optional=self.name in self.owner._optional_pins)
+        self._validate_checksum(checksum)
         if input_ref is _UNSET:
             self._result_identity = self._identity()
             self._exception = None
@@ -281,19 +293,28 @@ class StandalonePinBackend:
             from seamless.cell_class import _check_projected_source
             _check_projected_source(ref, self.celltype)
         else:
-            ref = _serialize_value(value, self.celltype)
+            if hasattr(self.owner, '_schema') and self.owner._schema is not None:
+                from seamless import Buffer
+                try:
+                    buffer = Buffer(value, self.celltype)
+                except Exception as exc:
+                    raise type(exc)(f"Compiled pin {self.name!r}: {exc}") from exc
+                ref = buffer.get_checksum()
+                self._validate_checksum(ref, buffer=buffer)
+            else:
+                ref = _serialize_value(value, self.celltype)
             declared = self.celltype
         if isinstance(ref, Checksum):
-            validate_pin_null(ref, self.celltype, self.name,
-                              optional=self.name in self.owner._optional_pins)
+            if declared == self.celltype:
+                self._validate_checksum(ref)
         self._replace(ref, declared, detach)
 
     def write_checksum(self, checksum, *, input_celltype=None, detach=False):
         self._check_write_authority(detach)
         ref = None if checksum is None else Checksum(checksum)
         declared = input_celltype or self.celltype if ref is not None else None
-        validate_pin_null(ref, self.celltype, self.name,
-                          optional=self.name in self.owner._optional_pins)
+        if declared == self.celltype:
+            self._validate_checksum(ref)
         self._replace(ref, declared, detach)
 
     def write_buffer(self, buffer, *, detach=False):

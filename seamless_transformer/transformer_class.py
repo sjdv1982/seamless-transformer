@@ -280,8 +280,11 @@ class TransformerCore(Generic[P, R]):
         all_args = TransformerCore._copy_arguments(snapshot.args)
         from seamless import Expression
         for name, input_celltype in snapshot.input_celltypes.items():
-            all_args[name] = Expression(all_args[name], input_celltype=input_celltype,
-                                        celltype=snapshot.celltypes[name])
+            try:
+                all_args[name] = Expression(all_args[name], input_celltype=input_celltype,
+                                            celltype=snapshot.celltypes[name])
+            except Exception as exc:
+                raise type(exc)(f"Pin {name!r} conversion from {input_celltype!r} to {snapshot.celltypes[name]!r}: {exc}") from exc
         signature = snapshot.signature
         if signature is not None:
             call_args = signature.bind_partial(*args, **kwargs).arguments
@@ -320,12 +323,19 @@ class TransformerCore(Generic[P, R]):
                 _check_input_ref(arg)
             celltype = celltypes.get(argname, "mixed")
             if isinstance(arg, Cell) or (isinstance(arg, (Transformation, Expression)) and arg.celltype != celltype):
-                arguments[argname] = Expression(
-                    arg, input_celltype=arg.celltype, celltype=celltype
-                )
+                try:
+                    arguments[argname] = Expression(
+                        arg, input_celltype=arg.celltype, celltype=celltype
+                    )
+                except Exception as exc:
+                    raise type(exc)(f"Pin {argname!r} conversion from {arg.celltype!r} to {celltype!r}: {exc}") from exc
 
     def _build_from_snapshot(self, snapshot, *args, **kwargs) -> Transformation[R]:
         ensure_open("transformer call")
+        if snapshot.compilation is not None or snapshot.schema is not None:
+            from .compiled_validation import validate_stage1
+            validate_stage1(snapshot.schema, snapshot.celltypes, snapshot.optional_pins,
+                            snapshot.meta.get("metavars", {}))
         arguments = self._bind_snapshot_arguments(snapshot, args, kwargs)
         from seamless import Expression
         self._convert_pin_arguments(arguments, snapshot.celltypes)
@@ -335,7 +345,7 @@ class TransformerCore(Generic[P, R]):
             for argname, arg in arguments.items()
             if isinstance(arg, (Transformation, Expression))
         }
-        if snapshot.schema is not None:
+        if snapshot.compilation is not None or snapshot.schema is not None:
             from .pretransformation import compiled_transformer_to_pretransformation
             from .compiled_transformer import (
                 _deferred_validation_hooks, _validate_derived_compiled_dunders,
@@ -344,8 +354,7 @@ class TransformerCore(Generic[P, R]):
             )
             import yaml
             signature = _require_signature_package().Signature.from_dict(yaml.safe_load(snapshot.schema))
-            validations = [(p.name, p.dtype, p.shape is not None) for p in signature.inputs]
-            sync_validate, async_validate = _deferred_validation_hooks(validations)
+            sync_validate, async_validate = _deferred_validation_hooks(signature)
             code = snapshot.codebuf
             if isinstance(code, Checksum): code = code.resolve()
             if isinstance(code, Buffer): code = code.decode()

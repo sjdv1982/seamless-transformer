@@ -35,134 +35,6 @@ def _as_plain(value):
     return deepcopy(value)
 
 
-def _expected_numpy_dtype(dtype_spec):
-    try:
-        import numpy as np
-    except ImportError:
-        raise ImportError(
-            "numpy is required for compiled transformer array/scalar validation. "
-            "Install it with: pip install numpy"
-        ) from None
-
-    if hasattr(dtype_spec, "fields"):
-        fields = []
-        for field in dtype_spec.fields:
-            field_dtype = _expected_numpy_dtype(field.dtype)
-            if field.shape:
-                fields.append((field.name, field_dtype, field.shape))
-            else:
-                fields.append((field.name, field_dtype))
-        return np.dtype(fields, align=True)
-
-    dtype_name = dtype_spec.name
-    if dtype_name == "char":
-        return np.dtype("S1")
-    return np.dtype(dtype_name)
-
-
-def _numpy_dtype_matches(actual, expected) -> bool:
-    if actual == expected:
-        return True
-    if actual.fields is None or expected.fields is None:
-        return False
-    if actual.itemsize != expected.itemsize:
-        return False
-
-    expected_names = set(expected.names or ())
-    for name in actual.names or ():
-        if name in expected_names:
-            continue
-        field_dtype = actual.fields[name][0]
-        if field_dtype.kind != "V" or field_dtype.fields is not None:
-            return False
-
-    for name in expected.names or ():
-        if name not in actual.fields:
-            return False
-        actual_field, actual_offset = actual.fields[name][:2]
-        expected_field, expected_offset = expected.fields[name][:2]
-        if actual_offset != expected_offset:
-            return False
-        actual_base, actual_shape = actual_field.subdtype or (actual_field, ())
-        expected_base, expected_shape = expected_field.subdtype or (expected_field, ())
-        if actual_shape != expected_shape:
-            return False
-        if not _numpy_dtype_matches(actual_base, expected_base):
-            return False
-    return True
-
-
-def _validate_native_numpy_value(name: str, value, dtype_spec, is_array: bool):
-    try:
-        import numpy as np
-    except ImportError:
-        if is_array:
-            raise ImportError(
-                "numpy is required for compiled transformer array inputs. "
-                "Install it with: pip install numpy"
-            ) from None
-        return
-
-    expected = _expected_numpy_dtype(dtype_spec)
-    if is_array:
-        array = np.asarray(value)
-        if not _numpy_dtype_matches(array.dtype, expected):
-            raise TypeError(f"Input {name!r} dtype is {array.dtype}, expected {expected}")
-        if not array.dtype.isnative:
-            raise TypeError(f"Input {name!r} must have native byte order")
-    elif hasattr(dtype_spec, "fields"):
-        if isinstance(value, np.ndarray):
-            if value.shape != ():
-                raise TypeError(f"Input {name!r} must be a scalar structured value")
-            dtype = value.dtype
-        elif isinstance(value, np.void):
-            dtype = value.dtype
-        else:
-            raise TypeError(
-                f"Input {name!r} must be a numpy structured scalar with dtype {expected}"
-            )
-        if not _numpy_dtype_matches(dtype, expected):
-            raise TypeError(f"Input {name!r} dtype is {dtype}, expected {expected}")
-        if not dtype.isnative:
-            raise TypeError(f"Input {name!r} must have native byte order")
-    elif isinstance(value, np.generic):
-        if value.dtype != expected:
-            raise TypeError(f"Input {name!r} dtype is {value.dtype}, expected {expected}")
-        if not value.dtype.isnative:
-            raise TypeError(f"Input {name!r} must have native byte order")
-
-
-def _is_deferred_input(value) -> bool:
-    """Return True if the input must be resolved before dtype validation."""
-    from seamless import Expression
-    if isinstance(value, (Checksum, Transformation, Expression)):
-        return True
-    if isinstance(value, str) and len(value) == 64:
-        try:
-            int(value, 16)
-        except ValueError:
-            return False
-        return True
-    if isinstance(value, (bytes, bytearray)) and len(value) == 32:
-        return True
-    return False
-
-
-def _resolve_deferred_value(prepared_value):
-    """Resolve a prepared pin value (hex string or None) to a Python value."""
-    if prepared_value is None:
-        return None
-    checksum = Checksum(prepared_value)
-    return checksum.fingertip_sync("mixed")
-
-
-async def _resolve_deferred_value_async(prepared_value):
-    if prepared_value is None:
-        return None
-    checksum = Checksum(prepared_value)
-    return await checksum.fingertip("mixed")
-
-
 def _checksum_hex(value, celltype: str) -> str:
     buffer = Buffer(value, celltype)
     checksum = buffer.get_checksum()
@@ -202,34 +74,15 @@ def _validate_derived_compiled_dunders(prepared_transformation, *, header: str) 
         )
 
 
-def _deferred_validation_hooks(
-    deferred_validations: "list[tuple[str, Any, bool]]",
-) -> tuple[Any, Any]:
-    """Run _validate_native_numpy_value after deferred inputs are materialized.
-
-    The hooks run after the transformation factory has replaced Transformation/
-    Checksum pins with concrete hex checksums in its frozen prepared payload, so
-    the resolved buffer carries the value actually supplied to the compiled
-    runner.
-    """
+def _deferred_validation_hooks(signature):
+    """Check deferred checksum facts without materializing input data."""
+    from .compiled_validation import validate_prepared
 
     def _run_validations_sync(prepared_transformation):
-        for name, dtype_spec, is_array in deferred_validations:
-            pin = prepared_transformation.get(name)
-            if pin is None:
-                continue
-            prepared_value = pin[2]
-            value = _resolve_deferred_value(prepared_value)
-            _validate_native_numpy_value(name, value, dtype_spec, is_array)
+        validate_prepared(signature, prepared_transformation)
 
     async def _run_validations_async(prepared_transformation):
-        for name, dtype_spec, is_array in deferred_validations:
-            pin = prepared_transformation.get(name)
-            if pin is None:
-                continue
-            prepared_value = pin[2]
-            value = await _resolve_deferred_value_async(prepared_value)
-            _validate_native_numpy_value(name, value, dtype_spec, is_array)
+        validate_prepared(signature, prepared_transformation)
 
     return _run_validations_sync, _run_validations_async
 
@@ -293,6 +146,43 @@ class MetaVars:
 
     def to_dict(self) -> dict[str, int]:
         return dict(self._values)
+
+
+class BoundMetaVars(MetaVars):
+    """Output limits stored on a bound transformer's canonical configuration."""
+
+    def __init__(self, backend):
+        super().__init__()
+        self._backend = backend
+        self._refresh()
+
+    def _refresh(self):
+        cfg = self._backend.cfg
+        sig = _require_signature_package().Signature.from_dict(yaml.safe_load(cfg.schema))
+        self._values = dict(cfg.meta.get("metavars", {}))
+        self._rebuild(sig.output_wildcards)
+
+    def __getattr__(self, name):
+        self._refresh()
+        return super().__getattr__(name)
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            return super().__setattr__(name, value)
+        self._refresh()
+        super().__setattr__(name, value)
+        backend = self._backend
+        backend.context._set_node_config(backend.node_path, "meta",
+                                         {"metavars": dict(self._values)})
+
+    @property
+    def is_complete(self):
+        self._refresh()
+        return super().is_complete
+
+    def to_dict(self):
+        self._refresh()
+        return super().to_dict()
 
 
 class CompiledObject:
@@ -373,7 +263,16 @@ class CompiledCelltypesWrapper:
         if key != "result":
             from .transformer_class import CelltypesWrapper
             owner = self._transformer
-            return CelltypesWrapper(owner, owner._celltypes, owner._args, fixed=True).__setitem__(key, value)
+            from .compiled_validation import ALLOWED_CELLTYPES, CompiledPinCelltypeError, validate_declarations
+            if owner._schema is None or key not in {p.name for p in owner._schema.inputs}:
+                raise AttributeError(key)
+            if isinstance(value, type):
+                value = value.__name__
+            if value not in ALLOWED_CELLTYPES:
+                raise CompiledPinCelltypeError(f"Compiled pin {key!r}: unsupported celltype {value!r}")
+            CelltypesWrapper(owner, owner._celltypes, owner._args, fixed=True).__setitem__(key, value)
+            validate_declarations(owner._schema, owner._celltypes, warn=True)
+            return
         if isinstance(value, type):
             value = value.__name__
         value = str(value)
@@ -385,7 +284,7 @@ class CompiledCelltypesWrapper:
         self._transformer._celltypes["result"] = value
 
     def __dir__(self):
-        return ["result"]
+        return list(self._transformer._celltypes)
 
 
 class CompiledMixin:
@@ -409,18 +308,57 @@ class CompiledMixin:
         self._metavars = MetaVars()
         self._objects = ObjectList()
 
+    def _validate_compiled_stage1(self):
+        from .compiled_validation import validate_stage1
+        validate_stage1(self._schema_text, self._celltypes, self._optional_pins,
+                        self._metavars.to_dict())
+
+    @property
+    def schema_celltypes(self):
+        """Read-only schema-derived types; declarations remain independent."""
+        from .compiled_validation import SchemaCelltypesView
+        if self._workflow_backend is not None:
+            try:
+                sig = _require_signature_package().Signature.from_dict(yaml.safe_load(self.schema))
+            except Exception:
+                return SchemaCelltypesView(None, {})
+        else:
+            sig = self._schema
+        declarations = self._workflow_backend.cfg.celltypes if self._workflow_backend is not None else self._celltypes
+        return SchemaCelltypesView(sig, declarations)
+
+    def __repr__(self):
+        from .compiled_validation import validate_declarations, CompiledPinCelltypeError
+        if self._workflow_backend is not None:
+            return f'<CompiledTransformer declared={self._workflow_backend.cfg.celltypes!r}, schema_celltypes={dict(self.schema_celltypes)!r}; {self._workflow_backend.exception or self._workflow_backend.state}>'
+        diagnostic = ''
+        if self._schema is not None:
+            try:
+                validate_declarations(self._schema, self._celltypes)
+            except CompiledPinCelltypeError as exc:
+                diagnostic = f'; incompatible: {exc}'
+        return f'<CompiledTransformer declared={self._celltypes!r}, schema_celltypes={dict(self.schema_celltypes)!r}{diagnostic}>'
+
     @property
     def compilation(self):
         """Compiler binary, flags, and mode used to build this transformer."""
+        if self._workflow_backend is not None:
+            return self._workflow_backend.cfg.compilation
         return self._compilation
 
     @compilation.setter
     def compilation(self, value):
+        if self._workflow_backend is not None:
+            backend = self._workflow_backend
+            backend.context._set_node_config(backend.node_path, "compilation", value)
+            return
         self._compilation = value
 
     @property
     def language(self) -> str:
         """The compiled language name (read-only after construction)."""
+        if self._workflow_backend is not None:
+            return self._workflow_backend.cfg.language
         return self._compiled_language
 
     @language.setter
@@ -430,6 +368,8 @@ class CompiledMixin:
     @property
     def schema(self) -> str | None:
         """The seamless-signature schema YAML string, or None if not yet set."""
+        if self._workflow_backend is not None:
+            return self._workflow_backend.cfg.schema
         return self._schema_text
 
     @schema.setter
@@ -439,9 +379,19 @@ class CompiledMixin:
             value = value.read_text()
         if not isinstance(value, str):
             raise TypeError(type(value))
+        if self._workflow_backend is not None:
+            backend = self._workflow_backend
+            backend.context._set_node_config(backend.node_path, 'schema', value)
+            return
         data = yaml.safe_load(value)
         sig = ss.Signature.from_dict(data)
         self._validate_schema(sig)
+        ss.generate_header(sig)
+        names = {p.name for p in sig.inputs}
+        for name in set(self._args) - names:
+            old, _ = self._args.pop(name)
+            self._replace_checksum_field(old, None)
+            self._pin_memos.pop(name, None)
         self._schema_text = value
         self._schema = sig
         self._metavars._rebuild(sig.output_wildcards)
@@ -455,8 +405,10 @@ class CompiledMixin:
             ]
         )
         result_celltype = self._celltypes.get("result", "mixed")
-        self._celltypes = {parameter.name: "mixed" for parameter in sig.inputs}
+        self._celltypes = {parameter.name: self._celltypes.get(parameter.name, "mixed") for parameter in sig.inputs}
         self._celltypes["result"] = result_celltype
+        from .compiled_validation import validate_declarations
+        validate_declarations(sig, self._celltypes, warn=True)
         if len(sig.outputs) > 1 and self._celltypes["result"] not in ("mixed", "deepcell"):
             raise TypeError("multi-output compiled transformers require result celltype 'mixed' or 'deepcell'")
 
@@ -469,6 +421,8 @@ class CompiledMixin:
 
         Accepts a string or a pathlib.Path (file contents are read immediately).
         """
+        if self._workflow_backend is not None:
+            return self._workflow_backend.code
         return self._code_text
 
     @code.setter
@@ -477,6 +431,9 @@ class CompiledMixin:
             value = value.read_text()
         if not isinstance(value, str):
             raise TypeError(type(value))
+        if self._workflow_backend is not None:
+            self._workflow_backend.code = value
+            return
         self._code_text = value
 
     @property
@@ -487,6 +444,8 @@ class CompiledMixin:
         that defines the ``transform()`` function signature in C, and is also
         passed to CFFI to build the Python extension module.
         """
+        if self._workflow_backend is not None:
+            return self._workflow_backend.cfg.header
         if self._schema is None:
             return None
         ss = _require_signature_package()
@@ -503,6 +462,8 @@ class CompiledMixin:
 
         Changing the schema rebuilds metavars, dropping any stale entries.
         """
+        if self._workflow_backend is not None:
+            return BoundMetaVars(self._workflow_backend)
         return self._metavars
 
     @property
@@ -562,30 +523,13 @@ class CompiledMixin:
             schema=self._schema_text, compilation=compilation, objects=objects, header=self.header)
 
     def _bind_compiled_arguments(self, *args, **kwargs):
-        if self._schema is None:
-            raise ValueError("compiled transformer schema is not set")
+        self._validate_compiled_stage1()
         if self._code_text is None:
             raise ValueError("compiled transformer code is not set")
-        if not self._metavars.is_complete:
-            missing = sorted(self._metavars._allowed - self._metavars._values.keys())
-            raise ValueError(f"compiled transformer metavars are incomplete: {missing}")
         all_args = {name: self.pins[name].build() for name in self._args}
         all_args.update(self._call_signature.bind_partial(*args, **kwargs).arguments)
         arguments = self._call_signature.bind(**all_args).arguments
-        deferred_validations: list[tuple[str, Any, bool]] = []
-        for parameter in self._schema.inputs:
-            value = arguments[parameter.name]
-            is_array = parameter.shape is not None
-            if _is_deferred_input(value):
-                deferred_validations.append((parameter.name, parameter.dtype, is_array))
-                continue
-            _validate_native_numpy_value(
-                parameter.name,
-                value,
-                parameter.dtype,
-                is_array,
-            )
-        return arguments, deferred_validations
+        return arguments
 
     def _compiled_payloads(self):
         objects = {}
@@ -705,7 +649,7 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
             return self._build_from_snapshot(self._snapshot_for_call(), *args, **kwargs)
         if self._modules or self._globals:
             raise NotImplementedError("modules/globals are not supported for compiled transformers")
-        arguments, deferred_validations = self._bind_compiled_arguments(*args, **kwargs)
+        arguments = self._bind_compiled_arguments(*args, **kwargs)
         self._convert_pin_arguments(arguments, self._celltypes)
         from seamless import Expression
         deps = {
@@ -730,12 +674,7 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
             language=self.language,
             optional_pins=self._optional_pins,
         )
-        deferred_prepare_sync = None
-        deferred_prepare_async = None
-        if deferred_validations:
-            deferred_prepare_sync, deferred_prepare_async = _deferred_validation_hooks(
-                deferred_validations
-            )
+        deferred_prepare_sync, deferred_prepare_async = _deferred_validation_hooks(self._schema)
         derived_dunder_validation = lambda prepared: _validate_derived_compiled_dunders(
             prepared, header=header
         )
