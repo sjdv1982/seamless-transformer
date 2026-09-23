@@ -6,7 +6,7 @@ from types import FunctionType, ModuleType
 import inspect
 from copy import deepcopy
 from functools import update_wrapper
-from typing import Callable, Generic, Optional, ParamSpec, TypeVar, cast, overload
+from typing import Callable, Generic, ParamSpec, TypeVar, cast, overload
 
 from seamless import Buffer, Checksum, ensure_open
 
@@ -29,7 +29,7 @@ def _snapshot_modules(modules):
     }
 
 
-def _clone_transformer_builder(source, target_cls, language=None):
+def _clone_transformer_builder(source, target_cls):
     """Clone a standalone builder with independent lifecycle ownership."""
 
     snapshot = source._snapshot_for_call()
@@ -44,7 +44,6 @@ def _clone_transformer_builder(source, target_cls, language=None):
         scratch=snapshot.scratch,
         direct_print=snapshot.direct_print,
         local=bool(snapshot.local) if snapshot.local is not None else False,
-        language=snapshot.language if language is None else language,
     )
     try:
         target._celltypes = deepcopy(snapshot.celltypes)
@@ -65,8 +64,6 @@ def _clone_transformer_builder(source, target_cls, language=None):
         if isinstance(snapshot.codebuf, Checksum):
             target._codebuf = snapshot.codebuf
             target._replace_code_ref(snapshot.codebuf)
-        if language is not None:
-            target.language = language
         return target
     except Exception:
         target._release_refholds()
@@ -75,55 +72,45 @@ def _clone_transformer_builder(source, target_cls, language=None):
 
 @overload
 def direct(
-    func: "Transformer[P, R]", language: None = None
-) -> "DirectTransformer[P, R]": ...
+    func: "PythonBashBaseTransformer[P, R]",
+) -> "DirectPythonTransformer[P, R]": ...
 
 
 @overload
 def direct(
-    func: Callable[P, R] | str, language: Optional[str] = None
-) -> "DirectTransformer[P, R]": ...
+    func: Callable[P, R] | str,
+) -> "DirectPythonTransformer[P, R]": ...
 
 
 def direct(
-    func: Callable[P, R] | "Transformer[P, R]" | str, language: Optional[str] = None
-) -> "DirectTransformer[P, R]":
+    func: Callable[P, R] | "PythonBashBaseTransformer[P, R]" | str,
+) -> "DirectPythonTransformer[P, R]":
     """Execute immediately, returning the result value."""
 
-    if isinstance(func, Transformer):
-        result = _clone_transformer_builder(func, DirectTransformer, language)
+    if isinstance(func, PythonBashBaseTransformer):
+        result = _clone_transformer_builder(func, DirectPythonTransformer)
     else:
-        if language is None:
-            language = "python"
         if callable(func):
             if not isinstance(func, FunctionType):
                 raise TypeError("func must be a function")
-            assert language == "python", language
-        result = DirectTransformer(
-            func, scratch=False, direct_print=False, local=False, language=language
-        )
+        result = DirectPythonTransformer(func)
         if callable(func):
             update_wrapper(result, func)
     return result
 
 
 def delayed(
-    func: Callable[P, R] | str, language: Optional[str] = None
-) -> "Transformer[P, R]":
+    func: Callable[P, R] | "PythonBashBaseTransformer[P, R]" | str,
+) -> "PythonTransformer[P, R]":
     """Return a Transformation object that can be executed later."""
 
-    if isinstance(func, Transformer):
-        result = _clone_transformer_builder(func, Transformer, language)
+    if isinstance(func, PythonBashBaseTransformer):
+        result = _clone_transformer_builder(func, PythonTransformer)
     else:
-        if language is None:
-            language = "python"
         if callable(func):
             if not isinstance(func, FunctionType):
                 raise TypeError("func must be a function")
-            assert language == "python", language
-        result = Transformer(
-            func, scratch=False, direct_print=False, local=False, language=language
-        )
+        result = PythonTransformer(func)
         if callable(func):
             update_wrapper(result, func)
     return result
@@ -182,7 +169,7 @@ class TransformerCore(Generic[P, R]):
             scratch=bool(self.scratch),
             direct_print=bool(self.direct_print),
             local=self.local,
-            call_mode="direct" if isinstance(self, DirectTransformer) else "delayed",
+            call_mode="direct" if isinstance(self, DirectCallMixin) else "delayed",
             callable=self._workflow_callable,
             signature=self._get_signature(),
         )
@@ -773,7 +760,7 @@ class PythonMixin(Generic[P, R]):
 
     def __init__(
         self,
-        code: Callable[P, R] | str,
+        code: Callable[P, R] | str | Checksum | None = None,
         *,
         language: str,
         scratch: bool,
@@ -786,7 +773,11 @@ class PythonMixin(Generic[P, R]):
             direct_print=direct_print,
             local=local,
         )
-        self._set_code(code)
+        self._codebuf = None
+        self._signature = None
+        self._celltypes = {"result": "mixed"}
+        if code is not None:
+            self._set_code(code)
         if callable(code):
             update_wrapper(self, code)
 
@@ -869,17 +860,110 @@ class PythonMixin(Generic[P, R]):
             self._signature = None
 
 
-class Transformer(PythonMixin[P, R], TransformerCore[P, R]):
-    """Ordinary Python/bash transformer."""
+class PythonBashBaseTransformer(PythonMixin[P, R], TransformerCore[P, R]):
+    """Shared implementation for ordinary Python and Bash transformers."""
+
+    @property
+    def language(self):
+        if self._workflow_backend is not None:
+            return self._workflow_backend.language
+        return self._language
+
+    @language.setter
+    def language(self, _value):
+        raise AttributeError("transformer language is read-only")
 
 
-class DirectTransformer(Transformer[P, R]):
-    """Transformer that computes immediately."""
+class PythonTransformer(PythonBashBaseTransformer[P, R]):
+    """Delayed Python transformer."""
 
-    def __call__(self, *args, **kwargs) -> R:
+    def __init__(
+        self,
+        code: Callable[P, R] | str | Checksum | None = None,
+        *,
+        scratch: bool = False,
+        direct_print: bool = False,
+        local: bool = False,
+    ):
+        super().__init__(
+            code,
+            language="python",
+            scratch=scratch,
+            direct_print=direct_print,
+            local=local,
+        )
+
+
+class BashTransformer(PythonBashBaseTransformer):
+    """Delayed Bash transformer."""
+
+    def __init__(
+        self,
+        code: str | Checksum | None = None,
+        *,
+        scratch: bool = False,
+        direct_print: bool = False,
+        local: bool = False,
+    ):
+        super().__init__(
+            code,
+            language="bash",
+            scratch=scratch,
+            direct_print=direct_print,
+            local=local,
+        )
+
+
+class DirectCallMixin:
+    """Call-mode mixin that computes a built Transformation immediately."""
+
+    def __call__(self, *args, **kwargs):
         tf = super().__call__(*args, **kwargs)
         tf._compute(api_origin="call")
-        return tf.run()
+        return self._direct_result(tf)
+
+    def _direct_result(self, transformation):
+        return transformation.run()
+
+
+class DirectPythonTransformer(DirectCallMixin, PythonTransformer[P, R]):
+    """Direct Python transformer."""
+
+
+class DirectBashTransformer(DirectCallMixin, BashTransformer):
+    """Direct Bash transformer."""
+
+
+class Transformer:
+    """Factory for Python, Bash, and compiled Transformer builders."""
+
+    def __new__(
+        cls,
+        language: str = "python",
+        compiled: bool = False,
+        direct: bool = False,
+    ):
+        if compiled:
+            from .compiled_transformer import (
+                CompiledTransformer,
+                DirectCompiledTransformer,
+            )
+
+            target = DirectCompiledTransformer if direct else CompiledTransformer
+            return target(language)
+
+        try:
+            target = {
+                ("python", False): PythonTransformer,
+                ("python", True): DirectPythonTransformer,
+                ("bash", False): BashTransformer,
+                ("bash", True): DirectBashTransformer,
+            }[(language, bool(direct))]
+        except KeyError:
+            raise ValueError(
+                "non-compiled transformer language must be 'python' or 'bash'"
+            ) from None
+        return target()
 
 
 class CelltypesWrapper:
@@ -1088,8 +1172,13 @@ __all__ = [
     "delayed",
     "TransformerCore",
     "PythonMixin",
+    "PythonBashBaseTransformer",
+    "PythonTransformer",
+    "DirectPythonTransformer",
+    "BashTransformer",
+    "DirectBashTransformer",
+    "DirectCallMixin",
     "Transformer",
-    "DirectTransformer",
     "CelltypesWrapper",
     "ArgsWrapper",
     "ModulesWrapper",

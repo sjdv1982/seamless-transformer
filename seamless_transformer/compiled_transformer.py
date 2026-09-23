@@ -15,7 +15,7 @@ from seamless import Buffer, Checksum, ensure_open
 from .environment import Environment
 from .pretransformation import compiled_transformer_to_pretransformation
 from .transformation_class import Transformation, transformation_from_pretransformation
-from .transformer_class import ArgsWrapper, TransformerCore
+from .transformer_class import ArgsWrapper, DirectCallMixin, TransformerCore
 
 
 def _require_signature_package():
@@ -557,7 +557,8 @@ class CompiledMixin:
             input_celltypes=input_celltypes,
             modules={}, globals={}, meta=meta, environment=self._environment._to_lowlevel(),
             scratch=self.scratch, direct_print=self.direct_print, local=self.local,
-            call_mode="delayed", signature=self._call_signature,
+            call_mode="direct" if isinstance(self, DirectCallMixin) else "delayed",
+            signature=self._call_signature,
             schema=self._schema_text, compilation=compilation, objects=objects, header=self.header)
 
     def _bind_compiled_arguments(self, *args, **kwargs):
@@ -611,9 +612,9 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
 
     Basic usage::
 
-        from seamless_transformer import CompiledTransformer, DirectCompiledTransformer
+        from seamless_transformer import Transformer
 
-        tf = DirectCompiledTransformer("c")
+        tf = Transformer("c", compiled=True, direct=True)
         tf.schema = \"\"\"
         inputs:
           - name: a
@@ -635,7 +636,7 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
 
     For a delayed (non-direct) workflow::
 
-        tf = CompiledTransformer("c")
+        tf = Transformer("c", compiled=True)
         tf.schema = ...
         tf.code = ...
         t = tf(a=2, b=3)    # returns a Transformation
@@ -756,7 +757,7 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
         return tf
 
 
-class DirectCompiledTransformer(CompiledTransformer):
+class DirectCompiledTransformer(DirectCallMixin, CompiledTransformer):
     """Compiled transformer that computes immediately and returns the value.
 
     Identical to :class:`CompiledTransformer` except that calling the
@@ -767,11 +768,9 @@ class DirectCompiledTransformer(CompiledTransformer):
     result. For pipeline or deferred execution, use :class:`CompiledTransformer`.
     """
 
-    def __call__(self, *args, **kwargs):
-        tf = super().__call__(*args, **kwargs)
-        tf._compute(api_origin="call")
-        value = tf.run()
-        if tf.celltype == "deepcell":
+    def _direct_result(self, transformation):
+        value = transformation.run()
+        if transformation.celltype == "deepcell":
             from .transformation_utils import unpack_deep_structure
 
             return unpack_deep_structure(value, "deepcell")
