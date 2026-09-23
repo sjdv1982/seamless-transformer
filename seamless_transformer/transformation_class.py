@@ -1376,7 +1376,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     @property
     def exception(self):
-        return self._exception
+        return str(self._exception) if self._exception is not None else None
 
     @property
     def logs(self):

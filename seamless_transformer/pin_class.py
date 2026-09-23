@@ -15,6 +15,12 @@ class Pin(CellBase):
         self._workflow_backend = StandalonePinBackend(transformer, name)
         self._refholds_released = True  # The Transformer owns the input claims.
 
+    def build(self, input_ref=_UNSET):
+        return self._workflow_backend.build(input_ref)
+
+    def fingertip(self):
+        return self._workflow_backend.fingertip()
+
     @classmethod
     def _from_backend(cls, backend):
         pin = cls.__new__(cls)
@@ -26,9 +32,36 @@ class Pin(CellBase):
 class StandalonePinBackend:
     def __init__(self, owner, name):
         self.owner, self.name = owner, name
-        self._exception = None
-        self._result_checksum = None
-        self._result_identity = None
+        self._memo = owner._pin_memos.setdefault(name, {
+            'exception': None, 'checksum': None, 'identity': None,
+        })
+
+    _exception = property(lambda self: self._memo['exception'],
+                          lambda self, value: self._memo.__setitem__('exception', value))
+    _result_identity = property(lambda self: self._memo['identity'],
+                               lambda self, value: self._memo.__setitem__('identity', value))
+
+    @property
+    def _result_checksum(self):
+        return self._memo['checksum']
+
+    @_result_checksum.setter
+    def _result_checksum(self, value):
+        self.owner._replace_checksum_field(self._memo['checksum'], value)
+        self._memo['checksum'] = value
+
+    def _identity(self):
+        from seamless import Cell
+        from seamless.cell_class import _cell_recipe_key
+        ref = self._input_ref
+        if isinstance(ref, Cell) and ref._workflow_backend is None:
+            source = _cell_recipe_key(ref)
+        elif isinstance(ref, Cell):
+            checksum = ref.checksum
+            source = ('cell', id(ref), checksum.hex() if checksum is not None else None)
+        else:
+            source = ('checksum', ref.hex()) if isinstance(ref, Checksum) else ('object', id(ref))
+        return source, self.input_celltype, self.celltype, self.name in self.owner._optional_pins
 
     def _entry(self):
         if self.name == 'result' or self.name not in self.owner._celltypes:
@@ -67,20 +100,44 @@ class StandalonePinBackend:
         declared = self.input_celltype if input_ref is _UNSET else _typed_input_celltype(ref) or self.celltype
         return Expression(ref, input_celltype=declared, celltype=self.celltype)
 
-    def compute(self, input_ref=_UNSET, *, timeout=None):
-        checksum = self.build(input_ref).compute()
+    def _computed(self, checksum, input_ref):
         validate_pin_null(checksum, self.celltype, self.name,
                           optional=self.name in self.owner._optional_pins)
+        if input_ref is _UNSET:
+            self._result_identity = self._identity()
+            self._exception = None
+            self._result_checksum = checksum
         return checksum
 
+    def _compute_error(self, exc, input_ref):
+        from seamless.error_envelope import execution_error, RunningLoopRefusal
+        if isinstance(exc, RunningLoopRefusal):
+            return None
+        if input_ref is not _UNSET:
+            raise exc
+        self._result_identity = self._identity()
+        self._exception = execution_error(exc)
+        self._result_checksum = None
+        return None
+
+    def compute(self, input_ref=_UNSET, *, timeout=None):
+        try:
+            return self._computed(self.build(input_ref).compute(), input_ref)
+        except Exception as exc:
+            return self._compute_error(exc, input_ref)
+
     async def compute_async(self, input_ref=_UNSET, *, timeout=None):
-        checksum = await self.build(input_ref).compute_async()
-        validate_pin_null(checksum, self.celltype, self.name,
-                          optional=self.name in self.owner._optional_pins)
-        return checksum
+        try:
+            return self._computed(await self.build(input_ref).compute_async(), input_ref)
+        except Exception as exc:
+            return self._compute_error(exc, input_ref)
 
     def run(self, input_ref=_UNSET):
         checksum = self.compute(input_ref)
+        if input_ref is _UNSET:
+            return self.value
+        if checksum is None:
+            return None
         value = checksum.resolve(self.celltype)
         return value.content if self.celltype == 'bytes' and hasattr(value, 'content') else value
 
@@ -92,28 +149,34 @@ class StandalonePinBackend:
             self._result_identity = None
             return None
         ref = self._input_ref
-        identity = (
-            ("checksum", ref.hex()) if isinstance(ref, Checksum) else ("object", id(ref)),
-            self.input_celltype,
-            self.celltype,
-        )
+        identity = self._identity()
         if self._result_identity != identity:
             self._exception = None
             self._result_checksum = None
             self._result_identity = identity
-        if self._result_checksum is not None:
-            return self._result_checksum
         if self._exception is not None:
             return None
-        input_checksum = _available_input_checksum(self._input_ref)
-        if input_checksum is None:
-            return None
+        if self._result_checksum is not None:
+            return self._result_checksum
+        from seamless.error_envelope import RunningLoopRefusal
+        from seamless.checksum.null import canonicalize_checksum, is_null
         try:
-            checksum = Expression(
-                input_checksum,
-                input_celltype=self.input_celltype,
-                celltype=self.celltype,
-            ).compute()
+            input_checksum = _available_input_checksum(self._input_ref)
+            if input_checksum is None:
+                return None
+            input_checksum = canonicalize_checksum(input_checksum, self.input_celltype)
+            validate_pin_null(input_checksum, self.celltype, self.name,
+                              optional=self.name in self.owner._optional_pins)
+            if self.input_celltype == self.celltype or is_null(input_checksum):
+                checksum = input_checksum
+            else:
+                checksum = Expression(
+                    input_checksum,
+                    input_celltype=self.input_celltype,
+                    celltype=self.celltype,
+                ).compute()
+        except RunningLoopRefusal:
+            return None
         except Exception as exc:
             from seamless.error_envelope import execution_error
             self._exception = execution_error(exc)
@@ -127,8 +190,6 @@ class StandalonePinBackend:
     def state(self):
         if self._input_ref is None:
             return 'unwired'
-        if self._exception is not None:
-            return 'failed'
         checksum = self.checksum
         if checksum is not None:
             return 'complete'
@@ -137,12 +198,14 @@ class StandalonePinBackend:
     @property
     def exception(self):
         self.checksum
-        return self._exception
+        return str(self._exception) if self._exception is not None else None
 
     @property
     def buffer(self):
         checksum = self.checksum
         if checksum is None:
+            if self._exception is not None:
+                raise self._exception
             return None
         try:
             from seamless.checksum.hash_type_validation import validate_deserializable_as
@@ -176,6 +239,18 @@ class StandalonePinBackend:
         self._exception = execution_error(exc)
         raise self._exception
 
+    def fingertip(self):
+        # Recovery must not demand evaluation of the pin's expression.
+        ref = self._input_ref
+        identity = self._identity()
+        checksum = self._result_checksum if self._result_identity == identity else None
+        if self._result_identity == identity and self._exception is not None:
+            return None
+        if checksum is None and isinstance(ref, Checksum) and self.input_celltype == self.celltype:
+            from seamless.checksum.null import canonicalize_checksum
+            checksum = canonicalize_checksum(ref, self.celltype)
+        return None if checksum is None else checksum.fingertip_sync()
+
     def clear_exception(self):
         self._exception = None
 
@@ -203,6 +278,8 @@ class StandalonePinBackend:
         if value is not None and not checksum_value and _is_input_ref(value):
             ref = value
             declared = _typed_input_celltype(ref) or self.celltype
+            from seamless.cell_class import _check_projected_source
+            _check_projected_source(ref, self.celltype)
         else:
             ref = _serialize_value(value, self.celltype)
             declared = self.celltype

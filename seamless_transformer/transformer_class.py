@@ -129,6 +129,7 @@ class TransformerCore(Generic[P, R]):
     ) -> None:
         self._language = language
         self._args = {}
+        self._pin_memos = {}
         self._modules = {}
         self._globals = {}
         self._celltypes = {}
@@ -245,24 +246,10 @@ class TransformerCore(Generic[P, R]):
         return GlobalsWrapper(self._globals)
 
     @property
-    def optional_pins(self) -> set[str]:
-        """Input pins where JSON null means absence.
-
-        Connected optional pins still compute and still fail on upstream errors.
-        Optional pins can be tricky: for these pins, JSON null is reserved as
-        absence and only plain/mixed pins can use that absence value.
-        """
-
-        if self._workflow_backend is not None:
-            return self._workflow_backend.optional_pins
-        return self._optional_pins
-
-    @optional_pins.setter
-    def optional_pins(self, value) -> None:
-        if getattr(self, "_workflow_backend", None) is not None:
-            self._workflow_backend.optional_pins = value
-            return
-        self._optional_pins = set(value or ())
+    def optional_pins(self):
+        """Read-only Python signature defaults, with per-name enable/disable."""
+        from .optional_pins import OptionalPins
+        return OptionalPins(self)
 
     @property
     def environment(self) -> Environment:
@@ -307,8 +294,6 @@ class TransformerCore(Generic[P, R]):
             if isinstance(value, Checksum) and snapshot.celltypes.get(name) == "checksum":
                 call_args[name] = Buffer(value, "checksum")
         all_args.update(call_args)
-        if signature is not None:
-            return signature.bind(**all_args).arguments
         for argname in snapshot.celltypes:
             if argname == "result":
                 continue
@@ -327,14 +312,14 @@ class TransformerCore(Generic[P, R]):
 
     @staticmethod
     def _convert_pin_arguments(arguments, celltypes):
-        from seamless import Expression, CellBase
+        from seamless import Expression, Cell, CellBase
         from seamless.cell_class import _check_input_ref
 
         for argname, arg in tuple(arguments.items()):
             if isinstance(arg, CellBase):
                 _check_input_ref(arg)
             celltype = celltypes.get(argname, "mixed")
-            if isinstance(arg, (Transformation, Expression)) and arg.celltype != celltype:
+            if isinstance(arg, Cell) or (isinstance(arg, (Transformation, Expression)) and arg.celltype != celltype):
                 arguments[argname] = Expression(
                     arg, input_celltype=arg.celltype, celltype=celltype
                 )
@@ -708,6 +693,9 @@ class TransformerCore(Generic[P, R]):
         for name, (value, _input_celltype) in getattr(self, "_args", {}).items():
             if isinstance(value, Checksum):
                 claims.append((value, f"pin:{name}"))
+        for name, memo in self._pin_memos.items():
+            if memo["checksum"] is not None:
+                claims.append((memo["checksum"], f"pin-result:{name}"))
         code_checksum = getattr(self, "_code_checksum_ref", None)
         if isinstance(code_checksum, Checksum):
             claims.append((code_checksum, "code"))
@@ -731,6 +719,10 @@ class TransformerCore(Generic[P, R]):
         if isinstance(code_checksum, Checksum):
             code_checksum.decref_refholder()
         self._code_checksum_ref = None
+        for memo in getattr(self, "_pin_memos", {}).values():
+            if memo["checksum"] is not None:
+                memo["checksum"].decref_refholder()
+                memo["checksum"] = None
 
     def __del__(self):
         try:
@@ -784,20 +776,29 @@ class PythonMixin(Generic[P, R]):
     def _set_code(self, code: Callable[P, R] | str | Checksum):
         from .getsource import getsource
 
+        from .optional_pins import pin_signature
         signature = None
+        self._optional_pins = set()
         if callable(code):
             assert isinstance(code, FunctionType)
             self._workflow_callable = code
-            signature = inspect.signature(code)
+            signature = pin_signature(inspect.signature(code))
             code = getsource(code)
             codebuf = Buffer(code, "python")
             self._codebuf = codebuf
             self._celltypes = {k: "mixed" for k in signature.parameters}
             self._celltypes["result"] = "mixed"
+            for name in tuple(self._args):
+                if name not in signature.parameters:
+                    old, _ = self._args.pop(name)
+                    self._replace_checksum_field(old, None)
+            for memo in self._pin_memos.values():
+                self._replace_checksum_field(memo['checksum'], None)
+                memo.update(checksum=None, identity=None, exception=None)
             self._optional_pins = {
                 name
                 for name, parameter in signature.parameters.items()
-                if parameter.default is not inspect.Parameter.empty
+                if self.language == "python" and parameter.default is not inspect.Parameter.empty
             }
         elif isinstance(code, Checksum):
             # A checksum-backed code field is an explicit lifecycle role.  Keep
@@ -820,7 +821,8 @@ class PythonMixin(Generic[P, R]):
         if self._workflow_backend is not None:
             cfg = self._workflow_backend.cfg
             if callable(cfg.callable):
-                return inspect.signature(cfg.callable)
+                from .optional_pins import pin_signature
+                return pin_signature(inspect.signature(cfg.callable))
             return None
         return self._signature
 
@@ -1004,6 +1006,9 @@ class CelltypesWrapper:
             all_celltypes = celltypes + ["deepcell", "deepfolder", "folder", "module"]
         if value not in all_celltypes:
             raise TypeError(value, all_celltypes)
+        from seamless.cell_class import _check_projected_source
+        ref = self._args.get(key, (None, None))[0]
+        _check_projected_source(ref, value)
         self._celltypes[key] = value
         self._celltypes.setdefault("result", "mixed")
 

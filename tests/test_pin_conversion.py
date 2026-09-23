@@ -78,7 +78,7 @@ def test_optional_binary_dependency_null_is_absent(monkeypatch):
 
     consume.local = True
     consume.celltypes.value = 'binary'
-    consume.optional_pins.add('value')
+    assert 'value' in consume.optional_pins
     null_result.local = True
     null_result.celltypes.result = 'plain'
     # A null dependency must bypass expression decoding/conversion entirely.
@@ -130,7 +130,7 @@ def test_bare_empty_bytes_checksum_is_optional_absence():
 
     consume.local = True
     consume.celltypes.value = 'bytes'
-    consume.optional_pins.add('value')
+    assert 'value' in consume.optional_pins
     empty = consume(Buffer(b'').get_checksum())
     assert empty.construct() == consume().construct()
     assert empty.run() is True

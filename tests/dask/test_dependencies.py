@@ -79,7 +79,7 @@ def test_optional_pin_dask_partial_construction_and_null_normalization():
                 return a
             return a + x
 
-        consume.optional_pins.add("x")
+        assert "x" in consume.optional_pins
 
         absent = consume(10)
         submission = absent._build_dask_submission(
@@ -115,7 +115,7 @@ def test_optional_pin_dask_dependency_failure_is_not_absence():
         def consume(a, x=None):
             return a
 
-        consume.optional_pins.add("x")
+        assert "x" in consume.optional_pins
         tf = consume(10, boom())
 
         with pytest.raises(Exception):
