@@ -129,6 +129,7 @@ class TransformerCore(Generic[P, R]):
     ) -> None:
         self._language = language
         self._args = {}
+        self._pin_memos = {}
         self._modules = {}
         self._globals = {}
         self._celltypes = {}
@@ -245,24 +246,10 @@ class TransformerCore(Generic[P, R]):
         return GlobalsWrapper(self._globals)
 
     @property
-    def optional_pins(self) -> set[str]:
-        """Input pins where JSON null means absence.
-
-        Connected optional pins still compute and still fail on upstream errors.
-        Optional pins can be tricky: for these pins, JSON null is reserved as
-        absence and only plain/mixed pins can use that absence value.
-        """
-
-        if self._workflow_backend is not None:
-            return self._workflow_backend.optional_pins
-        return self._optional_pins
-
-    @optional_pins.setter
-    def optional_pins(self, value) -> None:
-        if getattr(self, "_workflow_backend", None) is not None:
-            self._workflow_backend.optional_pins = value
-            return
-        self._optional_pins = set(value or ())
+    def optional_pins(self):
+        """Read-only Python signature defaults, with per-name enable/disable."""
+        from .optional_pins import OptionalPins
+        return OptionalPins(self)
 
     @property
     def environment(self) -> Environment:
@@ -293,8 +280,11 @@ class TransformerCore(Generic[P, R]):
         all_args = TransformerCore._copy_arguments(snapshot.args)
         from seamless import Expression
         for name, input_celltype in snapshot.input_celltypes.items():
-            all_args[name] = Expression(all_args[name], input_celltype=input_celltype,
-                                        celltype=snapshot.celltypes[name])
+            try:
+                all_args[name] = Expression(all_args[name], input_celltype=input_celltype,
+                                            celltype=snapshot.celltypes[name])
+            except Exception as exc:
+                raise type(exc)(f"Pin {name!r} conversion from {input_celltype!r} to {snapshot.celltypes[name]!r}: {exc}") from exc
         signature = snapshot.signature
         if signature is not None:
             call_args = signature.bind_partial(*args, **kwargs).arguments
@@ -307,8 +297,6 @@ class TransformerCore(Generic[P, R]):
             if isinstance(value, Checksum) and snapshot.celltypes.get(name) == "checksum":
                 call_args[name] = Buffer(value, "checksum")
         all_args.update(call_args)
-        if signature is not None:
-            return signature.bind(**all_args).arguments
         for argname in snapshot.celltypes:
             if argname == "result":
                 continue
@@ -327,20 +315,27 @@ class TransformerCore(Generic[P, R]):
 
     @staticmethod
     def _convert_pin_arguments(arguments, celltypes):
-        from seamless import Expression, CellBase
+        from seamless import Expression, Cell, CellBase
         from seamless.cell_class import _check_input_ref
 
         for argname, arg in tuple(arguments.items()):
             if isinstance(arg, CellBase):
                 _check_input_ref(arg)
             celltype = celltypes.get(argname, "mixed")
-            if isinstance(arg, (Transformation, Expression)) and arg.celltype != celltype:
-                arguments[argname] = Expression(
-                    arg, input_celltype=arg.celltype, celltype=celltype
-                )
+            if isinstance(arg, Cell) or (isinstance(arg, (Transformation, Expression)) and arg.celltype != celltype):
+                try:
+                    arguments[argname] = Expression(
+                        arg, input_celltype=arg.celltype, celltype=celltype
+                    )
+                except Exception as exc:
+                    raise type(exc)(f"Pin {argname!r} conversion from {arg.celltype!r} to {celltype!r}: {exc}") from exc
 
     def _build_from_snapshot(self, snapshot, *args, **kwargs) -> Transformation[R]:
         ensure_open("transformer call")
+        if snapshot.compilation is not None or snapshot.schema is not None:
+            from .compiled_validation import validate_stage1
+            validate_stage1(snapshot.schema, snapshot.celltypes, snapshot.optional_pins,
+                            snapshot.meta.get("metavars", {}))
         arguments = self._bind_snapshot_arguments(snapshot, args, kwargs)
         from seamless import Expression
         self._convert_pin_arguments(arguments, snapshot.celltypes)
@@ -350,7 +345,7 @@ class TransformerCore(Generic[P, R]):
             for argname, arg in arguments.items()
             if isinstance(arg, (Transformation, Expression))
         }
-        if snapshot.schema is not None:
+        if snapshot.compilation is not None or snapshot.schema is not None:
             from .pretransformation import compiled_transformer_to_pretransformation
             from .compiled_transformer import (
                 _deferred_validation_hooks, _validate_derived_compiled_dunders,
@@ -359,8 +354,7 @@ class TransformerCore(Generic[P, R]):
             )
             import yaml
             signature = _require_signature_package().Signature.from_dict(yaml.safe_load(snapshot.schema))
-            validations = [(p.name, p.dtype, p.shape is not None) for p in signature.inputs]
-            sync_validate, async_validate = _deferred_validation_hooks(validations)
+            sync_validate, async_validate = _deferred_validation_hooks(signature)
             code = snapshot.codebuf
             if isinstance(code, Checksum): code = code.resolve()
             if isinstance(code, Buffer): code = code.decode()
@@ -708,6 +702,9 @@ class TransformerCore(Generic[P, R]):
         for name, (value, _input_celltype) in getattr(self, "_args", {}).items():
             if isinstance(value, Checksum):
                 claims.append((value, f"pin:{name}"))
+        for name, memo in self._pin_memos.items():
+            if memo["checksum"] is not None:
+                claims.append((memo["checksum"], f"pin-result:{name}"))
         code_checksum = getattr(self, "_code_checksum_ref", None)
         if isinstance(code_checksum, Checksum):
             claims.append((code_checksum, "code"))
@@ -731,6 +728,10 @@ class TransformerCore(Generic[P, R]):
         if isinstance(code_checksum, Checksum):
             code_checksum.decref_refholder()
         self._code_checksum_ref = None
+        for memo in getattr(self, "_pin_memos", {}).values():
+            if memo["checksum"] is not None:
+                memo["checksum"].decref_refholder()
+                memo["checksum"] = None
 
     def __del__(self):
         try:
@@ -784,20 +785,29 @@ class PythonMixin(Generic[P, R]):
     def _set_code(self, code: Callable[P, R] | str | Checksum):
         from .getsource import getsource
 
+        from .optional_pins import pin_signature
         signature = None
+        self._optional_pins = set()
         if callable(code):
             assert isinstance(code, FunctionType)
             self._workflow_callable = code
-            signature = inspect.signature(code)
+            signature = pin_signature(inspect.signature(code))
             code = getsource(code)
             codebuf = Buffer(code, "python")
             self._codebuf = codebuf
             self._celltypes = {k: "mixed" for k in signature.parameters}
             self._celltypes["result"] = "mixed"
+            for name in tuple(self._args):
+                if name not in signature.parameters:
+                    old, _ = self._args.pop(name)
+                    self._replace_checksum_field(old, None)
+            for memo in self._pin_memos.values():
+                self._replace_checksum_field(memo['checksum'], None)
+                memo.update(checksum=None, identity=None, exception=None)
             self._optional_pins = {
                 name
                 for name, parameter in signature.parameters.items()
-                if parameter.default is not inspect.Parameter.empty
+                if self.language == "python" and parameter.default is not inspect.Parameter.empty
             }
         elif isinstance(code, Checksum):
             # A checksum-backed code field is an explicit lifecycle role.  Keep
@@ -820,7 +830,8 @@ class PythonMixin(Generic[P, R]):
         if self._workflow_backend is not None:
             cfg = self._workflow_backend.cfg
             if callable(cfg.callable):
-                return inspect.signature(cfg.callable)
+                from .optional_pins import pin_signature
+                return pin_signature(inspect.signature(cfg.callable))
             return None
         return self._signature
 
@@ -1004,6 +1015,9 @@ class CelltypesWrapper:
             all_celltypes = celltypes + ["deepcell", "deepfolder", "folder", "module"]
         if value not in all_celltypes:
             raise TypeError(value, all_celltypes)
+        from seamless.cell_class import _check_projected_source
+        ref = self._args.get(key, (None, None))[0]
+        _check_projected_source(ref, value)
         self._celltypes[key] = value
         self._celltypes.setdefault("result", "mixed")
 

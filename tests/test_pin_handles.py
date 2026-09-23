@@ -3,7 +3,6 @@ import re
 
 import pytest
 from seamless import AuthorityError, Buffer, CacheMissError, Cell, CellBase, Expression
-from seamless.checksum.hash_type_validation import HashTypeValidationError
 from seamless.retired_names import RETIRED_NAMES
 from seamless_transformer import Pin, delayed
 from seamless_transformer.transformation_class import TransformationError
@@ -160,7 +159,8 @@ def test_signatureless_declaration_delete_and_null_clear():
     assert pin.state == 'complete'
     pin.buffer = None
     assert pin.state == 'unwired'
-    tf.optional_pins.add('value')
+    with pytest.raises(AttributeError):
+        tf.optional_pins.add('value')
     del tf.pins.value
     assert 'value' not in tf.optional_pins
     with pytest.raises(AttributeError):
@@ -196,7 +196,8 @@ def test_retype_converts_at_call():
     assert transformation.run() == '42'
     tf.pins.value = 'abc'
     tf.celltypes.value = 'int'
-    assert isinstance(tf.pins.value.exception, HashTypeValidationError)
+    assert isinstance(tf.pins.value.exception, str)
+    assert 'Cannot convert' in tf.pins.value.exception
     failed = tf()
     assert failed.construct() is None
     with pytest.raises(TransformationError, match="Dependency 'value' has an exception"):

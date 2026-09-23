@@ -428,10 +428,6 @@ def test_compiled_checksum_input_scalar():
 
 @pytest.mark.parametrize("dtype, c_type, celltype", [("int32", "int32_t", "int"), ("float64", "double", "float")])
 @pytest.mark.parametrize("source", ["checksum", "transformation"])
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: required compiled inputs do not yet reject null at the pin boundary",
-)
 def test_compiled_required_input_rejects_null_at_pin_boundary(
     dtype, c_type, celltype, source
 ):
@@ -461,7 +457,7 @@ def test_compiled_required_input_rejects_null_at_pin_boundary(
         # than mistaking an upstream execution failure for input rejection.
         value.compute()
         assert value.exception is None
-        assert is_null(value.checksum)
+        assert is_null(value.result_checksum)
 
     tf = Transformer("c", compiled=True)
     tf.local = True
@@ -478,7 +474,8 @@ int transform({c_type} value, {c_type} *result) {{
     return 0;
 }}
 """
-    message = rf"Required pin 'value'.*'{celltype}'.*cannot accept null"
+    tf.celltypes.value = celltype
+    message = rf"Compiled pin 'value'.*celltype '{celltype}'.*null"
     try:
         transformation = tf(value=value)
     except TypeError as exc:
@@ -488,9 +485,9 @@ int transform({c_type} value, {c_type} *result) {{
     else:
         transformation.compute()
         assert transformation.exception is not None
-        assert "TypeError" in transformation.exception
+        assert "CompiledPinSchemaError" in transformation.exception
         assert re.search(message, transformation.exception), transformation.exception
-        assert transformation.checksum is None
+        assert transformation._result_checksum_internal() is None
 
 
 def test_compiled_checksum_input_array():

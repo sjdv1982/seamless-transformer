@@ -105,7 +105,7 @@ def test_connected_optional_dependency_failure_is_not_absence():
     def consume(a, x=None):
         return a
 
-    consume.optional_pins.add("x")
+    assert "x" in consume.optional_pins
     tf = consume(1, boom())
 
     assert tf.construct() is None
@@ -122,7 +122,7 @@ def test_connected_optional_dependency_failure_is_not_absence_async():
     def consume(a, x=None):
         return a
 
-    consume.optional_pins.add("x")
+    assert "x" in consume.optional_pins
     tf = consume(1, boom())
 
     async def run_construction():
