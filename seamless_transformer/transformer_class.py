@@ -412,12 +412,17 @@ class TransformerCore(Generic[P, R]):
             ),
         )
 
-    def __call__(self, *args, **kwargs) -> Transformation[R]:
-        """Build a delayed Transformation from the current transformer state."""
+    def build(self, *args, **kwargs) -> Transformation[R]:
+        """Build a delayed Transformation without executing it."""
         return self._build_from_snapshot(self._snapshot_for_call(), *args, **kwargs)
 
-    def transformation(self):
-        return self()
+    def __call__(self, *args, **kwargs) -> Transformation[R]:
+        """Build a delayed Transformation from the current transformer state."""
+        return self.build(*args, **kwargs)
+
+    def transformation(self, *args, **kwargs) -> Transformation[R]:
+        """Build a delayed Transformation from the current transformer state."""
+        return self.build(*args, **kwargs)
 
     get_transformation = transformation
 
@@ -474,23 +479,23 @@ class TransformerCore(Generic[P, R]):
     def compute(self, timeout=None):
         if self._workflow_backend is not None:
             return self._workflow_backend.compute(timeout=timeout)
-        return self().compute()
+        return self.build().compute()
 
     async def computation(self, timeout=None):
         if self._workflow_backend is not None:
             return await self._workflow_backend.computation(timeout=timeout)
         import asyncio
-        return await asyncio.wait_for(self().computation(), timeout)
+        return await asyncio.wait_for(self.build().computation(), timeout)
 
     def run(self):
         if self._workflow_backend is not None:
             return self._workflow_backend.run()
-        return self().run()
+        return self.build().run()
 
     def task(self):
         if self._workflow_backend is not None:
             return self._workflow_backend.task()
-        return self().task()
+        return self.build().task()
 
     def prune(self):
         if self._workflow_backend is None:
