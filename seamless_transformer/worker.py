@@ -2401,7 +2401,7 @@ async def dispatch_expression(
     *,
     validator=None,
     validator_language=None,
-    scratch=True,
+    scratch=False,
 ):
     """Dispatch checksum-level Expressions through the configured backend."""
     from seamless.checksum.expression import evaluate_expression_async
