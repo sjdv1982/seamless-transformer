@@ -312,8 +312,6 @@ def test_jobserver_evaluation_stores_result_hash_type(tmp_path, backend):
             if client is not None:
                 def count():
                     from seamless.checksum import expression
-                    from seamless.caching import buffer_writer
-                    buffer_writer.flush()
                     return expression._expression_evaluations
                 assert sum(client.client.run(count).values()) == 1
                 from seamless.checksum import expression as expression_mod
