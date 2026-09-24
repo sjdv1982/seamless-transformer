@@ -1516,6 +1516,7 @@ def transformation_from_pretransformation(
         if not transformation_dict.get("__compiled__"):
             normalize_optional_pins_for_construction(transformation_dict, optional_pins)
         from seamless.checksum.hash_type_validation import validate_deserializable_as
+        from seamless.checksum.deep import DEEP_CELLTYPES
 
         for pinname, value in transformation_dict.items():
             if pinname.startswith("__"):
@@ -1524,7 +1525,8 @@ def transformation_from_pretransformation(
             if checksum_hex is None:
                 continue
             if not transformation_dict.get("__compiled__") or pinname in ("code", "objects"):
-                validate_deserializable_as(checksum_hex, celltype)
+                if celltype not in DEEP_CELLTYPES:
+                    validate_deserializable_as(checksum_hex, celltype)
         return transformation_dict
 
     def _inject_dependency_dunder(

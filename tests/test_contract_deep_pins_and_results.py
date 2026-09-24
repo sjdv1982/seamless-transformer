@@ -1,29 +1,12 @@
 """Contract coverage for deep-celltypes.md, pin layer and output side.
 
 §How deep values reach a transformer and §The output side: a deep result is an index.
-Known gaps are non-strict xfails that assert the contract, never the bug.
 """
 import pytest
 
 from seamless import Buffer, Checksum
 from seamless.transformer import delayed, direct
 from seamless_transformer import transformation_utils
-
-DOC = "deep-celltypes.md"
-
-PIN_GAP = pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §How deep values reach a transformer: a deep input pin fails in "
-    "pretransformation._to_checksum, which asks HashType validate_deserializable_as "
-    "with the deep name and gets 'celltype is outside the HashType domain'",
-)
-
-RESULT_TYPING_GAP = pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §What a deep buffer is / §The output side: the value of a deep "
-    "result is {key: Checksum}; the code hands back raw hex strings",
-)
-
 
 def _held(value, celltype=None):
     buffer = Buffer(value, celltype) if celltype else Buffer(value)
@@ -45,7 +28,6 @@ def _describe_pin():
 # --- Input side ------------------------------------------------------------
 
 
-@PIN_GAP
 @pytest.mark.parametrize("celltype", ["deepcell", "deepfolder"])
 def test_deepcell_and_deepfolder_pins_hand_over_unresolved_checksums(celltype):
     member_content = b"deep pin member, never stored"
@@ -59,7 +41,6 @@ def test_deepcell_and_deepfolder_pins_hand_over_unresolved_checksums(celltype):
     assert describe(x=index.get_checksum()) == {"dir/k": ["Checksum", member.hex()]}
 
 
-@PIN_GAP
 def test_folder_pin_hands_over_resolved_child_contents():
     child = _held(b"folder child contents")
     index = _held({"dir/k": child.get_checksum().hex()}, "plain")
@@ -68,7 +49,6 @@ def test_folder_pin_hands_over_resolved_child_contents():
     assert describe(x=index.get_checksum()) == {"dir/k": ["bytes", "folder child contents"]}
 
 
-@PIN_GAP
 @pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
 def test_deep_pin_rejects_a_nested_index_through_the_shared_validator(celltype):
     child = _held(b"nested child")
@@ -90,12 +70,6 @@ def test_pin_unpacking_uses_the_same_validator_failures_as_expressions(celltype,
         transformation_utils.unpack_deep_structure(bad, celltype)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §Nesting is not contract: the deepcell/deepfolder pin presentation "
-    "(transformation_namespace._to_checksum_dict) still recurses through nesting instead "
-    "of calling the shared validator",
-)
 def test_pin_namespace_checksum_dict_rejects_nesting_like_unpacking():
     """One shared validator: the deepcell/deepfolder presentation must refuse what unpacking refuses."""
     from seamless_transformer.transformation_namespace import _to_checksum_dict
@@ -139,7 +113,6 @@ def test_folder_result_is_an_index_of_the_produced_bytes():
     }
 
 
-@RESULT_TYPING_GAP
 @pytest.mark.parametrize("celltype", ["deepcell", "folder"])
 def test_delayed_deep_result_value_is_an_index_of_checksum_objects(celltype):
     @delayed
@@ -151,7 +124,6 @@ def test_delayed_deep_result_value_is_an_index_of_checksum_objects(celltype):
     assert isinstance(value["a"], Checksum)
 
 
-@RESULT_TYPING_GAP
 @pytest.mark.parametrize("celltype", ["deepcell", "folder"])
 def test_direct_deep_result_is_an_unresolved_index_of_checksum_objects(celltype):
     @direct

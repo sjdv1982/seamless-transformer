@@ -260,6 +260,7 @@ class PreTransformation:
                 except Exception:
                     pass
         from seamless.checksum.hash_type_validation import validate_deserializable_as
+        from seamless.checksum.deep import DEEP_CELLTYPES
         from .transformation_utils import validate_pin_null
 
         from seamless.checksum.null import canonicalize_checksum
@@ -282,7 +283,8 @@ class PreTransformation:
         else:
             validate_pin_null(checksum, celltype or "mixed", pinname,
                               optional=pinname in self._optional_pins)
-            validate_deserializable_as(checksum, celltype or "mixed", buffer=buffer)
+            if celltype not in DEEP_CELLTYPES:
+                validate_deserializable_as(checksum, celltype or "mixed", buffer=buffer)
         if not is_worker():
             try:
                 from seamless.caching.buffer_cache import get_buffer_cache
