@@ -219,7 +219,8 @@ class PreTransformation:
         code_buffer = value if isinstance(value, Buffer) else Buffer(value, "python")
         if is_worker():
             try:
-                code_buffer.tempref()  # upload to parent so nested workers can resolve
+                code_buffer.tempref()  # local: upload to parent so nested workers can resolve
+                code_buffer.transfer_write()  # remote: definition input, not scratch
             except Exception:
                 pass
         try:
@@ -254,7 +255,8 @@ class PreTransformation:
             checksum = buffer.get_checksum()
             if is_worker():
                 try:
-                    buffer.tempref()  # ensure parent sees worker-created buffers
+                    buffer.tempref()  # local: ensure parent sees worker-created buffers
+                    buffer.transfer_write()  # remote: definition input, not scratch
                 except Exception:
                     pass
         from seamless.checksum.hash_type_validation import validate_deserializable_as
@@ -292,7 +294,7 @@ class PreTransformation:
             if isinstance(meta, dict) and meta.get("allow_input_fingertip"):
                 scratch_ref = True
             if scratch_ref:
-                checksum.tempref(scratch=True)
+                checksum.tempref()
             else:
                 checksum.incref_refholder(scratch=False)
                 self._value_refs.append((checksum, role))
@@ -360,6 +362,11 @@ def direct_transformer_to_pretransformation(
         envbuf = Buffer(env, "plain")
         checksum = envbuf.get_checksum()
         envbuf.tempref()
+        # UNCLEAR: no scratch signal is available at this definition-construction
+        # point (see call-site classification (c) in the tempref/transfer_write
+        # refactor); transfer_write preserves today's unconditional non-scratch
+        # registration pending a design decision.
+        envbuf.transfer_write()
         pretransformation_dict["__env__"] = checksum.hex()
 
     if meta:
@@ -431,6 +438,11 @@ def _buffer_checksum_hex(value, celltype: str) -> str:
     buffer = Buffer(value, celltype)
     checksum = buffer.get_checksum()
     buffer.tempref()
+    # UNCLEAR: no scratch signal is available at this definition-construction
+    # point (see call-site classification (c) in the tempref/transfer_write
+    # refactor); transfer_write preserves today's unconditional non-scratch
+    # registration pending a design decision.
+    buffer.transfer_write()
     return checksum.hex()
 
 

@@ -242,6 +242,13 @@ def pack_deep_structure(structure, celltype: str):
             buffer = Buffer(value, "mixed" if celltype == "deepcell" else None)
             result[key] = buffer.get_checksum().hex()
             buffer.tempref()
+            # UNCLEAR: pack_deep_structure has no scratch signal for the deep
+            # member buffers it produces (see call-site classification (c) in
+            # the tempref/transfer_write refactor); transfer_write preserves
+            # today's unconditional non-scratch registration pending a design
+            # decision on whether deep members should follow the parent
+            # result's own scratch flag.
+            buffer.transfer_write()
     return result
 
 

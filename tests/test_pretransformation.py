@@ -27,9 +27,30 @@ def test_pretransformation_non_scratch_input_is_a_refholder():
     assert get_buffer_cache().reference_snapshot().get(checksum, (0, 0, False))[0] == 0
 
 
+def test_pretransformation_tempref_only_input_is_not_scratch():
+    # A plain tempref is neutral about scratch status: an input prepared the
+    # ordinary way (tempref, no scratch decision) must still get a refholder.
+    buffer = Buffer(b"pretransformation tempref input")
+    checksum = buffer.get_checksum()
+    buffer.tempref()
+    assert not get_buffer_cache().is_scratch_ref(checksum)
+    pre = PreTransformation(
+        {
+            "__language__": "python",
+            "__output__": ("result", "mixed", None),
+            "value": ("text", None, checksum),
+        }
+    )
+    pre.prepare_transformation()
+    assert len(pre._value_refs) == 1
+    assert get_buffer_cache().reference_snapshot()[checksum][0] == 1
+    pre.release()
+
+
 def test_pretransformation_scratch_input_is_tempref_only():
     checksum = Buffer(b"pretransformation scratch").get_checksum()
-    checksum.tempref(scratch=True)
+    checksum.tempref()
+    checksum.mark_scratch()
     pre = PreTransformation(
         {
             "__language__": "python",
@@ -46,7 +67,8 @@ def test_pretransformation_scratch_input_is_tempref_only():
 def test_mixed_scratch_and_non_scratch_pins_have_exact_roles():
     scratch_buffer = Buffer(b"mixed-scratch")
     scratch = scratch_buffer.get_checksum()
-    scratch.tempref(scratch=True)
+    scratch.tempref()
+    scratch.mark_scratch()
     normal_buffer = Buffer(b"mixed-normal")
     normal = normal_buffer.get_checksum()
     pre = PreTransformation(
@@ -135,7 +157,8 @@ def test_code_manager_claims_are_not_attributed_to_pretransformation():
 def test_transfer_acquires_before_pretransformation_release(monkeypatch):
     source = Buffer(b"transfer-order")
     checksum = source.get_checksum()
-    checksum.tempref(scratch=True)
+    checksum.tempref()
+    checksum.mark_scratch()
     pre = PreTransformation(
         {
             "__language__": "python",

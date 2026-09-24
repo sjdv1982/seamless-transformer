@@ -99,7 +99,7 @@ def test_auto_expression_dispatches_hashserver_only_input_to_jobserver(tmp_path)
             args, kwargs = dispatches[0]
             assert Checksum(args[0]) == source_checksum
             assert args[1:] == ("value", "plain", "str")
-            assert kwargs == {}
+            assert kwargs == {"scratch": True}
         finally:
             seamless.close()
         print("AUTO_EXPRESSION_JOBSERVER_OK")
@@ -231,16 +231,23 @@ def test_run_resolves_jobserver_result_through_hashserver(tmp_path):
             drop_buffer(result_checksum)
             assert expression.run() == "from hashserver"
 
+            # run() materializes an unreachable result from its input; only with
+            # the input reachable nowhere does it surface CacheMissError, on the result.
             drop_buffer(result_checksum)
+            drop_buffer(source_checksum)
+            del source
             async def no_buffer(checksum):
                 return None
+            async def no_lengths(checksums):
+                return [None for _ in checksums]
             buffer_remote.get_buffer = no_buffer
+            buffer_remote.get_buffer_lengths = no_lengths
             try:
                 expression.run()
             except CacheMissError as exc:
                 assert exc.checksum == result_checksum
             else:
-                raise AssertionError("an empty hashserver must surface CacheMissError")
+                raise AssertionError("an input reachable nowhere must surface CacheMissError")
         finally:
             seamless.close()
         print("EXPRESSION_RUN_HASHSERVER_OK")

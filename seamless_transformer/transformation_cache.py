@@ -221,12 +221,13 @@ class TransformationCache:
                     observation.CACHE_HIT,
                     transformation_dict=transformation_dict,
                 )
-                if scratch:
-                    cached_result.tempref(scratch=True)
-                else:
+                cached_result.tempref()
+                if not scratch:
                     if buffer_remote is not None:
                         await buffer_remote.promise(cached_result)
-                    cached_result.tempref()
+                    cached_result.transfer_write()
+                else:
+                    cached_result.mark_scratch()
                 self._register_transformation_result(
                     tf_checksum, cached_result, tf_dunder=tf_dunder
                 )
@@ -252,10 +253,11 @@ class TransformationCache:
                         observation.CACHE_HIT,
                         transformation_dict=transformation_dict,
                     )
-                    if scratch:
-                        remote_result.tempref(scratch=True)
+                    remote_result.tempref()
+                    if not scratch:
+                        remote_result.transfer_write()
                     else:
-                        remote_result.tempref()
+                        remote_result.mark_scratch()
                     self._register_transformation_result(
                         tf_checksum, remote_result, tf_dunder=tf_dunder
                     )
@@ -815,10 +817,11 @@ class TransformationCache:
         if active_submission is not None and active_submission.canceled:
             raise TransformationCancelledError("Transformation was canceled")
 
-        if scratch:
-            result_checksum.tempref(scratch=True)
+        result_checksum.tempref()
+        if not scratch:
+            result_checksum.transfer_write()
         else:
-            result_checksum.tempref()
+            result_checksum.mark_scratch()
 
         if database_remote is not None and not is_worker():
             await database_remote.set_transformation_result(
@@ -972,10 +975,11 @@ class TransformationCache:
                 self._register_transformation_result(
                     tf_checksum, cached_result, tf_dunder=tf_dunder
                 )
-                if scratch:
-                    cached_result.tempref(scratch=True)
+                cached_result.tempref()
+                if not scratch:
+                    cached_result.transfer_write()
                 else:
-                    cached_result.tempref()
+                    cached_result.mark_scratch()
                 return cached_result
 
         try:

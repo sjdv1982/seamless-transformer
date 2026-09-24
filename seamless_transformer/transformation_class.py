@@ -409,9 +409,12 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         checksum = Checksum(checksum)
         if self._cancelled:
             return checksum
-        checksum.tempref(scratch=self._scratch)
+        checksum.tempref()
+        # The definition is provenance, not a result: fingertipping a scratch
+        # result in another process needs it, so it is written even when scratch.
+        checksum.transfer_write()
         if not self._definition_refheld and not self._refholds_released:
-            checksum.incref_refholder(scratch=self._scratch)
+            checksum.incref_refholder()
             self._definition_refheld = True
         return checksum
 
@@ -423,7 +426,11 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         # its owner detached.  Keep that late result out of the object.
         if self._cancelled:
             return None
-        checksum.tempref(scratch=self._scratch)
+        checksum.tempref()
+        if not self._scratch:
+            checksum.transfer_write()
+        else:
+            checksum.mark_scratch()
         old = self._result_checksum
         if old is not None and old == checksum:
             if self._refhold_result and not self._result_refheld:

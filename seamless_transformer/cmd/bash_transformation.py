@@ -179,6 +179,13 @@ def prepare_bash_transformation(
     tf_buffer = tf_get_buffer(transformation_dict)
     tf_checksum = tf_buffer.get_checksum()
     tf_buffer.tempref()
+    # UNCLEAR: this CLI helper has no scratch signal of its own (only
+    # `dry_run`, which -- unlike register_buffer's input handling -- was
+    # never actually threaded to this call; see call-site classification (c)
+    # in the tempref/transfer_write refactor). transfer_write preserves
+    # today's unconditional non-scratch registration pending a design
+    # decision on whether this should honor dry_run too.
+    tf_buffer.transfer_write()
 
     return tf_checksum, transformation_dict
 def run_transformation(

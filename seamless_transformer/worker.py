@@ -485,6 +485,10 @@ def _buffer_tempref(self: Buffer, **_kwargs: Any) -> None:
     _buffer_ref_op(self, "tempref")
 
 
+def _buffer_transfer_write(self: Buffer, **_kwargs: Any) -> None:
+    _buffer_ref_op(self, "transfer_write")
+
+
 def _checksum_resolve(self: Checksum, celltype=None):
     data = _LOCAL_BUFFERS.get(self.hex())
     if data is not None:
@@ -539,6 +543,9 @@ def _patch_worker_primitives() -> None:
         def tempref(self, *args: Any, **kwargs: Any) -> None:
             return None
 
+        def transfer_write(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
         def get(self, *args: Any, **kwargs: Any) -> None:
             return None
 
@@ -561,9 +568,13 @@ def _patch_worker_primitives() -> None:
     Checksum.tempref = (  # type: ignore[assignment]
         lambda self, interest=128.0, fade_factor=2.0, fade_interval=2.0, **kwargs: None
     )
+    # A bare Checksum has no content to publish from inside a worker; only a
+    # Buffer's transfer_write (below) can meaningfully cross the IPC boundary.
+    Checksum.transfer_write = lambda self, *args, **kwargs: None  # type: ignore[assignment]
     Buffer.incref = _buffer_incref  # type: ignore[assignment]
     Buffer.decref = _buffer_decref  # type: ignore[assignment]
     Buffer.tempref = _buffer_tempref  # type: ignore[assignment]
+    Buffer.transfer_write = _buffer_transfer_write  # type: ignore[assignment]
     Checksum.resolve = _checksum_resolve  # type: ignore[assignment]
     Checksum.resolution = _checksum_resolution  # type: ignore[assignment]
     _primitives_patched = True
@@ -685,6 +696,8 @@ def _execute_transformation_impl(
                 return result
             result_checksum = Checksum(result)
             result_checksum.tempref()
+            if not scratch:
+                result_checksum.transfer_write()
             return result_checksum
         except Exception as exc:
             from seamless.error_envelope import encode_error, error_kind
@@ -1639,6 +1652,8 @@ class _WorkerManager:
                 if isinstance(result, Checksum):
                     try:
                         result.tempref()
+                        if not scratch:
+                            result.transfer_write()
                     except Exception:
                         pass
                     return {"status": "done", "result": result.hex()}
@@ -1811,6 +1826,8 @@ class _WorkerManager:
             if cached_result is not None:
                 try:
                     cached_result.tempref()
+                    if not scratch:
+                        cached_result.transfer_write()
                 except Exception:
                     pass
                 return cached_result
@@ -2046,6 +2063,8 @@ class _WorkerManager:
                     if isinstance(result, Checksum):
                         try:
                             result.tempref()
+                            if not scratch:
+                                result.transfer_write()
                         except Exception:
                             pass
                     return result
@@ -2089,6 +2108,8 @@ class _WorkerManager:
         if isinstance(result, Checksum):
             try:
                 result.tempref()
+                if not scratch:
+                    result.transfer_write()
             except Exception:
                 pass
         return result
@@ -2136,6 +2157,8 @@ class _WorkerManager:
             checksum.incref()
         elif op == "tempref":
             checksum.tempref()
+        elif op == "transfer_write":
+            checksum.transfer_write()
         else:
             raise ValueError(op)
         if get_buffer_cache().get(checksum) is not None:
@@ -2413,6 +2436,8 @@ async def dispatch_expression(
     except ImportError:
         client = None
     if client is None:
+        # A non-scratch request asks for the bytes: materialize (a cached
+        # checksum without a local buffer is not an answer), then write.
         result = await evaluate_expression_async(
             input_checksum,
             path,
@@ -2420,6 +2445,7 @@ async def dispatch_expression(
             celltype,
             validator=validator,
             validator_language=validator_language,
+            materialize=not scratch,
         )
         if not scratch:
             from seamless_remote import buffer_remote
