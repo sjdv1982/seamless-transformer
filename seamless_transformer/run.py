@@ -234,12 +234,13 @@ def run_transformation_dict(
             result = pack_deep_structure(result, output_celltype)
         result_buffer = Buffer(result, output_celltype)
         result_checksum = result_buffer.get_checksum()
-        if not scratch:
-            if len(result_buffer):
+        if len(result_buffer):
+            if not scratch:
                 result_buffer.tempref()
-        elif require_value:
-            if len(result_buffer):
-                result_buffer.tempref(scratch=True)
+                result_buffer.transfer_write()
+            elif require_value:
+                result_buffer.tempref()
+                result_buffer.mark_scratch()
         return result_checksum
 
     result = _execute(
@@ -264,13 +265,14 @@ def run_transformation_dict(
 
     result_buffer = Buffer(result, output_celltype)
     result_checksum = result_buffer.get_checksum()
-    if not scratch:
-        # Keep the result buffer around so resolve() can find it.
-        if len(result_buffer):
+    if len(result_buffer):
+        if not scratch:
+            # Keep the result buffer around so resolve() can find it.
             result_buffer.tempref()
-    elif require_value:
-        if len(result_buffer):
-            result_buffer.tempref(scratch=True)
+            result_buffer.transfer_write()
+        elif require_value:
+            result_buffer.tempref()
+            result_buffer.mark_scratch()
 
     return result_checksum
 

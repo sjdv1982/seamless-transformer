@@ -141,7 +141,7 @@ def main() -> None:
             raise RuntimeError(
                 "Input checksum unexpectedly resolved without allow_input_fingertip"
             )
-        if not tf_fail.exception or "CacheMiss" not in tf_fail.exception:
+        if not isinstance(tf_fail._exception, CacheMissError):
             raise RuntimeError(
                 "Expected CacheMissError when allow_input_fingertip is False"
             )

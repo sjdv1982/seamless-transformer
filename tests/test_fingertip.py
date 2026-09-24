@@ -40,7 +40,7 @@ def test_fingertip_recompute_scratch():
     assert isinstance(result_checksum, Checksum), tf.exception
     print("Result:", result_checksum)
 
-    result_checksum.tempref(scratch=True)
+    result_checksum.tempref()
     get_buffer_cache().purge_scratch(result_checksum)
 
     with pytest.raises(CacheMissError):
@@ -81,7 +81,7 @@ def test_fingertip_recovers_expression_over_transformation_result():
     expression = Expression(tf_result, "a", input_celltype="plain", celltype="str")
     expression_result = expression.compute()
 
-    tf_result.tempref(scratch=True)
+    tf_result.tempref()
     get_buffer_cache().purge_scratch(tf_result)
     _drop_expression_buffer(expression_result)
 

@@ -41,7 +41,7 @@ def test_scratch():
     result_checksum = tf.compute()
     print(result_checksum)
     assert isinstance(result_checksum, Checksum), tf.exception
-    result_checksum.tempref(scratch=True)
+    result_checksum.tempref()
     get_buffer_cache().purge_scratch(result_checksum)
     try:
         buf = result_checksum.resolve()

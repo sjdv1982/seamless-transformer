@@ -267,7 +267,8 @@ def test_cancellation_after_completed_publication_is_a_noop():
 
 def test_scratch_pretransformation_transfers_tempref_to_transformation_bridge():
     checksum = Buffer(_unique("scratch-input").encode(), "bytes").get_checksum()
-    checksum.tempref(scratch=True)
+    checksum.tempref()
+    checksum.mark_scratch()
     pre = PreTransformation(
         {
             "__language__": "python",
