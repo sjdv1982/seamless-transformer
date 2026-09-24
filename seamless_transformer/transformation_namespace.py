@@ -86,18 +86,12 @@ def _find_filesystem_path(
 
 
 def _to_checksum_dict(structure):
-    """Walk a deep structure and wrap each leaf hex string in Checksum (no resolution)."""
+    """Validate a deep index and wrap its members in Checksum without resolving."""
     if structure is None:
         return structure
+    from seamless.checksum.deep import validate_deep_structure
 
-    def _convert(value):
-        if isinstance(value, dict):
-            return {k: _convert(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [_convert(v) for v in value]
-        return Checksum(value)
-
-    return _convert(structure)
+    return validate_deep_structure(structure)
 
 
 def build_transformation_namespace_sync(

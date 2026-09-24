@@ -3,7 +3,7 @@ import shutil
 import numpy as np
 import pytest
 
-from seamless import Buffer, Checksum
+from seamless import Buffer
 from seamless_transformer import (
     CompiledObject,
     Transformer,
@@ -337,10 +337,6 @@ def test_multi_output_mixed():
     assert tf(a=2, b=3) == {"sum": 5, "product": 6}
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: deep result values are indexes of Checksum objects",
-)
 def test_multi_output_deepcell_is_an_unresolved_index():
     delayed = Transformer("c", compiled=True)
     delayed.schema = MULTI_OUTPUT_SCHEMA
@@ -352,7 +348,7 @@ def test_multi_output_deepcell_is_an_unresolved_index():
         "sum": Buffer(5, "mixed").get_checksum(),
         "product": Buffer(6, "mixed").get_checksum(),
     }
-    assert {name: Checksum(value) for name, value in packed.items()} == expected_index
+    assert packed == expected_index
 
     direct = Transformer("c", compiled=True, direct=True)
     direct.schema = MULTI_OUTPUT_SCHEMA

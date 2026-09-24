@@ -82,12 +82,14 @@ def test_dask_dispatch_carries_the_requesters_scratch_decision(monkeypatch):
     assert observed == [True]
 
 
-@pytest.mark.parametrize("celltype", ["deepcell", "folder"])
-def test_pin_packing_rejects_nested_deep_structures(celltype):
-    with pytest.raises(ValueError, match="outer|nested"):
-        transformation_utils.pack_deep_structure(
-            {"outer": {"inner": "f" * 64}}, celltype
-        )
+def test_deepcell_packing_accepts_dict_member_values():
+    member = {"inner": "mixed member value"}
+    packed = transformation_utils.pack_deep_structure(
+        {"outer": member}, "deepcell"
+    )
+    assert packed == {
+        "outer": Buffer(member, "mixed").get_checksum().hex()
+    }
 
 
 @pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
