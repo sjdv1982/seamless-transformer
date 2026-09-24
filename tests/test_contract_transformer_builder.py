@@ -16,18 +16,6 @@ from seamless_transformer import Transformer, delayed, direct
 from seamless_transformer.transformation_class import Transformation
 
 
-BUILD_AHEAD = (
-    "transformers.md §Contract change: a mode-independent build operation: "
-    "no build() method; transformation()/get_transformation() are self() "
-    "and take no call arguments"
-)
-DIRECT_NAMED = (
-    "transformers.md §Named work methods: standalone named methods are "
-    "implemented from self(), so on a direct Transformer they receive the "
-    "value instead of a Transformation"
-)
-
-
 def add(a, b):
     return a + b
 
@@ -86,7 +74,6 @@ def test_delayed_call_builds_without_executing(tmp_path):
 # --- build / transformation / get_transformation ----------------------------
 
 
-@pytest.mark.xfail(strict=False, reason=BUILD_AHEAD)
 @pytest.mark.parametrize("mode", ["delayed", "direct"])
 def test_build_returns_transformation_for_every_call_mode(mode):
     tf = _builder(mode)
@@ -95,7 +82,6 @@ def test_build_returns_transformation_for_every_call_mode(mode):
     assert tr.run() == 5
 
 
-@pytest.mark.xfail(strict=False, reason=BUILD_AHEAD)
 @pytest.mark.parametrize("mode", ["delayed", "direct"])
 @pytest.mark.parametrize("alias", ["transformation", "get_transformation"])
 def test_transformation_aliases_accept_call_arguments(mode, alias):
@@ -109,9 +95,7 @@ def test_transformation_aliases_accept_call_arguments(mode, alias):
     "mode",
     [
         "delayed",
-        pytest.param(
-            "direct", marks=pytest.mark.xfail(strict=False, reason=BUILD_AHEAD)
-        ),
+        "direct",
     ],
 )
 @pytest.mark.parametrize("alias", ["transformation", "get_transformation"])
@@ -126,7 +110,6 @@ def test_transformation_aliases_return_transformation_for_every_call_mode(
     assert tr.run() == 5
 
 
-@pytest.mark.xfail(strict=False, reason=BUILD_AHEAD)
 def test_directness_does_not_change_snapshot_identity():
     d = _builder("delayed")
     D = _builder("direct")
@@ -137,7 +120,6 @@ def test_directness_does_not_change_snapshot_identity():
     assert t1.transformation_checksum == t2.transformation_checksum
 
 
-@pytest.mark.xfail(strict=False, reason=BUILD_AHEAD)
 def test_compiled_builders_have_build():
     for is_direct in (False, True):
         tf = Transformer("c", compiled=True, direct=is_direct)
@@ -186,9 +168,7 @@ def test_mutating_original_input_object_after_build_does_not_alter_it():
     "mode",
     [
         "delayed",
-        pytest.param(
-            "direct", marks=pytest.mark.xfail(strict=False, reason=DIRECT_NAMED)
-        ),
+        "direct",
     ],
 )
 def test_standalone_named_methods_ignore_call_mode(mode):
