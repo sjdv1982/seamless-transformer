@@ -42,8 +42,10 @@ def test_sister_pin_reads_and_call_time_cell_conversion():
     tf.celltypes.a = 'text'
     source = Cell('str')
     source.set('hello')
-    assert tf(a=source).run() == ['hello', 4]
+    # Call-time Cell arguments are undecided (contract-clarity-rulings.md), so the
+    # conversion is checked through a pre-bound pin only.
     tf.pins.a = source
+    assert tf().run() == ['hello', 4]
     pin = tf.pins.a
     assert isinstance(pin, (Pin, CellBase)) and not isinstance(pin, Cell)
     assert pin is not tf.pins.a

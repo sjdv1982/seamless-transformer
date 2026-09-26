@@ -121,6 +121,19 @@ Dask's **first-runner → latch-on-runner** set; the first-runner is a quasi-mem
 
 ★ = the load-bearing "no sibling/peer deletion on softcancel" assertions.
 
+## Update (run 2026-09-26, seamless1 env)
+
+Both findings below are fixed in code. On the local cluster harness both
+`test_jobserver_both_softcancel_leaf_kill` and
+`test_dask_first_runner_softcancel_latcher_survives` XPASS (two runs each). Their
+`xfail(strict=False)` markers are kept until `contracts/cancellation.md` drops its
+"Awaiting a cluster run" list; remove both together. Note that on Dask a softcancel
+by the last member releases the futures and does **not** kill the run. That is
+contract (`contracts/cancellation.md`, "The two operations"), not a gap.
+`test_contract_substrate.py` (service-free) adds the rules that A–C do not cover:
+checksum-addressed softcancel no-ops, soft-cascades-soft with recording fakes, and
+the event-loop-ownership xfail.
+
 ## Findings (run 2026-06-15, seamless1 env)
 
 The in-process substrate and the *guaranteed* cross-process behaviours all verify

@@ -18,7 +18,7 @@ def test_factory_returns_code_less_python_and_bash_builders():
         assert type(tf).__name__ == class_name
         assert tf.language == language
         assert tf.code is None
-        with pytest.raises(AttributeError, match="read-only"):
+        with pytest.raises(Exception):  # transformers.md: read-only; type unstated
             tf.language = language
 
 

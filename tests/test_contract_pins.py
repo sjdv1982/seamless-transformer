@@ -5,8 +5,10 @@ test_optional_pin_contract.py and test_transformation_checksum.py: the rules
 stated for "any"/"every" celltype are walked over the celltype list, and the
 pin-path rules are checked on the standalone Transformer too.
 """
+import re
+
 import pytest
-from seamless import AuthorityError, Buffer, CacheMissError, Cell, Checksum
+from seamless import AuthorityError, Buffer, CacheMissError, Cell, Checksum, Expression
 from seamless_transformer import delayed
 from seamless_transformer.transformation_class import TransformationError
 
@@ -48,6 +50,8 @@ def test_args_is_an_exact_alias_of_pins():
     tf.pins.value = 5
     assert tf.args.value.value == 5
     assert dir(tf.args) == dir(tf.pins)
+    # The same collection, not the same object (pins.md §Reaching pins).
+    assert tf.args is not tf.pins
     tf.args.value.checksum = None
     assert tf.pins.value.state == "unwired"
 
@@ -258,14 +262,16 @@ _MODULE_NULL = pytest.mark.xfail(strict=False, reason=(
     pytest.param(ct, marks=_MODULE_NULL) if ct == "module" else ct
     for ct in NON_NULLABLE_INPUT])
 def test_required_pin_null_from_upstream_is_reported_on_the_pin(celltype):
-    upstream = Cell("plain")
+    # The upstream has the pin's own celltype, so no conversion is involved.
+    upstream = Cell(celltype)
     upstream.set(None)
     tf = builder(celltype=celltype)
     tf.pins.value = upstream
     pin = tf.pins.value
     assert pin.checksum is None
     assert pin.state == "failed"
-    assert f"Required pin 'value' with celltype '{celltype}' cannot accept null" in pin.exception
+    assert pin.exception == (
+        f"Required pin 'value' with celltype '{celltype}' cannot accept null")
     transformation = tf()
     assert transformation.construct() is None
     assert "Required pin 'value'" in transformation.exception
@@ -294,43 +300,29 @@ def _null_upstream():
     return returns_none()
 
 
-def _null_cell():
-    cell = Cell("plain")
-    cell.set(None)
-    return cell
-
-
-ROUTES = {
-    "null-checksum": lambda: NULL,
-    "null-cell": _null_cell,
-    "null-transformation": _null_upstream,
-}
-
 _FORMAT = pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Null, required pins, optional pins (identity rule): the dropped "
-    "folder/deepfolder pin leaves its __format__ entry in the transformation dict"))
-_HASHTYPE = pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Null (identity rule, drop before conversion): a bare null Checksum on "
-    "a deep optional pin raises 'celltype is outside the HashType domain'"))
-_ILLEGAL = pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Null (drop happens before conversion): a null Transformation argument "
-    "is wrapped in an illegal plain->deep/module conversion before the drop"))
+    "pins.md §Null, required pins, optional pins (identity rule): contract ahead of "
+    "code: the dropped folder/deepfolder pin leaves its __format__ entry in the "
+    "transformation dict, so the checksum differs from absence"))
+
+DEEP_OR_MODULE = ("deepcell", "deepfolder", "folder", "module")
+ORDINARY_INPUT = [ct for ct in NULLABLE + NON_NULLABLE_INPUT if ct not in DEEP_OR_MODULE]
 
 
 def _identity_cases():
+    # Call-time routes only. A call-time Cell argument is undecided (rulings,
+    # "Rulings requested by coverage subagents"), so it is not exercised here.
+    # A null plain Transformation feeds only pins whose plain->X pair is legal;
+    # for deep pins that pair is illegal and "illegal conversions remain illegal".
     cases = []
     for celltype in NULLABLE + NON_NULLABLE_INPUT:
-        for route in ROUTES:
-            marks = []
-            if celltype in ("folder", "deepfolder"):
-                marks.append(_FORMAT)
-            if route == "null-checksum" and celltype in ("deepcell", "deepfolder", "folder"):
-                marks.append(_HASHTYPE)
-            if route == "null-transformation" and celltype in (
-                    "deepcell", "deepfolder", "folder", "module"):
-                marks.append(_ILLEGAL)
+        routes = ["null-checksum"]
+        if celltype not in DEEP_OR_MODULE:
+            routes.append("null-transformation")
+        for route in routes:
             if route == "null-checksum" and celltype == "checksum":
                 continue  # a Checksum is a value there; see the test below
+            marks = [_FORMAT] if celltype in ("folder", "deepfolder") else []
             cases.append(pytest.param(celltype, route, marks=marks,
                                       id=f"{celltype}-{route}"))
     return cases
@@ -342,23 +334,43 @@ def test_optional_null_has_absent_identity_for_every_celltype(celltype, route):
     assert tf.optional_pins == {"value"}
     absent = tf().construct()
     assert absent is not None
-    connected = tf(ROUTES[route]())
+    argument = NULL if route == "null-checksum" else _null_upstream()
+    connected = tf(argument)
     assert connected.construct() == absent, connected.exception
     assert connected.run() is None
 
 
-@pytest.mark.parametrize("celltype", NULLABLE + NON_NULLABLE_INPUT)
+@pytest.mark.parametrize("celltype", [
+    pytest.param(ct, marks=_FORMAT) if ct in ("folder", "deepfolder") else ct
+    for ct in NULLABLE + NON_NULLABLE_INPUT])
 def test_prebound_optional_null_has_absent_identity(celltype):
-    if celltype in ("folder", "deepfolder"):
-        pytest.xfail(_FORMAT.kwargs["reason"])
     tf = builder(optional_identity, celltype)
     absent = tf().construct()
-    tf.pins.value = _null_cell()
+    upstream = Cell(celltype)  # same celltype: no conversion involved
+    upstream.set(None)
+    tf.pins.value = upstream
+    assert tf.pins.value.state == "complete"
     assert tf().construct() == absent
     tf2 = builder(optional_identity, celltype)
     tf2.pins.value = None
     assert tf2.pins.value.input_celltype == celltype
     assert tf2().construct() == absent
+
+
+@pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
+@pytest.mark.xfail(strict=False, reason=(
+    "pins.md §Null (the drop happens before conversion) as amended by the ruling "
+    "'the null short-circuits only on legal conversion celltype pairs; illegal "
+    "conversions remain illegal' (deep-celltypes.md: plain -> deep is rejected): "
+    "contract ahead of code: a null plain Cell on an optional deep pin is dropped "
+    "and the transformation builds with the absent identity"))
+def test_optional_null_through_an_illegal_conversion_is_not_absence(celltype):
+    upstream = Cell("plain")
+    upstream.set(None)
+    tf = builder(optional_identity, celltype)
+    tf.pins.value = upstream
+    assert tf.pins.value.checksum is None
+    assert tf().construct() is None
 
 
 def test_null_checksum_on_optional_checksum_pin_is_a_value():
@@ -458,3 +470,131 @@ def test_fingertip_on_unwired_pin_is_a_noop():
     pin = builder(celltype="int").pins.value
     assert pin.fingertip() is None
     assert pin.exception is None
+
+
+# --- Rulings of 2026-09-26 (contract-clarity-rulings.md) -------------------
+
+def _text_list():
+    source = Cell("text")
+    source.set("[10, 20, 30, 40]")
+    return source
+
+
+def test_standalone_explicit_wiring_spellings_are_accepted():
+    source = _text_list()
+    tf = builder(celltype="plain")
+    with pytest.raises(TypeError):
+        tf.pins.value = source[3]
+    tf.pins.value = source[3].as_celltype("plain")
+    assert tf.pins.value.input_celltype == "plain"
+    assert tf().run() == ","
+    tf.pins.value = source.as_celltype("plain")[3]
+    assert tf.pins.value.input_celltype == "plain"
+    assert tf().run() == 40
+
+
+def test_standalone_pin_fed_through_a_path_cannot_be_retyped():
+    source = Cell("plain")
+    source.set([10, 20, 30, 40])
+    tf = builder(celltype="plain")
+    tf.pins.value = source[3]
+    assert tf.pins.value.value == 40
+    with pytest.raises(TypeError):
+        tf.pins.value.celltype = "int"
+    with pytest.raises(TypeError):
+        tf.celltypes.value = "int"
+    assert tf.celltypes.value == "plain"
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "pins.md §Conversion at the pin + Ruling 5 (standalone pins can be miswired): "
+    "contract ahead of code: after retyping the upstream source of a pin fed "
+    "through a path, the standalone pin reports 'waiting' and tf() still builds "
+    "a transformation"))
+def test_standalone_pin_becomes_miswired_when_its_source_is_retyped():
+    source = Cell("plain")
+    source.set([10, 20, 30, 40])
+    tf = builder(celltype="plain")
+    tf.pins.value = source[3]
+    assert tf.pins.value.state == "complete"
+    source.celltype = "text"  # a valid request: never refused
+    pin = tf.pins.value
+    assert pin.state == "miswired"
+    assert pin.checksum is None
+    # Miswiring is a static defect, not a failure: no exception is recorded.
+    assert pin.exception is None
+    transformation = tf()
+    assert transformation.construct() is None
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "pins.md §Wiring (the refusal message text is contract, in the cells.md "
+    "§Connecting format; unknown names omitted): contract ahead of code: the code "
+    "raises the short 'Cannot implicitly convert behind a projection; use "
+    "as_celltype() before or after projecting'"))
+def test_standalone_wiring_refusal_message_names_both_spellings():
+    source = _text_list()
+    tf = builder(celltype="plain")
+    with pytest.raises(TypeError) as excinfo:
+        tf.pins.value = source[3]
+    lines = str(excinfo.value).splitlines()
+    assert lines[0] == "would convert text -> plain behind a projection."
+    assert len(lines) == 3
+    # Projection first, then conversion; a standalone transformer and Cell have no
+    # known name, so each spelling starts at the step ("…[3]…").
+    projection_first, conversion_first = lines[1], lines[2]
+    assert re.match(r'^\s*(…|\.\.\.)\[3\]\.as_celltype\("plain"\)\s+'
+                    r'# item 3 of the text \(a character\), as plain$', projection_first)
+    assert re.match(r'^\s*(…|\.\.\.)\.as_celltype\("plain"\)\[3\]\s+'
+                    r'# item 3 of the parsed list$', conversion_first)
+
+
+# --- Call-time arguments ---------------------------------------------------
+
+def test_wiring_rule_does_not_apply_to_call_time_arguments():
+    # An Expression, not a Cell: whether Cells may be call-time arguments at all
+    # is undecided (pins.md §Call-time arguments).
+    projected = _text_list()[3].build()
+    assert isinstance(projected, Expression)
+    assert projected.celltype == "text"
+    tf = builder(celltype="plain")
+    # Assigned to the pin, the path-plus-conversion link is refused ...
+    with pytest.raises(TypeError):
+        tf.pins.value = projected
+    assert tf.pins.value.state == "unwired"
+    # ... but as a call-time argument it is exempt, and converted to the pin celltype.
+    assert tf(projected).run() == ","
+    assert tf(value=projected).run() == ","
+
+
+def test_call_time_argument_changes_no_builder_state():
+    tf = builder(celltype="int")
+    assert tf(5).run() == 5
+    assert tf.pins.value.state == "unwired"
+    assert tf.pins.value.source is None
+    assert tf.celltypes.value == "int"
+
+
+# The Bash builder dropping an undeclared keyword (pins.md §Call-time arguments,
+# *Implementation status*) is pinned by test_bash_undeclared_keyword_raises_at_build
+# in test_contract_transformer_builder.py; it is not duplicated here.
+
+
+# --- Reads, state and work: standalone inspection is not passive -----------
+
+@pytest.mark.parametrize("first_read", ["state", "exception"])
+def test_standalone_pin_inspection_reads_checksum_first(first_read):
+    # pins.md §Pin state: pin.state and pin.exception read pin.checksum first, so an
+    # inspection does the pin's cheap conversion work and records its failure.
+    # (A deliberate deviation from CellBase, whose inspection is passive.)
+    tf = builder(celltype="str")
+    tf.pins.value = "hello"
+    tf.celltypes.value = "int"  # resets the memo and the exception
+    pin = tf.pins.value
+    if first_read == "state":
+        assert pin.state == "failed"
+    else:
+        assert isinstance(pin.exception, str)
+        assert "Cannot convert" in pin.exception
+    assert pin.checksum is None
+    assert pin.state == "failed"

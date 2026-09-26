@@ -11,8 +11,11 @@ Service-free. Complements test_inprocess_*.py with rules they do not pin:
   the cascade is observable without a cluster.
 - "The API": hard ``cancel_by_checksum`` reaches jobserver and Dask as a hard
   cancel.
+- "The pattern": a member registers on entry and deregisters in ``finally``
+  (completion and exception; cancellation is in test_inprocess_membership_set).
 - "The pattern": execution is owned by the deduplication site, never by the
-  first caller -- including the first caller's *event loop*.
+  first caller -- including the first caller's *event loop* (xfail: listed
+  under "Implementation status", contract ahead of code).
 """
 
 import asyncio
@@ -57,7 +60,11 @@ async def _members(cache, tf_checksum, n, timeout=5.0):
 # --------------------------------------------------------------------------- #
 def test_softcancel_by_checksum_noop_cases(inproc_cache, monkeypatch):
     """Unknown checksum, non-member, member=None, completed run: all no-ops that
-    return False and never disturb a live run."""
+    return False and never disturb a live run.
+
+    The ``member=None`` case asserts the *proposed* wording of cancellation.md
+    ("The API": "a no-op returning False"), whose confirmation the author has
+    deferred. If the ruling goes the other way, only those two lines change."""
     cache = inproc_cache
     fake = FakeRunner("2")
     monkeypatch.setattr(transformation_cache, "run_transformation_dict", fake)
@@ -106,6 +113,60 @@ def test_softcancel_by_checksum_member_leaves_peer_survives(inproc_cache, monkey
         fake.release.set()
         assert await t1 == cs("4")
         assert await t2 == cs("4")
+
+    asyncio.run(main())
+    assert fake.calls == 1
+
+
+def _members_left(cache, tfc):
+    active = cache._active_submissions.get(tfc)
+    return set() if active is None else set(active.awaiters)
+
+
+def test_members_deregister_on_completion_and_exception(inproc_cache, monkeypatch):
+    """"The pattern": a participant registers on entry and deregisters in
+    ``finally`` -- on normal completion and on an exception alike (task
+    cancellation is test_inprocess_membership_set.py). No member is left behind
+    in the set, and a later softcancel of the checksum finds nobody to remove."""
+    cache = inproc_cache
+    fake = FakeRunner("a")
+    monkeypatch.setattr(transformation_cache, "run_transformation_dict", fake)
+
+    class _Boom(RuntimeError):
+        pass
+
+    def failing(*_args, **_kwargs):
+        failing.started.set()
+        assert failing.release.wait(15)
+        raise _Boom("transformation failed")
+
+    failing.started = threading.Event()
+    failing.release = threading.Event()
+
+    async def main():
+        # Normal completion: two members, both gone afterwards.
+        ok = cs("9")
+        t1 = _submit(cache, ok)
+        await asyncio.to_thread(fake.started.wait, 5)
+        t2 = _submit(cache, ok)
+        await _members(cache, ok, 2)
+        fake.release.set()
+        assert await t1 == cs("a") and await t2 == cs("a")
+        assert _members_left(cache, ok) == set()
+
+        # Exception: two members see the failure, both gone afterwards.
+        monkeypatch.setattr(transformation_cache, "run_transformation_dict", failing)
+        bad = cs("b")
+        t3 = _submit(cache, bad)
+        await asyncio.to_thread(failing.started.wait, 5)
+        t4 = _submit(cache, bad)
+        await _members(cache, bad, 2)
+        failing.release.set()
+        for t in (t3, t4):
+            with pytest.raises(Exception):
+                await asyncio.wait_for(t, 5)
+        assert _members_left(cache, bad) == set()
+        assert cache.transformation_status(bad) != "running"
 
     asyncio.run(main())
     assert fake.calls == 1
@@ -253,8 +314,8 @@ def test_hard_cancel_by_checksum_is_hard_at_every_layer(remote_fakes):
 @pytest.mark.xfail(
     strict=False,
     reason=(
-        "cancellation.md 'The pattern': execution is owned by the dedup site, "
-        "never by the first caller. The cache-owned background task is created "
+        "cancellation.md §The pattern: contract ahead of code: execution must be "
+        "owned by the dedup site, but the cache-owned background task is created "
         "on the first caller's event loop; when that loop ends (asyncio.run "
         "returns, a Context closes) the task is cancelled and every surviving "
         "member receives ExecutionCanceledError."
