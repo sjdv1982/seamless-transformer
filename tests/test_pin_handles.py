@@ -122,7 +122,8 @@ def test_set_takes_values_only():
 
 def test_invalid_assignment_and_clear():
     tf = builder()
-    with pytest.raises((TypeError, ValueError)):
+    # "exactly as Cell.set does": Cell("int").set("abc") raises ValueError (cells.md)
+    with pytest.raises(ValueError):
         tf.pins.value = 'invalid integer'
     assert tf.pins.value.state == 'unwired'
     tf.pins.value = 4

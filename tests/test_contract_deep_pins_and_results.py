@@ -81,6 +81,24 @@ def test_pin_namespace_checksum_dict_rejects_nesting_like_unpacking():
         _to_checksum_dict(nested)
 
 
+@pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
+def test_only_deepfolder_and_folder_pins_carry_the_directory_filesystem_format(celltype):
+    """'deepfolder and folder pins additionally carry {"filesystem": {"mode": "directory"}}'."""
+
+    @delayed
+    def consume(d):
+        return 1
+
+    consume.celltypes.d = celltype
+    index = _held({"k": "aa" * 32}, "plain")
+    transformation_dict = consume(index.get_checksum()).construct().resolve("plain")
+    fmt = transformation_dict.get("__format__", {}).get("d")
+    if celltype == "deepcell":
+        assert fmt is None
+    else:
+        assert fmt == {"celltype": celltype, "filesystem": {"mode": "directory"}}
+
+
 # --- Output side -----------------------------------------------------------
 
 
@@ -107,9 +125,10 @@ def test_folder_result_is_an_index_of_the_produced_bytes():
     produce.celltypes.result = "folder"
     transformation = produce()
     index = transformation.run()
-    assert {key: Checksum(value).hex() for key, value in index.items()} == {
-        "x.txt": Buffer(b"hello").get_checksum().hex(),
-        "y/z.bin": Buffer(b"\x00\x01").get_checksum().hex(),
+    assert all(type(member) is Checksum for member in index.values())
+    assert index == {
+        "x.txt": Buffer(b"hello").get_checksum(),
+        "y/z.bin": Buffer(b"\x00\x01").get_checksum(),
     }
 
 
@@ -145,8 +164,49 @@ def test_direct_deep_result_resolves_no_children():
 
     produce.celltypes.result = "deepcell"
     value = produce()
-    member_hexes = {Checksum(member).hex() for member in value.values()}
-    assert member_hexes == {
-        Buffer("one", "mixed").get_checksum().hex(),
-        Buffer("two", "mixed").get_checksum().hex(),
+    assert all(type(member) is Checksum for member in value.values())
+    assert value == {
+        "a": Buffer("one", "mixed").get_checksum(),
+        "b": Buffer("two", "mixed").get_checksum(),
     }
+
+
+@pytest.mark.parametrize("mode", ["direct", "delayed"])
+def test_deepcell_result_members_may_be_dicts_and_lists(mode):
+    """Ruling 2026-09-26: refusing dict/list member values of a deepcell result is a bug.
+
+    A member is a mixed value; the index stays flat (key -> member checksum).
+    """
+    decorator = direct if mode == "direct" else delayed
+
+    @decorator
+    def produce():
+        return {"a": {"v": 2}, "b": [1, 2]}
+
+    produce.celltypes.result = "deepcell"
+    value = produce() if mode == "direct" else produce().run()
+    assert all(type(member) is Checksum for member in value.values())
+    assert value == {
+        "a": Buffer({"v": 2}, "mixed").get_checksum(),
+        "b": Buffer([1, 2], "mixed").get_checksum(),
+    }
+
+
+@pytest.mark.parametrize("celltype", ["deepfolder", "module"])
+def test_result_may_not_be_declared_deepfolder_or_module(celltype):
+    @delayed
+    def produce():
+        return {}
+
+    with pytest.raises(TypeError):
+        produce.celltypes.result = celltype
+
+
+@pytest.mark.parametrize("celltype", ["deepcell", "folder"])
+def test_result_may_be_declared_deepcell_or_folder(celltype):
+    @delayed
+    def produce():
+        return {}
+
+    produce.celltypes.result = celltype
+    assert produce.celltypes.result == celltype

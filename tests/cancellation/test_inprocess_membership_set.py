@@ -206,7 +206,8 @@ def test_cache_hit_is_never_a_member(inproc_cache):
 
 
 def test_cancel_noops_on_unknown_and_completed(inproc_cache, monkeypatch):
-    """Hard/soft cancel of a forgotten or completed checksum is a no-op."""
+    """Hard cancel of a forgotten or completed checksum is a no-op (soft no-op
+    cases: test_contract_substrate.py)."""
     cache = inproc_cache
 
     # Unknown checksum: nothing to cancel.

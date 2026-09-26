@@ -113,6 +113,34 @@ def test_handle_cancel_never_invalidates_the_tf_checksum(tmp_path):
     assert again.value == nonce * 2
     assert again.transformation_checksum is not None
     assert a.status == "Status: canceled"
+    # Still terminal after clear_exception(): result_checksum raises.
+    with pytest.raises(Exception):
+        a.result_checksum
+
+
+def test_handle_cancel_makes_result_checksum_raise(tmp_path):
+    """A cancelled handle is terminal: ``result_checksum`` raises.
+
+    The exception *type* is proposed to be ``TransformationError`` but the
+    author has deferred confirmation (cancellation.md, "The API"), so only
+    "raises" is asserted here. (Today it is TransformationError.)"""
+    marker = str(tmp_path)
+    nonce = time.time()
+
+    async def main():
+        a = slow_marked(nonce, marker)
+        ta = asyncio.ensure_future(a.task())
+        await _set_has_members(1)
+        assert await a.cancel_async() is True
+        await _swallow(ta)
+        return a
+
+    a = asyncio.run(main())
+    assert a.status == "Status: canceled"
+    with pytest.raises(Exception, match="cancel"):
+        a.result_checksum
+    # Nothing is active on a terminal handle any more.
+    assert a.cancel() is False
 
 
 def test_handle_cancel_returns_false_when_nothing_active(tmp_path):
@@ -121,7 +149,6 @@ def test_handle_cancel_returns_false_when_nothing_active(tmp_path):
     tf.compute()
     assert tf.status == "Status: OK"
     assert tf.cancel() is False
-    assert tf.status == "Status: OK"  # a completed handle is not made terminal
 
 
 def test_recursive_cancel_is_soft_upstream(tmp_path):

@@ -8,7 +8,7 @@ cd "$(dirname "$0")" || exit 1
 export PYTHONPATH="$(cd ../.. && pwd)/tests${PYTHONPATH:+:$PYTHONPATH}"
 
 status=0
-for test_file in test_inprocess_membership_set.py test_inprocess_hard_cancel.py test_inprocess_atomicity.py test_remote_multitenant_jobserver.py test_remote_multitenant_dask.py; do
+for test_file in test_inprocess_membership_set.py test_inprocess_hard_cancel.py test_inprocess_atomicity.py test_contract_substrate.py test_remote_multitenant_jobserver.py test_remote_multitenant_dask.py; do
     echo "$test_file"
     if [ -n "${TEST_TIMEOUT:-}" ]; then
         timeout --foreground "${TEST_TIMEOUT}" python -m pytest -s "$test_file" "$@" || status=1

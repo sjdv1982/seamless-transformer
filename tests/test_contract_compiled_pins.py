@@ -125,11 +125,12 @@ def test_optional_declaration_on_compiled_input_is_rejected():
     assert "x" not in tf.optional_pins
 
 
-def test_optional_builder_state_is_a_stage1_failure():
-    """§5 Stage 1: 'no compiled input pin is declared optional'.
+def test_optional_builder_state_is_rejected_before_binding():
+    """Rule 3 / §5: an optional compiled input cannot reach Stage 1.
 
-    The public API cannot declare it; builder state injected directly (as a
-    replayed/imported state would be) must still block before binding.
+    No API route declares one and graph import rejects it, so this state is
+    not reachable through the contract.  This is defence in depth: builder
+    state injected directly must still be rejected before binding.
     """
     tf = make(celltype="int")
     tf._optional_pins.add("x")
@@ -593,17 +594,9 @@ def test_bytes_pin_from_zero_dim_s_binary_cell():
     assert make("char", ["N"], "bytes", code=CHAR_N_CODE)(x=source) == 3
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "compiled-pins.md §8 choosing table: NumPy S1 arrays from a binary/mixed "
-        "Cell reach a bytes pin 'converted with tobytes'; the conversion table "
-        "(celltypes-and-conversion.md, binary→bytes) only reformats 0-d S arrays "
-        "and keeps the checksum otherwise, so the kernel receives the .npy buffer"
-    ),
-)
 @pytest.mark.parametrize("cell_celltype", ["binary", "mixed"])
 def test_bytes_pin_from_s1_array_cell_receives_tobytes(cell_celltype):
+    """§8: a 1-D S1 binary/mixed Cell reaches a bytes pin as its raw bytes."""
     source = Cell(cell_celltype)
     source.set(np.array([b"a", b"b", b"c"], dtype="S1"))
     assert make("char", ["N"], "bytes", code=CHAR_N_CODE)(x=source) == 3
@@ -614,3 +607,210 @@ def test_text_pin_dict_literal_is_python_repr():
     d = {"answer": 42}
     tf = make("char", ["N"], "text", code=CHAR_N_CODE)
     assert tf(x=d) == len(str(d).encode())
+
+
+# ------------------------------------------------ rule 2 / §4 inspection
+
+
+def test_absent_schema_is_stage1_failure_and_schema_celltypes_empty():
+    """Rule 2 / §4: no schema, no header, no transformer; schema_celltypes is
+    empty while the schema is absent."""
+    tf = Transformer("c", compiled=True)
+    tf.code = INT_CODE
+    assert dict(tf.schema_celltypes) == {}
+    with pytest.raises(Exception, match="schema"):
+        tf(x=1)
+
+
+def test_schema_celltypes_is_read_only_mapping_independent_of_declarations():
+    """§4 Inspecting: read-only mapping of every schema input to its schema
+    celltype (None for char / 1-D char), derived from the schema alone; the
+    transformer repr shows both celltypes."""
+    from collections.abc import Mapping
+
+    tf = Transformer("c", compiled=True)
+    with pytest.warns(CompiledPinCelltypeWarning):
+        tf.schema = (
+            "inputs:\n  - {name: i, dtype: int32}\n  - {name: f, dtype: float32}\n"
+            "  - {name: b, dtype: bool}\n  - {name: arr, dtype: float64, shape: [N]}\n"
+            "  - {name: s, dtype: char}\n  - {name: c, dtype: char, shape: [K]}\n"
+            "  - {name: m, dtype: char, shape: [K, 2]}\n"
+            "outputs:\n  - {name: result, dtype: int32}\n"
+        )
+    expected = {
+        "i": "int", "f": "float", "b": "bool", "arr": "binary",
+        "s": None, "c": None, "m": "binary",
+    }
+    view = tf.schema_celltypes
+    assert isinstance(view, Mapping)
+    assert dict(view) == expected
+    with pytest.raises(TypeError):
+        view["i"] = "binary"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", CompiledPinCelltypeWarning)  # 's' stays undeclared
+        tf.celltypes.i = "binary"
+        tf.celltypes.c = "text"
+    assert dict(tf.schema_celltypes) == expected  # declarations play no part
+    text = repr(tf)
+    assert "'binary'" in text and "'text'" in text  # declared
+    assert "schema_celltypes" in text and "'int'" in text  # schema-derived
+
+
+def test_explicit_mixed_declaration_is_the_default():
+    """§3 "mixed is auto": declaring mixed is the same as the default and
+    resets a pin to auto (same transformation checksum)."""
+    default = make(celltype="mixed", direct=False)
+    tf = Transformer("c", compiled=True, direct=False)
+    tf.schema = default.schema
+    tf.code = INT_CODE
+    assert tf.celltypes.x == "mixed"  # new pins start as auto
+    reset = make(celltype="int", direct=False)
+    reset.celltypes.x = "mixed"
+    checksums = {t(x=5).construct() for t in (default, tf, reset)}
+    assert len(checksums) == 1
+
+
+# ------------------------------------------ §3b auto consistency (all)
+
+
+@pytest.mark.parametrize(
+    "dtype,shape,schema_celltype,value,code,expected",
+    [
+        ("float64", None, "float", 1.5, F64_CODE, 15),
+        ("bool", None, "bool", True, BOOL_CODE, 1),
+        (
+            "int32",
+            ["N"],
+            "binary",
+            np.array([4, 5], dtype="int32"),
+            "#include <stdint.h>\nint transform(unsigned int N, const int32_t *x,"
+            " int32_t *result) {*result=N*10+x[1]; return 0;}",
+            25,
+        ),
+    ],
+)
+def test_auto_consistency_every_schema_celltype(
+    dtype, shape, schema_celltype, value, code, expected
+):
+    """§3b: a value serialized under the schema celltype makes the same call
+    on a mixed pin as on a pin declared with the schema celltype."""
+    cs = held_checksum(value, schema_celltype)
+    on_schema = make(dtype, shape, schema_celltype, code=code)(x=cs)
+    on_mixed = make(dtype, shape, "mixed", code=code)(x=cs)
+    assert on_schema == on_mixed == expected
+
+
+# ---------------------------------------- §8 binary/mixed -> bytes pins
+
+
+@pytest.mark.parametrize("cell_celltype", ["binary", "mixed"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        np.array([b"abcd", b"efgh"], dtype="S4"),
+        np.array([[b"a", b"b"], [b"c", b"d"]], dtype="S1"),
+        np.array([], dtype="S1"),
+    ],
+    ids=["S4-array", "2d-S1", "empty-S1"],
+)
+def test_bytes_pin_from_every_s_array_receives_tobytes(cell_celltype, value):
+    """§8: conversion into a bytes pin calls tobytes() on every dtype-S array,
+    whatever its shape and width; an empty one reads as b"" (length 0)."""
+    source = Cell(cell_celltype)
+    source.set(value)
+    tf = make("char", ["N"], "bytes", code=CHAR_N_CODE)
+    assert tf(x=source) == len(value.tobytes())
+
+
+def test_bytes_pin_from_non_s_array_receives_whole_npy():
+    """§8: a non-S array keeps its .npy checksum; the bytes pin receives the
+    whole .npy buffer, header included."""
+    value = np.arange(3, dtype="int32")
+    source = Cell("binary")
+    source.set(value)
+    tf = make("char", ["N"], "bytes", code=CHAR_N_CODE)
+    assert tf(x=source) == len(Buffer(value, "binary").content)
+
+
+def test_bytes_pin_from_plain_cell_receives_json_text():
+    """§8 choosing table: a plain Cell delivers its JSON text, quotes included."""
+    source = Cell("plain")
+    source.set("ab")
+    tf = make("char", ["N"], "bytes", code=CHAR_N_CODE)
+    assert tf(x=source) == len(Buffer("ab", "plain").content)  # '"ab"\n'
+
+
+def test_text_pin_rejects_numpy_array_cell():
+    """§8 choosing table: a text pin rejects NumPy arrays."""
+    source = Cell("binary")
+    source.set(np.array([b"a", b"b"], dtype="S1"))
+    kind, text = outcome(lambda: make("char", ["N"], "text", code=CHAR_N_CODE)(x=source))
+    assert kind == "error" and "x" in text
+
+
+def test_text_cell_on_binary_char_array_is_rejected():
+    """§8 choosing table: a text Cell on a binary char [N] pin is rejected.
+
+    The contract attributes this to a 0-d S{len} array; per the conversion
+    table text -> binary goes through mixed (a JSON string) and fails as a
+    conversion error, so only the rejection is pinned here.
+    """
+    source = Cell("text")
+    source.set("ab")
+    kind, text = outcome(lambda: make("char", ["N"], "binary", code=CHAR_N_CODE)(x=source))
+    assert kind == "error" and "x" in text
+
+
+# ------------------------------------------- §5 placement, §6, §9 D5
+
+
+def test_executor_failure_exception_string_carries_class_name():
+    """§9 D5: a standalone transformation's .exception is a string that carries
+    the class name for an executor-side compiled failure."""
+    tf = make(celltype="mixed", direct=False)
+    transformation = tf(x=held_checksum(2**40, "mixed"))
+    transformation.compute()
+    exc = transformation.exception
+    assert isinstance(exc, str)
+    assert "CompiledPinSchemaError" in exc and "'x'" in exc
+
+
+def test_executor_rejection_is_never_cached():
+    """§5 invariant: an invalid input never produces a cached result."""
+    cs = held_checksum(2**40, "mixed")
+    for _ in range(2):
+        kind, text = outcome(lambda: make(celltype="mixed")(x=cs))
+        assert kind == "error" and "CompiledPinSchemaError" in text
+
+
+def test_async_deferred_rejection_matches_literal():
+    """§6: synchronous and asynchronous (deferred) construction share the
+    validation order; the rejection has the same class and message."""
+    import asyncio
+
+    from seamless_transformer import delayed
+
+    @delayed
+    def upstream():
+        return [1, 2]
+
+    upstream.local = True
+    with pytest.raises(CompiledMixedValueError) as literal:
+        make(celltype="mixed")(x=[1, 2])
+    transformation = make(celltype="mixed", direct=False)(x=upstream())
+    try:
+        asyncio.run(transformation.computation())
+    except Exception:  # noqa: BLE001
+        pass
+    exc = transformation.exception
+    assert isinstance(exc, str)
+    assert "CompiledMixedValueError" in exc and str(literal.value) in exc
+
+
+def test_mixed_classification_is_reject_only():
+    """§6: classification never rewrites a successful non-null value: the
+    concrete tuple keeps the input's mixed checksum."""
+    cs = held_checksum(3, "mixed")
+    tf = make(celltype="mixed", direct=False)
+    d = tf(x=cs).construct().resolve("plain")
+    assert d["x"] == ("mixed", None, cs.hex()) or list(d["x"]) == ["mixed", None, cs.hex()]

@@ -81,10 +81,9 @@ def test_jobserver_softcancel_peer_survives(jobserver_cluster):
 
 
 def test_jobserver_all_softcancel_is_benign(jobserver_cluster):
-    """GUARANTEED contract: when every tenant softcancels (loses interest), no peer is
-    harmed — there is no crash and no error is delivered to anyone. Whether the now-
-    orphaned job is also *killed* is the separate, optional leaf-kill property tested
-    (xfail) below."""
+    """When every tenant softcancels (loses interest), no peer is harmed — there is
+    no crash and no error is delivered to anyone. That the now-orphaned job is also
+    *killed* at the leaf (constraint 1) is asserted separately below."""
     cl = jobserver_cluster
     nonce = _nonce("allsoftbenign")
     markers = cl.new_marker_dir(nonce)
