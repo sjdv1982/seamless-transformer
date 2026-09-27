@@ -243,15 +243,6 @@ def test_call_is_layered_on_build(mode):
         assert tf(2, 3) == built.run() == 5
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "transformers.md §Unspecified exception classes (unknown keyword) / "
-        "pins.md §Call-time arguments: contract ahead of code: a code-less "
-        "Bash builder silently drops an undeclared keyword argument instead "
-        "of raising at build"
-    ),
-)
 def test_bash_undeclared_keyword_raises_at_build():
     tf = Transformer("bash", direct=True)
     tf.local = True

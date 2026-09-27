@@ -251,15 +251,8 @@ def test_required_pin_rejects_null_for_every_other_celltype(celltype):
     assert tf.pins.value.state == "unwired"
 
 
-_MODULE_NULL = pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Null, required pins (null from upstream is reported on the pin) and "
-    "§Conversion (no transformation is built): a module pin is serialized as "
-    "celltype 'plain' in the transformation dict, so validate_pin_null lets the "
-    "null through and the transformation constructs although the pin is failed"))
-
-
 @pytest.mark.parametrize("celltype", [
-    pytest.param(ct, marks=_MODULE_NULL) if ct == "module" else ct
+    ct
     for ct in NON_NULLABLE_INPUT])
 def test_required_pin_null_from_upstream_is_reported_on_the_pin(celltype):
     # The upstream has the pin's own celltype, so no conversion is involved.
@@ -300,11 +293,6 @@ def _null_upstream():
     return returns_none()
 
 
-_FORMAT = pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Null, required pins, optional pins (identity rule): contract ahead of "
-    "code: the dropped folder/deepfolder pin leaves its __format__ entry in the "
-    "transformation dict, so the checksum differs from absence"))
-
 DEEP_OR_MODULE = ("deepcell", "deepfolder", "folder", "module")
 ORDINARY_INPUT = [ct for ct in NULLABLE + NON_NULLABLE_INPUT if ct not in DEEP_OR_MODULE]
 
@@ -322,9 +310,7 @@ def _identity_cases():
         for route in routes:
             if route == "null-checksum" and celltype == "checksum":
                 continue  # a Checksum is a value there; see the test below
-            marks = [_FORMAT] if celltype in ("folder", "deepfolder") else []
-            cases.append(pytest.param(celltype, route, marks=marks,
-                                      id=f"{celltype}-{route}"))
+            cases.append(pytest.param(celltype, route, id=f"{celltype}-{route}"))
     return cases
 
 
@@ -341,7 +327,7 @@ def test_optional_null_has_absent_identity_for_every_celltype(celltype, route):
 
 
 @pytest.mark.parametrize("celltype", [
-    pytest.param(ct, marks=_FORMAT) if ct in ("folder", "deepfolder") else ct
+    ct
     for ct in NULLABLE + NON_NULLABLE_INPUT])
 def test_prebound_optional_null_has_absent_identity(celltype):
     tf = builder(optional_identity, celltype)
@@ -358,12 +344,6 @@ def test_prebound_optional_null_has_absent_identity(celltype):
 
 
 @pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
-@pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Null (the drop happens before conversion) as amended by the ruling "
-    "'the null short-circuits only on legal conversion celltype pairs; illegal "
-    "conversions remain illegal' (deep-celltypes.md: plain -> deep is rejected): "
-    "contract ahead of code: a null plain Cell on an optional deep pin is dropped "
-    "and the transformation builds with the absent identity"))
 def test_optional_null_through_an_illegal_conversion_is_not_absence(celltype):
     upstream = Cell("plain")
     upstream.set(None)
@@ -506,11 +486,6 @@ def test_standalone_pin_fed_through_a_path_cannot_be_retyped():
     assert tf.celltypes.value == "plain"
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Conversion at the pin + Ruling 5 (standalone pins can be miswired): "
-    "contract ahead of code: after retyping the upstream source of a pin fed "
-    "through a path, the standalone pin reports 'waiting' and tf() still builds "
-    "a transformation"))
 def test_standalone_pin_becomes_miswired_when_its_source_is_retyped():
     source = Cell("plain")
     source.set([10, 20, 30, 40])
@@ -527,11 +502,6 @@ def test_standalone_pin_becomes_miswired_when_its_source_is_retyped():
     assert transformation.construct() is None
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Wiring (the refusal message text is contract, in the cells.md "
-    "§Connecting format; unknown names omitted): contract ahead of code: the code "
-    "raises the short 'Cannot implicitly convert behind a projection; use "
-    "as_celltype() before or after projecting'"))
 def test_standalone_wiring_refusal_message_names_both_spellings():
     source = _text_list()
     tf = builder(celltype="plain")

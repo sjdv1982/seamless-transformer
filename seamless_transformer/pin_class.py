@@ -63,6 +63,12 @@ class StandalonePinBackend:
             source = ('checksum', ref.hex()) if isinstance(ref, Checksum) else ('object', id(ref))
         return source, self.input_celltype, self.celltype, self.name in self.owner._optional_pins
 
+    def _is_miswired(self):
+        ref = self._input_ref
+        return bool(getattr(ref, "path", None)) and (
+            getattr(ref, "input_celltype", None) != self.celltype
+        )
+
     def _entry(self):
         if self.name == 'result' or self.name not in self.owner._celltypes:
             raise AttributeError(self.name)
@@ -160,6 +166,11 @@ class StandalonePinBackend:
             self._result_checksum = None
             self._result_identity = None
             return None
+        if self._is_miswired():
+            self._exception = None
+            self._result_checksum = None
+            self._result_identity = self._identity()
+            return None
         ref = self._input_ref
         identity = self._identity()
         if self._result_identity != identity:
@@ -179,8 +190,18 @@ class StandalonePinBackend:
             input_checksum = canonicalize_checksum(input_checksum, self.input_celltype)
             validate_pin_null(input_checksum, self.celltype, self.name,
                               optional=self.name in self.owner._optional_pins)
-            if self.input_celltype == self.celltype or is_null(input_checksum):
+            if self.input_celltype == self.celltype:
                 checksum = input_checksum
+            elif is_null(input_checksum):
+                conversion = Expression(
+                    input_checksum,
+                    input_celltype=self.input_celltype,
+                    celltype=self.celltype,
+                )
+                try:
+                    checksum = input_checksum
+                finally:
+                    conversion._release_refholds()
             else:
                 checksum = Expression(
                     input_checksum,
@@ -202,6 +223,8 @@ class StandalonePinBackend:
     def state(self):
         if self._input_ref is None:
             return 'unwired'
+        if self._is_miswired():
+            return 'miswired'
         checksum = self.checksum
         if checksum is not None:
             return 'complete'

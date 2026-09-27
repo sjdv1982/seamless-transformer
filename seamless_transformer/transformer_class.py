@@ -29,6 +29,31 @@ def _snapshot_modules(modules):
     }
 
 
+def _failed_transformation(result_celltype, exc, *, scratch=False):
+    """Return a transformation that reports a pin error on construction."""
+
+    def fail(_transformation):
+        raise exc
+
+    async def fail_async(_transformation):
+        raise exc
+
+    def fail_evaluation(_transformation, _require_value):
+        raise exc
+
+    async def fail_evaluation_async(_transformation, _require_value):
+        raise exc
+
+    return Transformation(
+        result_celltype,
+        fail,
+        fail_async,
+        fail_evaluation,
+        fail_evaluation_async,
+        scratch=scratch,
+    )
+
+
 def _clone_transformer_builder(source, target_cls):
     """Clone a standalone builder with independent lifecycle ownership."""
 
@@ -180,10 +205,31 @@ class TransformerCore(Generic[P, R]):
         from seamless.cell_class import _typed_input_celltype
         arguments, input_celltypes = {}, {}
         for name, (value, declared) in self._args.items():
+            explicit_conversion = False
             if isinstance(value, Cell):
-                value = value.build()
+                explicit_conversion = bool(getattr(value, "_conversion_link", False))
+                try:
+                    value = value.build()
+                except Exception:
+                    # Keep the source available for _bind_snapshot_arguments,
+                    # which turns a pin conversion failure into a failed
+                    # Transformation instead of rejecting the builder call.
+                    pass
             arguments[name] = value
-            input_celltypes[name] = _typed_input_celltype(value) or declared
+            if explicit_conversion:
+                input_celltypes[name] = getattr(value, "celltype", None) or declared
+            elif getattr(value, "path", None):
+                input_celltypes[name] = (
+                    getattr(value, "input_celltype", None)
+                    or _typed_input_celltype(value)
+                    or declared
+                )
+            else:
+                input_celltypes[name] = (
+                    getattr(value, "celltype", None)
+                    or _typed_input_celltype(value)
+                    or declared
+                )
         return arguments, input_celltypes
 
     @property
@@ -279,9 +325,54 @@ class TransformerCore(Generic[P, R]):
     def _bind_snapshot_arguments(snapshot, args, kwargs):
         all_args = TransformerCore._copy_arguments(snapshot.args)
         from seamless import Expression
-        for name, input_celltype in snapshot.input_celltypes.items():
+        from seamless.cell_class import _available_input_checksum
+        from seamless.checksum.null import is_null
+
+        def optional_null_is_absent(name, value):
+            if name not in snapshot.optional_pins:
+                return False
             try:
-                all_args[name] = Expression(all_args[name], input_celltype=input_celltype,
+                if not is_null(_available_input_checksum(value)):
+                    return False
+            except Exception:
+                return False
+            source = getattr(value, "input_celltype", None)
+            if source is None:
+                return True
+            target = snapshot.celltypes[name]
+            if source == target:
+                return True
+            try:
+                conversion = Expression(
+                    value, input_celltype=source, celltype=target
+                )
+            except Exception:
+                return False
+            conversion._release_refholds()
+            return True
+
+        for name, input_celltype in snapshot.input_celltypes.items():
+            value = all_args[name]
+            if optional_null_is_absent(name, value):
+                all_args.pop(name)
+                continue
+            if (
+                name not in snapshot.optional_pins
+                and input_celltype == snapshot.celltypes[name]
+                and snapshot.celltypes[name] not in ("plain", "mixed", "bytes")
+            ):
+                try:
+                    is_input_null = is_null(_available_input_checksum(value))
+                except Exception:
+                    is_input_null = False
+                if is_input_null:
+                    raise TypeError(
+                        f"Pin {name!r} conversion from {input_celltype!r} to "
+                        f"{snapshot.celltypes[name]!r}: Required pin '{name}' "
+                        f"with celltype '{snapshot.celltypes[name]}' cannot accept null"
+                    )
+            try:
+                all_args[name] = Expression(value, input_celltype=input_celltype,
                                             celltype=snapshot.celltypes[name])
             except Exception as exc:
                 raise type(exc)(f"Pin {name!r} conversion from {input_celltype!r} to {snapshot.celltypes[name]!r}: {exc}") from exc
@@ -292,6 +383,10 @@ class TransformerCore(Generic[P, R]):
             raise TypeError("No function signature: positional arguments not supported")
         else:
             call_args = dict(kwargs)
+            unknown = set(call_args) - (set(snapshot.celltypes) - {"result"})
+            if unknown:
+                name = sorted(unknown)[0]
+                raise TypeError(f"Unexpected keyword argument: '{name}'")
         # A call-time Checksum is a value exactly when the pin's celltype is checksum.
         for name, value in call_args.items():
             if isinstance(value, Checksum) and snapshot.celltypes.get(name) == "checksum":
@@ -336,9 +431,18 @@ class TransformerCore(Generic[P, R]):
             from .compiled_validation import validate_stage1
             validate_stage1(snapshot.schema, snapshot.celltypes, snapshot.optional_pins,
                             snapshot.meta.get("metavars", {}))
-        arguments = self._bind_snapshot_arguments(snapshot, args, kwargs)
-        from seamless import Expression
-        self._convert_pin_arguments(arguments, snapshot.celltypes)
+        try:
+            arguments = self._bind_snapshot_arguments(snapshot, args, kwargs)
+            from seamless import Expression
+            self._convert_pin_arguments(arguments, snapshot.celltypes)
+        except Exception as exc:
+            if not str(exc).startswith("Pin "):
+                raise
+            return _failed_transformation(
+                snapshot.celltypes.get("result", "mixed"),
+                exc,
+                scratch=snapshot.scratch,
+            )
 
         deps = {
             argname: arg
