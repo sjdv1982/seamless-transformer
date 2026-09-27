@@ -83,7 +83,7 @@ def normalize_optional_pins_for_construction(
     Required pins then enforce their declared function boundary.
     """
 
-    from seamless.checksum.null import canonicalize_checksum
+    from seamless.checksum.null import canonicalize_checksum, is_null
     for pinname, value in tuple(transformation_dict.items()):
         if pinname.startswith("__"):
             continue
@@ -108,22 +108,23 @@ def normalize_optional_pins_for_construction(
         validate_prepared(signature, transformation_dict)
         return transformation_dict
     optional_pin_names = frozenset(optional_pins or ())
-    null_checksum = json_null_checksum()
-    null_checksum_hex = null_checksum.hex()
+
+    def drop_optional_pin(pinname):
+        transformation_dict.pop(pinname, None)
+        formats = transformation_dict.get("__format__")
+        if isinstance(formats, dict):
+            formats.pop(pinname, None)
+            if not formats:
+                transformation_dict.pop("__format__", None)
+
     for pinname in optional_pin_names:
         value = transformation_dict.get(pinname)
         if value is None:
+            drop_optional_pin(pinname)
             continue
-        celltype, _subcelltype, checksum = value
-        if checksum is None:
-            continue
-        if isinstance(checksum, Checksum):
-            checksum_hex = checksum.hex()
-        else:
-            checksum_hex = checksum
-        if checksum_hex != null_checksum_hex:
-            continue
-        transformation_dict.pop(pinname, None)
+        _celltype, _subcelltype, checksum = value
+        if checksum is None or is_null(checksum):
+            drop_optional_pin(pinname)
     for pinname, value in transformation_dict.items():
         if pinname.startswith("__"):
             continue

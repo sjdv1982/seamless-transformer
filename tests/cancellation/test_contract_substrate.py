@@ -14,8 +14,7 @@ Service-free. Complements test_inprocess_*.py with rules they do not pin:
 - "The pattern": a member registers on entry and deregisters in ``finally``
   (completion and exception; cancellation is in test_inprocess_membership_set).
 - "The pattern": execution is owned by the deduplication site, never by the
-  first caller -- including the first caller's *event loop* (xfail: listed
-  under "Implementation status", contract ahead of code).
+  first caller -- including the first caller's *event loop*.
 """
 
 import asyncio
@@ -311,16 +310,6 @@ def test_hard_cancel_by_checksum_is_hard_at_every_layer(remote_fakes):
 # --------------------------------------------------------------------------- #
 # The first caller does not own the execution -- not even through its loop
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "cancellation.md §The pattern: contract ahead of code: execution must be "
-        "owned by the dedup site, but the cache-owned background task is created "
-        "on the first caller's event loop; when that loop ends (asyncio.run "
-        "returns, a Context closes) the task is cancelled and every surviving "
-        "member receives ExecutionCanceledError."
-    ),
-)
 def test_first_callers_loop_ending_does_not_kill_peer(inproc_cache, monkeypatch):
     cache = inproc_cache
     fake = FakeRunner("8")

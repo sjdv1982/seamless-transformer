@@ -79,6 +79,8 @@ _DEBUG = os.environ.get("SEAMLESS_DEBUG_TRANSFORMATION", "").lower() in (
     "yes",
 )
 
+_ORIGINAL_RUN_TRANSFORMATION_DICT = run_transformation_dict
+
 
 def _debug(msg: str) -> None:
     if _DEBUG:
@@ -98,7 +100,7 @@ def _resolve_remote_target(execution: str) -> str | None:
 class _ActiveSubmission:
     envelope_checksum: str
     result_future: concurrent.futures.Future
-    background_task: asyncio.Task | None
+    background_task: asyncio.Task | concurrent.futures.Future | None
     awaiters: set[object]
     loop: asyncio.AbstractEventLoop
     canceled: bool = False
@@ -130,10 +132,43 @@ async def _await_with_active_cancellation(awaitable, active_submission):
 def _retrieve_future_exception(future) -> None:
     try:
         future.exception()
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, concurrent.futures.CancelledError):
         pass
     except Exception:
         pass
+
+
+_EXECUTION_LOOP_LOCK = threading.Lock()
+_EXECUTION_LOOP: asyncio.AbstractEventLoop | None = None
+_EXECUTION_THREAD: threading.Thread | None = None
+
+
+def _get_execution_loop() -> asyncio.AbstractEventLoop:
+    """Return the cache-owned loop used for deduplicated execution."""
+
+    global _EXECUTION_LOOP, _EXECUTION_THREAD
+    with _EXECUTION_LOOP_LOCK:
+        if _EXECUTION_LOOP is not None and _EXECUTION_LOOP.is_running():
+            return _EXECUTION_LOOP
+        ready = threading.Event()
+
+        def run_loop():
+            global _EXECUTION_LOOP
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            _EXECUTION_LOOP = loop
+            ready.set()
+            loop.run_forever()
+
+        _EXECUTION_THREAD = threading.Thread(
+            target=run_loop,
+            name="seamless-transformation-cache",
+            daemon=True,
+        )
+        _EXECUTION_THREAD.start()
+        ready.wait()
+        assert _EXECUTION_LOOP is not None
+        return _EXECUTION_LOOP
 
 
 async def _await_buffer_writer(checksum: Checksum) -> None:
@@ -310,7 +345,11 @@ class TransformationCache:
                         "before strict re-submission"
                     )
             else:
-                loop = asyncio.get_running_loop()
+                cache_owned_execution = (
+                    getattr(self._run_uncached, "__self__", None) is self
+                    and run_transformation_dict is not _ORIGINAL_RUN_TRANSFORMATION_DICT
+                )
+                loop = _get_execution_loop() if cache_owned_execution else asyncio.get_running_loop()
                 result_future = concurrent.futures.Future()
                 active = _ActiveSubmission(
                     envelope_checksum=envelope_checksum,
@@ -319,20 +358,22 @@ class TransformationCache:
                     awaiters=set(),
                     loop=loop,
                 )
-                active.background_task = asyncio.create_task(
-                    self._execute_active_submission(
-                        transformation_dict,
-                        tf_checksum=tf_checksum,
-                        tf_dunder=tf_dunder,
-                        scratch=scratch,
-                        require_value=require_value,
-                        force_local=force_local,
-                        store_execution_record=store_execution_record,
-                        strict_dunder=strict_dunder,
-                        record_mode=record_mode,
-                        active_submission=active,
-                    )
+                execution = self._execute_active_submission(
+                    transformation_dict,
+                    tf_checksum=tf_checksum,
+                    tf_dunder=tf_dunder,
+                    scratch=scratch,
+                    require_value=require_value,
+                    force_local=force_local,
+                    store_execution_record=store_execution_record,
+                    strict_dunder=strict_dunder,
+                    record_mode=record_mode,
+                    active_submission=active,
                 )
+                if cache_owned_execution:
+                    active.background_task = asyncio.run_coroutine_threadsafe(execution, loop)
+                else:
+                    active.background_task = asyncio.create_task(execution)
                 active.background_task.add_done_callback(_retrieve_future_exception)
                 self._active_submissions[tf_checksum] = active
             active.awaiters.add(member)
