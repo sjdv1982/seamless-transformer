@@ -32,6 +32,7 @@ class PreTransformation:
         code_manager: Optional[CodeManager] = None,
         optional_pins=None,
         compiled_signature=None,
+        scratch: bool = False,
     ):
         if "__language__" not in pretransformation_dict:
             raise ValueError("pretransformation dict must include __language__")
@@ -41,6 +42,7 @@ class PreTransformation:
         self._prepared = False
         self._compiled_wildcards = {}
         self._compiled_signature = compiled_signature
+        self._scratch = bool(scratch)
         self._code_refs: list[tuple[Checksum, Checksum]] = []
         self._value_refs: list[tuple[Checksum, str]] = []
         self._refholds_released = False
@@ -233,8 +235,12 @@ class PreTransformation:
         semantic_checksum, syntactic_checksum = self._code_manager.track_code_buffer(
             code_buffer
         )
-        self._code_manager.incref_syntactic(syntactic_checksum)
-        self._code_manager.incref_semantic(semantic_checksum)
+        self._code_manager.incref_syntactic(
+            syntactic_checksum, scratch=self._scratch
+        )
+        self._code_manager.incref_semantic(
+            semantic_checksum, scratch=self._scratch
+        )
         self._code_refs.append((semantic_checksum, syntactic_checksum))
         self._pretransformation_dict["__code_checksum__"] = syntactic_checksum.hex()
         # Prefer syntactic checksum for execution; semantic guard remains tracked.
@@ -349,6 +355,7 @@ def direct_transformer_to_pretransformation(
     language,
     code_manager: Optional[CodeManager] = None,
     optional_pins=None,
+    scratch: bool = False,
 ) -> PreTransformation:
     """Create a PreTransformation instance for a direct transformer call."""
     result_celltype = celltypes["result"]
@@ -433,6 +440,7 @@ def direct_transformer_to_pretransformation(
         pretransformation_dict,
         code_manager=code_manager,
         optional_pins=optional_pins,
+        scratch=scratch,
     )
 
 
@@ -462,6 +470,7 @@ def compiled_transformer_to_pretransformation(
     language: str,
     code_manager: Optional[CodeManager] = None,
     optional_pins=None,
+    scratch: bool = False,
 ) -> PreTransformation:
     """Create a PreTransformation for a compiled transformer call."""
 
@@ -496,6 +505,7 @@ def compiled_transformer_to_pretransformation(
         code_manager=code_manager,
         optional_pins=optional_pins,
         compiled_signature=signature,
+        scratch=scratch,
     )
 
 

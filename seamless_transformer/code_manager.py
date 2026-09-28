@@ -30,6 +30,7 @@ class CodeManager:
         self._semantic_direct_refs: Dict[str, int] = {}
         # guard reference counts (semantic guards syntactic, syntactic guards semantic)
         self._syntactic_guard_refs: Dict[str, int] = {}
+        self._syntactic_guard_scratch: Dict[str, bool | None] = {}
         self._semantic_guard_refs: Dict[str, int] = {}
         # keep semantic buffers alive so they remain resolvable across processes
         self._semantic_buffers: Dict[str, Buffer] = {}
@@ -68,13 +69,15 @@ class CodeManager:
         return checksum
 
     # --- reference counting ---------------------------------------------------
-    def incref_semantic(self, checksum) -> None:
+    def incref_semantic(self, checksum, *, scratch: bool | None = False) -> None:
         """Increment semantic reference count and guard syntactic counterparts."""
         checksum = _coerce_checksum(checksum)
         key = checksum.hex()
         self._semantic_direct_refs[key] = self._semantic_direct_refs.get(key, 0) + 1
-        checksum.incref_refholder()
-        self._enable_syntactic_guards(self._semantic_to_syntactic.get(key, ()))
+        checksum.incref_refholder(scratch=scratch)
+        self._enable_syntactic_guards(
+            self._semantic_to_syntactic.get(key, ()), scratch=scratch
+        )
 
     def decref_semantic(self, checksum) -> None:
         """Decrement one semantic reference and release guards if needed."""
@@ -92,12 +95,12 @@ class CodeManager:
         # syntactic guard is the only role whose release is transition-based.
         checksum.decref_refholder()
 
-    def incref_syntactic(self, checksum) -> None:
+    def incref_syntactic(self, checksum, *, scratch: bool | None = False) -> None:
         """Increment syntactic reference count and guard the semantic checksum."""
         checksum = _coerce_checksum(checksum)
         key = checksum.hex()
         self._syntactic_direct_refs[key] = self._syntactic_direct_refs.get(key, 0) + 1
-        checksum.incref_refholder()
+        checksum.incref_refholder(scratch=scratch)
 
         semantic_checksum = self._syntactic_to_semantic.get(key)
         if semantic_checksum is None:
@@ -106,7 +109,7 @@ class CodeManager:
         self._semantic_guard_refs[sem_key] = (
             self._semantic_guard_refs.get(sem_key, 0) + 1
         )
-        semantic_checksum.incref_refholder()
+        semantic_checksum.incref_refholder(scratch=scratch)
 
     def decref_syntactic(self, checksum) -> None:
         """Decrement syntactic reference count and release semantic guard if needed."""
@@ -133,19 +136,29 @@ class CodeManager:
         semantic_checksum.decref_refholder()
 
     # --- guard helpers --------------------------------------------------------
-    def _enable_syntactic_guards(self, syntactic_keys: Iterable[str]) -> None:
+    def _enable_syntactic_guards(
+        self, syntactic_keys: Iterable[str], *, scratch: bool | None = False
+    ) -> None:
         for syn_key in syntactic_keys:
             if self._syntactic_guard_refs.get(syn_key):
+                old_scratch = self._syntactic_guard_scratch.get(syn_key)
+                if old_scratch is not False and scratch is False:
+                    checksum = _coerce_checksum(syn_key)
+                    checksum.incref_refholder(scratch=False)
+                    checksum.decref_refholder()
+                    self._syntactic_guard_scratch[syn_key] = False
                 continue
             self._syntactic_guard_refs[syn_key] = 1
+            self._syntactic_guard_scratch[syn_key] = scratch
             checksum = _coerce_checksum(syn_key)
-            checksum.incref_refholder()
+            checksum.incref_refholder(scratch=scratch)
 
     def _disable_syntactic_guards(self, syntactic_keys: Iterable[str]) -> None:
         for syn_key in syntactic_keys:
             if syn_key not in self._syntactic_guard_refs:
                 continue
             self._syntactic_guard_refs.pop(syn_key, None)
+            self._syntactic_guard_scratch.pop(syn_key, None)
             checksum = _coerce_checksum(syn_key)
             checksum.decref_refholder()
 
@@ -174,6 +187,7 @@ class CodeManager:
             checksum.decref_refholder()
         self._syntactic_direct_refs.clear()
         self._syntactic_guard_refs.clear()
+        self._syntactic_guard_scratch.clear()
         self._semantic_direct_refs.clear()
         self._semantic_guard_refs.clear()
         self._semantic_buffers.clear()
