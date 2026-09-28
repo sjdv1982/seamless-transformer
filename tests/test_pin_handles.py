@@ -252,13 +252,13 @@ def test_cell_source_follows_input_type_and_retypes_at_call():
     assert tf().run() == '42'
 
 
-def test_pin_cell_source_snapshot_is_frozen():
+def test_frozen_transformer_is_isolated_from_later_pin_cell_changes():
     tf = builder('text')
     upstream = Cell('str')
     upstream.set('42')
     tf.pins.value = upstream
-    snapshot = tf._snapshot_for_call()
+    frozen = tf._freeze()
     upstream.value = '43'
     upstream.celltype = 'int'
-    assert tf._build_from_snapshot(snapshot).run() == '42'
+    assert tf._build_from_frozen(frozen).run() == '42'
     assert tf().run() == '43'

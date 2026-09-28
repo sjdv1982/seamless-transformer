@@ -13,14 +13,14 @@ from seamless import Buffer, Checksum, ensure_open
 from .environment import Environment
 from .pretransformation import direct_transformer_to_pretransformation
 from .transformation_class import Transformation, transformation_from_pretransformation
-from .builder_snapshot import TransformerBuilderSnapshot
+from .frozen_transformer import FrozenTransformer
 
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
 
-def _snapshot_modules(modules):
+def _freeze_modules(modules):
     """Copy module mappings without attempting to pickle module objects."""
 
     return {
@@ -57,38 +57,38 @@ def _failed_transformation(result_celltype, exc, *, scratch=False):
 def _clone_transformer_builder(source, target_cls):
     """Clone a standalone builder with independent lifecycle ownership."""
 
-    snapshot = source._snapshot_for_call()
-    code = snapshot.callable
+    frozen = source._freeze()
+    code = frozen.callable
     if code is None:
-        codebuf = snapshot.codebuf
+        codebuf = frozen.codebuf
         if isinstance(codebuf, Checksum):
             codebuf = codebuf.resolve()
         code = codebuf.decode() if isinstance(codebuf, Buffer) else codebuf
     target = target_cls(
         code,
-        scratch=snapshot.scratch,
-        direct_print=snapshot.direct_print,
-        local=bool(snapshot.local) if snapshot.local is not None else False,
+        scratch=frozen.scratch,
+        direct_print=frozen.direct_print,
+        local=bool(frozen.local) if frozen.local is not None else False,
     )
     try:
-        target._celltypes = deepcopy(snapshot.celltypes)
-        target._optional_pins = set(snapshot.optional_pins)
+        target._celltypes = deepcopy(frozen.celltypes)
+        target._optional_pins = set(frozen.optional_pins)
         target._args = {}
         for key, (value, input_celltype) in source._args.items():
             target._replace_checksum_field(None, value)
             target._args[key] = (value, input_celltype)
         target._modules = {}
-        for key, value in snapshot.modules.items():
+        for key, value in frozen.modules.items():
             target._replace_checksum_field(None, value)
             target._modules[key] = value if isinstance(value, ModuleType) else deepcopy(value)
-        target._globals = deepcopy(snapshot.globals)
-        target._meta = deepcopy(snapshot.meta)
-        source_environment = getattr(source, "_environment", snapshot.environment)
+        target._globals = deepcopy(frozen.globals)
+        target._meta = deepcopy(frozen.meta)
+        source_environment = getattr(source, "_environment", frozen.environment)
         target._environment = deepcopy(source_environment)
-        target._workflow_callable = snapshot.callable
-        if isinstance(snapshot.codebuf, Checksum):
-            target._codebuf = snapshot.codebuf
-            target._replace_code_ref(snapshot.codebuf)
+        target._workflow_callable = frozen.callable
+        if isinstance(frozen.codebuf, Checksum):
+            target._codebuf = frozen.codebuf
+            target._replace_code_ref(frozen.codebuf)
         return target
     except Exception:
         target._release_refholds()
@@ -177,18 +177,19 @@ class TransformerCore(Generic[P, R]):
     def _get_codebuf(self):
         raise NotImplementedError
 
-    def _snapshot_for_call(self) -> TransformerBuilderSnapshot:
+    def _freeze(self) -> FrozenTransformer:
+        """Return an immutable copy of this builder's settings (not an owner)."""
         if self._workflow_backend is not None:
-            return self._workflow_backend.snapshot_for_call()
-        pin_args, input_celltypes = self._snapshot_pin_inputs()
-        return TransformerBuilderSnapshot(
+            return self._workflow_backend.freeze()
+        pin_args, input_celltypes = self._frozen_pin_inputs()
+        return FrozenTransformer(
             codebuf=self._get_codebuf(),
             language=self.language,
             celltypes=deepcopy(self._celltypes),
             optional_pins=frozenset(self._optional_pins),
             args=pin_args,
             input_celltypes=input_celltypes,
-            modules=_snapshot_modules(self._modules),
+            modules=_freeze_modules(self._modules),
             globals=deepcopy(self._globals),
             meta=deepcopy(self._meta),
             environment=self._environment._to_lowlevel(),
@@ -200,7 +201,7 @@ class TransformerCore(Generic[P, R]):
             signature=self._get_signature(),
         )
 
-    def _snapshot_pin_inputs(self):
+    def _frozen_pin_inputs(self):
         from seamless import Cell
         from seamless.cell_class import _typed_input_celltype
         arguments, input_celltypes = {}, {}
@@ -211,7 +212,7 @@ class TransformerCore(Generic[P, R]):
                 try:
                     value = value.build()
                 except Exception:
-                    # Keep the source available for _bind_snapshot_arguments,
+                    # Keep the source available for _bind_frozen_arguments,
                     # which turns a pin conversion failure into a failed
                     # Transformation instead of rejecting the builder call.
                     pass
@@ -322,14 +323,14 @@ class TransformerCore(Generic[P, R]):
         return all_args
 
     @staticmethod
-    def _bind_snapshot_arguments(snapshot, args, kwargs):
-        all_args = TransformerCore._copy_arguments(snapshot.args)
+    def _bind_frozen_arguments(frozen, args, kwargs):
+        all_args = TransformerCore._copy_arguments(frozen.args)
         from seamless import Expression
         from seamless.cell_class import _available_input_checksum
         from seamless.checksum.null import is_null
 
         def optional_null_is_absent(name, value):
-            if name not in snapshot.optional_pins:
+            if name not in frozen.optional_pins:
                 return False
             try:
                 if not is_null(_available_input_checksum(value)):
@@ -339,7 +340,7 @@ class TransformerCore(Generic[P, R]):
             source = getattr(value, "input_celltype", None)
             if source is None:
                 return True
-            target = snapshot.celltypes[name]
+            target = frozen.celltypes[name]
             if source == target:
                 return True
             try:
@@ -351,15 +352,15 @@ class TransformerCore(Generic[P, R]):
             conversion._release_refholds()
             return True
 
-        for name, input_celltype in snapshot.input_celltypes.items():
+        for name, input_celltype in frozen.input_celltypes.items():
             value = all_args[name]
             if optional_null_is_absent(name, value):
                 all_args.pop(name)
                 continue
             if (
-                name not in snapshot.optional_pins
-                and input_celltype == snapshot.celltypes[name]
-                and snapshot.celltypes[name] not in ("plain", "mixed", "bytes")
+                name not in frozen.optional_pins
+                and input_celltype == frozen.celltypes[name]
+                and frozen.celltypes[name] not in ("plain", "mixed", "bytes")
             ):
                 try:
                     is_input_null = is_null(_available_input_checksum(value))
@@ -368,34 +369,34 @@ class TransformerCore(Generic[P, R]):
                 if is_input_null:
                     raise TypeError(
                         f"Pin {name!r} conversion from {input_celltype!r} to "
-                        f"{snapshot.celltypes[name]!r}: Required pin '{name}' "
-                        f"with celltype '{snapshot.celltypes[name]}' cannot accept null"
+                        f"{frozen.celltypes[name]!r}: Required pin '{name}' "
+                        f"with celltype '{frozen.celltypes[name]}' cannot accept null"
                     )
             try:
                 all_args[name] = Expression(value, input_celltype=input_celltype,
-                                            celltype=snapshot.celltypes[name])
+                                            celltype=frozen.celltypes[name])
             except Exception as exc:
-                raise type(exc)(f"Pin {name!r} conversion from {input_celltype!r} to {snapshot.celltypes[name]!r}: {exc}") from exc
-        signature = snapshot.signature
+                raise type(exc)(f"Pin {name!r} conversion from {input_celltype!r} to {frozen.celltypes[name]!r}: {exc}") from exc
+        signature = frozen.signature
         if signature is not None:
             call_args = signature.bind_partial(*args, **kwargs).arguments
         elif args:
             raise TypeError("No function signature: positional arguments not supported")
         else:
             call_args = dict(kwargs)
-            unknown = set(call_args) - (set(snapshot.celltypes) - {"result"})
+            unknown = set(call_args) - (set(frozen.celltypes) - {"result"})
             if unknown:
                 name = sorted(unknown)[0]
                 raise TypeError(f"Unexpected keyword argument: '{name}'")
         # A call-time Checksum is a value exactly when the pin's celltype is checksum.
         for name, value in call_args.items():
-            if isinstance(value, Checksum) and snapshot.celltypes.get(name) == "checksum":
+            if isinstance(value, Checksum) and frozen.celltypes.get(name) == "checksum":
                 call_args[name] = Buffer(value, "checksum")
         all_args.update(call_args)
-        for argname in snapshot.celltypes:
+        for argname in frozen.celltypes:
             if argname == "result":
                 continue
-            if argname not in all_args and argname not in snapshot.optional_pins:
+            if argname not in all_args and argname not in frozen.optional_pins:
                 raise TypeError(f"Missing argument: '{argname}'")
         return all_args
 
@@ -425,23 +426,23 @@ class TransformerCore(Generic[P, R]):
                 except Exception as exc:
                     raise type(exc)(f"Pin {argname!r} conversion from {arg.celltype!r} to {celltype!r}: {exc}") from exc
 
-    def _build_from_snapshot(self, snapshot, *args, **kwargs) -> Transformation[R]:
+    def _build_from_frozen(self, frozen, *args, **kwargs) -> Transformation[R]:
         ensure_open("transformer call")
-        if snapshot.compilation is not None or snapshot.schema is not None:
+        if frozen.compilation is not None or frozen.schema is not None:
             from .compiled_validation import validate_stage1
-            validate_stage1(snapshot.schema, snapshot.celltypes, snapshot.optional_pins,
-                            snapshot.meta.get("metavars", {}))
+            validate_stage1(frozen.schema, frozen.celltypes, frozen.optional_pins,
+                            frozen.meta.get("metavars", {}))
         try:
-            arguments = self._bind_snapshot_arguments(snapshot, args, kwargs)
+            arguments = self._bind_frozen_arguments(frozen, args, kwargs)
             from seamless import Expression
-            self._convert_pin_arguments(arguments, snapshot.celltypes)
+            self._convert_pin_arguments(arguments, frozen.celltypes)
         except Exception as exc:
             if not str(exc).startswith("Pin "):
                 raise
             return _failed_transformation(
-                snapshot.celltypes.get("result", "mixed"),
+                frozen.celltypes.get("result", "mixed"),
                 exc,
-                scratch=snapshot.scratch,
+                scratch=frozen.scratch,
             )
 
         deps = {
@@ -449,7 +450,7 @@ class TransformerCore(Generic[P, R]):
             for argname, arg in arguments.items()
             if isinstance(arg, (Transformation, Expression))
         }
-        if snapshot.compilation is not None or snapshot.schema is not None:
+        if frozen.compilation is not None or frozen.schema is not None:
             from .pretransformation import compiled_transformer_to_pretransformation
             from .compiled_transformer import (
                 _deferred_validation_hooks, _validate_derived_compiled_dunders,
@@ -457,22 +458,22 @@ class TransformerCore(Generic[P, R]):
                 _require_signature_package,
             )
             import yaml
-            signature = _require_signature_package().Signature.from_dict(yaml.safe_load(snapshot.schema))
+            signature = _require_signature_package().Signature.from_dict(yaml.safe_load(frozen.schema))
             sync_validate, async_validate = _deferred_validation_hooks(signature)
-            code = snapshot.codebuf
+            code = frozen.codebuf
             if isinstance(code, Checksum): code = code.resolve()
             if isinstance(code, Buffer): code = code.decode()
             pre = compiled_transformer_to_pretransformation(
-                code=code, schema_text=snapshot.schema, header=snapshot.header,
-                compilation=deepcopy(snapshot.compilation), objects=deepcopy(snapshot.objects),
-                meta=deepcopy(snapshot.meta), celltypes=deepcopy(snapshot.celltypes),
-                arguments=arguments, env=deepcopy(snapshot.environment), language=snapshot.language,
-                optional_pins=snapshot.optional_pins, scratch=snapshot.scratch)
+                code=code, schema_text=frozen.schema, header=frozen.header,
+                compilation=deepcopy(frozen.compilation), objects=deepcopy(frozen.objects),
+                meta=deepcopy(frozen.meta), celltypes=deepcopy(frozen.celltypes),
+                arguments=arguments, env=deepcopy(frozen.environment), language=frozen.language,
+                optional_pins=frozen.optional_pins, scratch=frozen.scratch)
             def validate_dunders(prepared):
-                _validate_derived_compiled_dunders(prepared, header=snapshot.header)
+                _validate_derived_compiled_dunders(prepared, header=frozen.header)
             return transformation_from_pretransformation(
-                pre, upstream_dependencies=deps, meta=deepcopy(snapshot.meta),
-                scratch=snapshot.scratch, tf_dunder={},
+                pre, upstream_dependencies=deps, meta=deepcopy(frozen.meta),
+                scratch=frozen.scratch, tf_dunder={},
                 post_prepare_sync=_compose_post_prepare_hooks(validate_dunders, sync_validate),
                 post_prepare_async=_compose_post_prepare_async_hooks(validate_dunders, async_validate))
         from .module_builder import (
@@ -482,44 +483,44 @@ class TransformerCore(Generic[P, R]):
         )
 
         modules = {}
-        for module_name, module in snapshot.modules.items():
+        for module_name, module in frozen.modules.items():
             if isinstance(module, dict):
                 module_definition = deepcopy(module)
             else:
                 module_definition = get_module_definition(module)
             modules[module_name] = module_definition
-        if snapshot.globals:
-            globals_def = build_globals_module_definition(snapshot.globals)
+        if frozen.globals:
+            globals_def = build_globals_module_definition(frozen.globals)
             if "main" in modules:
                 modules["main"] = merge_module_definitions(modules["main"], globals_def)
             else:
                 modules["main"] = globals_def
 
         pre_transformation = direct_transformer_to_pretransformation(
-            snapshot.codebuf,
-            deepcopy(snapshot.meta),
-            deepcopy(snapshot.celltypes),
+            frozen.codebuf,
+            deepcopy(frozen.meta),
+            deepcopy(frozen.celltypes),
             modules,
             arguments,
-            deepcopy(snapshot.environment),
-            language=snapshot.language,
-            optional_pins=snapshot.optional_pins,
-            scratch=snapshot.scratch,
+            deepcopy(frozen.environment),
+            language=frozen.language,
+            optional_pins=frozen.optional_pins,
+            scratch=frozen.scratch,
         )
         return cast(
             Transformation[R],
             transformation_from_pretransformation(
                 pre_transformation,
                 upstream_dependencies=deps,
-                meta=deepcopy(snapshot.meta),
-                scratch=snapshot.scratch,
+                meta=deepcopy(frozen.meta),
+                scratch=frozen.scratch,
                 tf_dunder={},
             ),
         )
 
     def build(self, *args, **kwargs) -> Transformation[R]:
         """Build a delayed Transformation without executing it."""
-        return self._build_from_snapshot(self._snapshot_for_call(), *args, **kwargs)
+        return self._build_from_frozen(self._freeze(), *args, **kwargs)
 
     def __call__(self, *args, **kwargs) -> Transformation[R]:
         """Build a delayed Transformation from the current transformer state."""
@@ -922,8 +923,8 @@ class PythonMixin(Generic[P, R]):
         elif isinstance(code, Checksum):
             # A checksum-backed code field is an explicit lifecycle role.  Keep
             # the checksum as the builder's source so cloning/binding can adopt
-            # it independently; snapshot construction resolves it only when a
-            # transformation payload is assembled.
+            # it independently; it is resolved only when a transformation
+            # payload is assembled.
             self._workflow_callable = None
             self._codebuf = code
             self._replace_code_ref(self._codebuf)

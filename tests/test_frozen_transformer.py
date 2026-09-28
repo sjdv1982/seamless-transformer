@@ -1,11 +1,11 @@
 import inspect
 
 from seamless_transformer import delayed
-from seamless_transformer.builder_snapshot import TransformerBuilderSnapshot
+from seamless_transformer.frozen_transformer import FrozenTransformer
 from seamless_transformer.transformation_class import Transformation
 
 
-def test_bound_backend_snapshot_uses_shared_transformation_assembly():
+def test_bound_backend_frozen_transformer_uses_shared_transformation_assembly():
     def identity(value):
         return value
 
@@ -13,8 +13,8 @@ def test_bound_backend_snapshot_uses_shared_transformation_assembly():
     standalone = tf(value=3)
 
     class Backend:
-        def snapshot_for_call(self):
-            return TransformerBuilderSnapshot(
+        def freeze(self):
+            return FrozenTransformer(
                 codebuf=tf._codebuf,
                 language="python",
                 celltypes={"value": "mixed", "result": "mixed"},

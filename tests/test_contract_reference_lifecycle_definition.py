@@ -67,7 +67,7 @@ def test_pretransformation_code_claim_follows_scratch_policy(writes):
     builder = delayed(_tag)
     builder.local = True
     builder.scratch = True
-    codebuf = builder._snapshot_for_call().codebuf
+    codebuf = builder._freeze().codebuf
     if isinstance(codebuf, Buffer):
         code_checksum = codebuf.get_checksum()
     elif isinstance(codebuf, Checksum):
