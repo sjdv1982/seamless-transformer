@@ -467,7 +467,7 @@ class TransformerCore(Generic[P, R]):
                 compilation=deepcopy(snapshot.compilation), objects=deepcopy(snapshot.objects),
                 meta=deepcopy(snapshot.meta), celltypes=deepcopy(snapshot.celltypes),
                 arguments=arguments, env=deepcopy(snapshot.environment), language=snapshot.language,
-                optional_pins=snapshot.optional_pins)
+                optional_pins=snapshot.optional_pins, scratch=snapshot.scratch)
             def validate_dunders(prepared):
                 _validate_derived_compiled_dunders(prepared, header=snapshot.header)
             return transformation_from_pretransformation(
@@ -504,6 +504,7 @@ class TransformerCore(Generic[P, R]):
             deepcopy(snapshot.environment),
             language=snapshot.language,
             optional_pins=snapshot.optional_pins,
+            scratch=snapshot.scratch,
         )
         return cast(
             Transformation[R],

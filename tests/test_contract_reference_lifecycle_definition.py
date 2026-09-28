@@ -20,7 +20,7 @@ import uuid
 
 import pytest
 
-from seamless import Checksum
+from seamless import Buffer, Checksum
 from seamless.caching import buffer_writer
 from seamless.caching.buffer_cache import get_buffer_cache
 from seamless.transformer import delayed
@@ -60,3 +60,27 @@ def test_definition_is_written_and_claimed_non_scratch_even_for_scratch(writes, 
     finally:
         transformation._release_refholds()
     assert cache.reference_snapshot().get(definition, (0, 0, False))[0] == 0
+
+
+def test_pretransformation_code_claim_follows_scratch_policy(writes):
+    cache = get_buffer_cache()
+    builder = delayed(_tag)
+    builder.local = True
+    builder.scratch = True
+    codebuf = builder._snapshot_for_call().codebuf
+    if isinstance(codebuf, Buffer):
+        code_checksum = codebuf.get_checksum()
+    elif isinstance(codebuf, Checksum):
+        code_checksum = codebuf
+    else:
+        code_checksum = Buffer(codebuf, "python").get_checksum()
+    cache.mark_scratch(code_checksum)
+
+    transformation = builder(uuid.uuid4().hex)
+    try:
+        result = transformation.compute()
+        assert result is not None, transformation.exception
+        assert code_checksum not in writes
+        assert cache.is_scratch_ref(code_checksum) is True
+    finally:
+        transformation._release_refholds()
