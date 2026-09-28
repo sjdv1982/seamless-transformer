@@ -502,16 +502,16 @@ class CompiledMixin:
     def _get_signature(self):
         return self._call_signature
 
-    def _snapshot_for_call(self):
+    def _freeze(self):
         if self._workflow_backend is not None:
-            return self._workflow_backend.snapshot_for_call()
-        from .builder_snapshot import TransformerBuilderSnapshot
+            return self._workflow_backend.freeze()
+        from .frozen_transformer import FrozenTransformer
         from seamless import Buffer
         objects, compilation = self._compiled_payloads()
         meta = deepcopy(self._meta)
         meta.setdefault("metavars", self._metavars.to_dict())
-        pin_args, input_celltypes = self._snapshot_pin_inputs()
-        return TransformerBuilderSnapshot(
+        pin_args, input_celltypes = self._frozen_pin_inputs()
+        return FrozenTransformer(
             codebuf=Buffer(self._code_text, "text") if self._code_text is not None else None,
             language=self.language, celltypes=deepcopy(self._celltypes),
             optional_pins=frozenset(self._optional_pins), args=pin_args,
@@ -646,7 +646,7 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
     def __call__(self, *args, **kwargs) -> Transformation:
         ensure_open("compiled transformer call")
         if self._workflow_backend is not None:
-            return self._build_from_snapshot(self._snapshot_for_call(), *args, **kwargs)
+            return self._build_from_frozen(self._freeze(), *args, **kwargs)
         if self._modules or self._globals:
             raise NotImplementedError("modules/globals are not supported for compiled transformers")
         arguments = self._bind_compiled_arguments(*args, **kwargs)
