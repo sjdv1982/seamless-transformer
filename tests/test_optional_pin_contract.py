@@ -84,7 +84,10 @@ def test_pin_null_revalidated_when_default_is_disabled():
     assert pin.exception is None
 
 
-def test_pin_materialization_failure_is_shared_and_recovery_does_not_compute(monkeypatch):
+def test_pin_materialization_failure_is_not_recorded_and_recovery_does_not_compute(monkeypatch):
+    # pins.md §Pin state / cells.md §`.buffer` and `.value` (ruled 2026-09-28):
+    # a failure to materialize a result that exists is raised on every read and
+    # never recorded, so there is nothing to clear once the buffer is readable.
     from seamless import Checksum
     tf = delayed(defaults)
     tf.pins.a = 3
@@ -93,12 +96,12 @@ def test_pin_materialization_failure_is_shared_and_recovery_does_not_compute(mon
     def fail(checksum, *args, **kwargs):
         raise ValueError('cannot decode pin')
     monkeypatch.setattr(Checksum, 'resolve', fail)
-    from seamless.error_envelope import WorkflowExecutionError
-    with pytest.raises(WorkflowExecutionError, match='cannot decode pin'):
-        pin.value
-    assert tf.pins.a.exception == 'cannot decode pin'
+    for _ in range(2):
+        with pytest.raises(Exception, match='cannot decode pin'):
+            pin.value
+        assert tf.pins.a.exception is None
+        assert tf.pins.a.state == 'complete'
     monkeypatch.setattr(Checksum, 'resolve', original)
-    tf.pins.a.clear_exception()
     assert pin.value == 3
     tf.celltypes.a = 'text'
     assert tf.pins.a.fingertip() is None

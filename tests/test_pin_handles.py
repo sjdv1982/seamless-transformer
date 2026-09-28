@@ -178,6 +178,14 @@ def test_failed_retype_reports_pin_exception_and_recovers():
     assert pin.state == 'failed'
     assert pin.exception is not None
     assert pin.checksum is None
+    # cells.md §Failures (ruled 2026-09-28): reads and compute() report a
+    # failure as None; only run() raises it.
+    assert pin.buffer is None
+    assert pin.value is None
+    assert pin.compute() is None
+    with pytest.raises(Exception) as caught:
+        pin.run()
+    assert str(caught.value) == pin.exception
     pin.clear_exception()
     assert pin.state == 'failed'
     assert pin.exception is not None

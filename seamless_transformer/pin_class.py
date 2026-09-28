@@ -152,10 +152,12 @@ class StandalonePinBackend:
 
     def run(self, input_ref=_UNSET):
         checksum = self.compute(input_ref)
+        if checksum is None:
+            if input_ref is _UNSET and self._exception is not None:
+                raise self._exception
+            return None
         if input_ref is _UNSET:
             return self.value
-        if checksum is None:
-            return None
         value = checksum.resolve(self.celltype)
         return value.content if self.celltype == 'bytes' and hasattr(value, 'content') else value
 
@@ -239,8 +241,6 @@ class StandalonePinBackend:
     def buffer(self):
         checksum = self.checksum
         if checksum is None:
-            if self._exception is not None:
-                raise self._exception
             return None
         try:
             from seamless.checksum.hash_type_validation import validate_deserializable_as
@@ -257,8 +257,6 @@ class StandalonePinBackend:
             return None
         checksum = self.checksum
         if checksum is None:
-            if self._exception is not None:
-                raise self._exception
             return None
         try:
             value = checksum.resolve(self.celltype)
@@ -267,12 +265,7 @@ class StandalonePinBackend:
         return value.content if self.celltype == 'bytes' and hasattr(value, 'content') else value
 
     def _materialization_error(self, exc):
-        from seamless import CacheMissError
-        if isinstance(exc, CacheMissError):
-            raise exc
-        from seamless.error_envelope import execution_error
-        self._exception = execution_error(exc)
-        raise self._exception
+        raise exc
 
     def fingertip(self):
         # Recovery must not demand evaluation of the pin's expression.
