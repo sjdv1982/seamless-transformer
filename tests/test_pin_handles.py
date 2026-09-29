@@ -270,3 +270,13 @@ def test_frozen_transformer_is_isolated_from_later_pin_cell_changes():
     upstream.celltype = 'int'
     assert tf._build_from_frozen(frozen).run() == '42'
     assert tf().run() == '43'
+
+
+def test_workflow_source_validation_runs_before_pin_write():
+    class WorkflowSource:
+        def _workflow_validate_source(self):
+            raise ValueError("projected workflow sources are not standalone inputs")
+
+    tf = builder()
+    with pytest.raises(ValueError, match="projected workflow sources"):
+        tf.pins.value = WorkflowSource()
