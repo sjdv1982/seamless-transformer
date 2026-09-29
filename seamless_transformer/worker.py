@@ -571,6 +571,11 @@ def _patch_worker_primitives() -> None:
     # A bare Checksum has no content to publish from inside a worker; only a
     # Buffer's transfer_write (below) can meaningfully cross the IPC boundary.
     Checksum.transfer_write = lambda self, *args, **kwargs: None  # type: ignore[assignment]
+    # Scratch status lives in the parent's buffer cache. A worker never
+    # publishes a scratch result anyway (the scratch flag already suppresses
+    # its transfer_write), so marking is a no-op here, like the refcounts.
+    Checksum.mark_scratch = lambda self: None  # type: ignore[assignment]
+    Buffer.mark_scratch = lambda self: None  # type: ignore[assignment]
     Buffer.incref = _buffer_incref  # type: ignore[assignment]
     Buffer.decref = _buffer_decref  # type: ignore[assignment]
     Buffer.tempref = _buffer_tempref  # type: ignore[assignment]
@@ -2116,11 +2121,18 @@ class _WorkerManager:
 
     async def _handle_download(
         self, _handle, payload: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, Any] | None:
         checksum = Checksum(payload["checksum"])
         data = self._prefetched_buffers.get(checksum.hex())
         if data is None:
-            buf = checksum.resolve()
+            try:
+                buf = checksum.resolve()
+            except CacheMissError:
+                # A miss is an answer, not a handler failure: the channel would
+                # turn the exception into a RuntimeError, hiding the miss from
+                # the worker's fingertip. Returning None makes the worker raise
+                # CacheMissError itself.
+                return None
             assert isinstance(buf, Buffer)
             data = buf.content
         pointer = await self._allocate_pointer(
