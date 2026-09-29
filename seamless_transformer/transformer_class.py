@@ -1185,6 +1185,9 @@ class ArgsWrapper:
             self._celltypes[key] = "mixed"
             self._celltypes.setdefault("result", "mixed")
         try:
+            validate_source = getattr(value, "_workflow_validate_source", None)
+            if callable(validate_source):
+                validate_source()
             self[key]._workflow_backend.write_value(value, detach=True)
         except Exception:
             if created:
