@@ -111,7 +111,11 @@ def _start_dependency(dep: Any, *, loop: asyncio.AbstractEventLoop | None = None
 
 def _dependency_result_checksum(dep: Any) -> Checksum:
     if _is_expression(dep):
-        result = dep._evaluate_internal(execution="auto")
+        # Input-side: a dispatched input is written by the executing side;
+        # any recorded checksum answers (checksum-reference-lifecycle.md, §1).
+        result = dep._evaluate_internal(
+            execution="auto", scratch=False, materialize=False
+        )
         if result is None:
             raise RuntimeError("Expression result is empty")
         return Checksum(result)
@@ -125,7 +129,9 @@ def _dependency_result_checksum(dep: Any) -> Checksum:
 
 async def _dependency_computation(dep: Any, *, require_value: bool) -> Checksum | None:
     if _is_expression(dep):
-        result = await dep._evaluate_internal_async(execution="auto")
+        result = await dep._evaluate_internal_async(
+            execution="auto", scratch=False, materialize=False
+        )
         if result is None:
             raise RuntimeError("Expression result is empty")
         return Checksum(result)

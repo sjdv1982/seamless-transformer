@@ -186,7 +186,9 @@ class StandalonePinBackend:
         from seamless.error_envelope import RunningLoopRefusal
         from seamless.checksum.null import canonicalize_checksum, is_null
         try:
-            input_checksum = _available_input_checksum(self._input_ref)
+            # Input-side: what a pin dispatches is written by the executing
+            # side (checksum-reference-lifecycle.md, §1).
+            input_checksum = _available_input_checksum(self._input_ref, scratch=False)
             if input_checksum is None:
                 return None
             input_checksum = canonicalize_checksum(input_checksum, self.input_celltype)
@@ -209,7 +211,7 @@ class StandalonePinBackend:
                     input_checksum,
                     input_celltype=self.input_celltype,
                     celltype=self.celltype,
-                ).compute()
+                )._compute_for_owner(scratch=False)
         except RunningLoopRefusal:
             return None
         except Exception as exc:

@@ -183,7 +183,11 @@ class PreTransformation:
             return result
         if isinstance(value, Expression):
             try:
-                result = value._evaluate_internal(execution="auto")
+                # Input-side: a dispatched input is written by the executing
+                # side; any recorded checksum answers (lifecycle §1).
+                result = value._evaluate_internal(
+                    execution="auto", scratch=False, materialize=False
+                )
                 if result is None:
                     raise RuntimeError("Expression result is empty")
                 return result
@@ -331,7 +335,11 @@ class PreparedPreTransformation(PreTransformation):
             return result
         if isinstance(value, Expression):
             try:
-                result = value._evaluate_internal(execution="auto")
+                # Input-side: a dispatched input is written by the executing
+                # side; any recorded checksum answers (lifecycle §1).
+                result = value._evaluate_internal(
+                    execution="auto", scratch=False, materialize=False
+                )
                 if result is None:
                     raise RuntimeError("Expression result is empty")
                 return result
