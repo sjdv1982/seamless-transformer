@@ -17,6 +17,7 @@ import pytest
 
 from seamless_transformer import delayed
 from seamless_transformer.transformation_cache import get_transformation_cache
+from seamless_transformer.transformation_class import TransformationError
 
 
 @delayed
@@ -119,11 +120,8 @@ def test_handle_cancel_never_invalidates_the_tf_checksum(tmp_path):
 
 
 def test_handle_cancel_makes_result_checksum_raise(tmp_path):
-    """A cancelled handle is terminal: ``result_checksum`` raises.
-
-    The exception *type* is proposed to be ``TransformationError`` but the
-    author has deferred confirmation (cancellation.md, "The API"), so only
-    "raises" is asserted here. (Today it is TransformationError.)"""
+    """A cancelled handle is terminal: ``result_checksum`` raises
+    ``TransformationError`` (cancellation.md, *The API*)."""
     marker = str(tmp_path)
     nonce = time.time()
 
@@ -137,7 +135,7 @@ def test_handle_cancel_makes_result_checksum_raise(tmp_path):
 
     a = asyncio.run(main())
     assert a.status == "Status: canceled"
-    with pytest.raises(Exception, match="cancel"):
+    with pytest.raises(TransformationError, match="cancel"):
         a.result_checksum
     # Nothing is active on a terminal handle any more.
     assert a.cancel() is False

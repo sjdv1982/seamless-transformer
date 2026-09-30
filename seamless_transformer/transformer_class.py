@@ -333,7 +333,7 @@ class TransformerCore(Generic[P, R]):
             if name not in frozen.optional_pins:
                 return False
             try:
-                if not is_null(_available_input_checksum(value)):
+                if not is_null(_available_input_checksum(value, scratch=False)):
                     return False
             except Exception:
                 return False
@@ -363,7 +363,7 @@ class TransformerCore(Generic[P, R]):
                 and frozen.celltypes[name] not in ("plain", "mixed", "bytes")
             ):
                 try:
-                    is_input_null = is_null(_available_input_checksum(value))
+                    is_input_null = is_null(_available_input_checksum(value, scratch=False))
                 except Exception:
                     is_input_null = False
                 if is_input_null:

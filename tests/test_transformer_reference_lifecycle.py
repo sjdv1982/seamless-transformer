@@ -1,10 +1,24 @@
+import uuid
+
+import pytest
+
 from seamless import Buffer
 from seamless.transformer import delayed
+from seamless.caching import buffer_writer
 from seamless.caching.buffer_cache import get_buffer_cache
 
 
 def identity(value):
     return value
+
+
+@pytest.fixture
+def writes(monkeypatch):
+    written = []
+    monkeypatch.setattr(
+        buffer_writer, "register", lambda buf: written.append(buf.get_checksum())
+    )
+    return written
 
 
 def test_checksum_pin_is_refheld_and_replaced():
@@ -29,6 +43,23 @@ def test_literal_pin_is_serialized_and_checksum_refheld():
     assert get_buffer_cache().reference_snapshot()[checksum][0] == 1
     transformer._release_refholds()
     assert get_buffer_cache().reference_snapshot().get(checksum, (0, 0, False))[0] == 0
+
+
+@pytest.mark.parametrize("scratch", [False, True])
+def test_literal_pin_is_published_whatever_the_transformer_scratch(writes, scratch):
+    # checksum-reference-lifecycle.md: a pin claim is input-side, so it
+    # refholds and publishes whatever the transformer's scratch; scratch only
+    # governs the result.
+    transformer = delayed(identity)
+    transformer.scratch = scratch
+    literal = f"published literal {uuid.uuid4().hex}"
+    transformer.pins.value = literal
+    checksum = Buffer(literal, "mixed").get_checksum()
+    try:
+        assert (checksum, "pin:value") in transformer._refheld_checksums()
+        assert checksum in writes, "a literal pin was not published"
+    finally:
+        transformer._release_refholds()
 
 
 def test_args_deletion_releases_checksum_pin():

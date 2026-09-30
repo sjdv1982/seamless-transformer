@@ -14,7 +14,9 @@ import yaml
 
 import seamless_transformer
 from seamless import Buffer, Cell, Checksum
+from seamless.checksum.conversion import SeamlessConversionError
 from seamless_transformer import Transformer
+from seamless_transformer.transformation_class import TransformationError
 from seamless_transformer.compiled_validation import (
     CompiledMixedValueError,
     CompiledPinCelltypeError,
@@ -58,6 +60,22 @@ CHAR_N2_CODE = (
     "int transform(unsigned int N, const unsigned char *x, int32_t *result)"
     " {*result=N*100+x[1]; return 0;}"
 )
+# Length and position-weighted byte sum: pins the exact bytes, their order and
+# their count.
+CHAR_N_WEIGHTED_CODE = (
+    "#include <stdint.h>\n"
+    "int transform(unsigned int N, const unsigned char *x, int32_t *result) {\n"
+    "  int32_t acc = 10000 * (int32_t)N;\n"
+    "  for (unsigned int i = 0; i < N; i++) acc += (int32_t)(i + 1) * x[i];\n"
+    "  *result = acc; return 0;\n"
+    "}\n"
+)
+
+
+def char_n_weighted(data: bytes) -> int:
+    """What CHAR_N_WEIGHTED_CODE returns when the kernel receives ``data``."""
+    return 10000 * len(data) + sum((i + 1) * c for i, c in enumerate(data))
+
 
 
 def make(dtype="int32", shape=None, celltype="mixed", *, code=INT_CODE, direct=True):
@@ -759,6 +777,56 @@ def test_text_cell_on_binary_char_array_is_rejected():
     source.set("ab")
     kind, text = outcome(lambda: make("char", ["N"], "binary", code=CHAR_N_CODE)(x=source))
     assert kind == "error" and "x" in text
+
+
+def test_text_cell_on_binary_char_array_pin_fails_with_conversion_error():
+    """Unbound text Cell connected directly to a binary char [N] pin.
+
+    text -> binary resolves through mixed (a JSON string) and raises
+    SeamlessConversionError (author ruling: the converter is right).  The
+    failure is the pin's own (pins.md, *Pin failures*): the pin is ``failed``,
+    no transformation is built, so the kernel never runs.
+    """
+    text = Cell("text")
+    text.set("ACGT")
+    tf = make("char", ["N"], "binary", code=CHAR_N_WEIGHTED_CODE, direct=False)
+    tf.pins.x = text
+    pin = tf.pins.x
+    assert pin.source is text
+    assert pin.state == "failed"
+    assert pin.checksum is None
+    assert "cannot be converted from text to binary" in pin.exception
+    with pytest.raises(SeamlessConversionError):
+        pin.run()
+
+    transformation = tf()
+    assert transformation.construct() is None
+    with pytest.raises(TransformationError, match="text.*binary"):
+        transformation.run()
+
+
+def test_text_cell_via_bytes_cell_on_bytes_char_array_runs():
+    """Unbound text Cell -> unbound bytes Cell -> ``char [N]`` pin declared
+    ``bytes``: the standard route for a text buffer (compiled-pins.md §8).
+
+    ``text -> bytes`` is trivial, so the kernel receives the stored text buffer
+    unchanged, trailing newline included: b"ACGT\\n", N = 5. The ``bytes``
+    Cell is optional: the text Cell on the same pin delivers the same bytes.
+    """
+    text = Cell("text")
+    text.set("ACGT")
+    data = Cell("bytes", source=text)
+    assert data.checksum == text.checksum
+    assert data.value == b"ACGT\n"
+
+    tf = make("char", ["N"], "bytes", code=CHAR_N_WEIGHTED_CODE, direct=False)
+    tf.pins.x = data
+    assert tf.pins.x.state == "complete"
+    assert tf().run() == char_n_weighted(b"ACGT\n")  # 50798
+
+    direct = make("char", ["N"], "bytes", code=CHAR_N_WEIGHTED_CODE, direct=False)
+    direct.pins.x = text
+    assert direct().run() == char_n_weighted(b"ACGT\n")
 
 
 # ------------------------------------------- §5 placement, §6, §9 D5
