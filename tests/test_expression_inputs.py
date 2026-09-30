@@ -28,9 +28,9 @@ def test_transformation_expression_dependency_uses_auto(monkeypatch):
     executions = []
     original_evaluate = Expression._evaluate_internal
 
-    def record_execution(self, *, execution):
+    def record_execution(self, *, execution, **kwargs):
         executions.append(execution)
-        return original_evaluate(self, execution=execution)
+        return original_evaluate(self, execution=execution, **kwargs)
 
     monkeypatch.setattr(Expression, "_evaluate_internal", record_execution)
 
@@ -63,7 +63,7 @@ def test_pretransformation_expression_paths_request_auto(
     expected = _checksum(43, "int")
     executions = []
 
-    def record_execution(self, *, execution):
+    def record_execution(self, *, execution, **kwargs):
         executions.append(execution)
         return expected
 
@@ -137,9 +137,9 @@ def test_async_transformation_expression_dependency_uses_auto(monkeypatch):
     executions = []
     original = Expression._evaluate_internal_async
 
-    async def record(self, *, execution):
+    async def record(self, *, execution, **kwargs):
         executions.append(execution)
-        return await original(self, execution=execution)
+        return await original(self, execution=execution, **kwargs)
 
     monkeypatch.setattr(Expression, "_evaluate_internal_async", record)
     source = Buffer({"value": 43}, "plain")
