@@ -79,8 +79,9 @@ class ProcessHandle:
         return bool(self.process and self.process.is_alive())
 
     def cancel_watchers(self) -> None:
+        current = asyncio.current_task()
         for task in (self.monitor_task, self.health_task):
-            if task and not task.done():
+            if task and task is not current and not task.done():
                 task.cancel()
 
 
@@ -264,13 +265,24 @@ class ProcessManager:
             if not handle.process or not handle.process.is_alive():
                 await self._handle_worker_failure(handle, "process exited")
                 return
+            endpoint = handle.endpoint
+            received_messages = endpoint.received_messages if endpoint else 0
             try:
                 await asyncio.wait_for(
                     handle.request("ping", None), self.health_check_timeout
                 )
-            except Exception:
+            except Exception as exc:
                 if handle.closing or handle.restarting:
                     return
+                # A busy bidirectional pipe can delay the ping response behind
+                # ordinary traffic. That traffic also proves the child is alive.
+                if (
+                    isinstance(exc, asyncio.TimeoutError)
+                    and endpoint is not None
+                    and not endpoint.is_closed()
+                    and endpoint.received_messages > received_messages
+                ):
+                    continue
                 await self._handle_worker_failure(handle, "ping timeout")
                 return
 
