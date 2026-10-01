@@ -2449,7 +2449,7 @@ async def dispatch_expression(
     scratch=False,
 ):
     """Dispatch checksum-level Expressions through the configured backend."""
-    from seamless.checksum.expression import evaluate_expression_async
+    from seamless.checksum.expression import evaluate_expression_local_async
 
     try:
         from seamless_dask.transformer_client import get_seamless_dask_client
@@ -2460,7 +2460,7 @@ async def dispatch_expression(
     if client is None:
         # A non-scratch request asks for the bytes: materialize (a cached
         # checksum without a local buffer is not an answer), then write.
-        result = await evaluate_expression_async(
+        result = await evaluate_expression_local_async(
             input_checksum,
             path,
             input_celltype,
