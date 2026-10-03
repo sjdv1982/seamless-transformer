@@ -213,7 +213,7 @@ def build_transformation_namespace_sync(
 
         try:
             buffer = checksum.resolve()
-        except Exception:
+        except CacheMissError:
             if pinname == "code" and fallback_code_text is not None:
                 code = fallback_code_text
                 continue

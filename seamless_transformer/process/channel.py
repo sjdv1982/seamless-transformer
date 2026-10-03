@@ -38,6 +38,7 @@ class Endpoint:
         self._request_counter = itertools.count(1)
         self._send_lock = asyncio.Lock()
         self._closed = False
+        self.received_messages = 0
         self._closed_event = asyncio.Event()
         self._request_tasks: set[asyncio.Task[Any]] = set()
         self._reader_task = self._loop.create_task(self._reader_loop())
@@ -94,6 +95,7 @@ class Endpoint:
                     ):
                         break
                     raise
+                self.received_messages += 1
                 await self._handle_message(message)
         except asyncio.CancelledError:
             pass

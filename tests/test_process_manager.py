@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import threading
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from typing import Any, Dict, List
 
 TESTS_DIR = os.path.dirname(__file__)
@@ -36,6 +39,89 @@ def make_manager(data_store: Dict[str, bytes]) -> ProcessManager:
 def test_worker_manager_executor_has_room_for_pipe_readers() -> None:
     assert _worker_manager_executor_workers(1) == 32
     assert _worker_manager_executor_workers(40) == 88
+
+
+def test_failure_watcher_can_finish_recovery() -> None:
+    from seamless_transformer.process.manager import ProcessHandle
+
+    async def check():
+        sibling = asyncio.create_task(asyncio.sleep(60))
+        handle = ProcessHandle(None, "test", None, True)
+        handle.health_task = asyncio.current_task()
+        handle.monitor_task = sibling
+        handle.cancel_watchers()
+        # Recovery must survive its next await; only the other watcher stops.
+        await asyncio.sleep(0)
+        assert sibling.cancelled()
+        assert not handle.health_task.cancelling()
+
+    run(check())
+
+
+def test_health_check_accepts_traffic_but_restarts_silent_worker() -> None:
+    async def check():
+        endpoint = SimpleNamespace(received_messages=0, is_closed=lambda: False)
+        attempts = 0
+
+        async def ping(*_args):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                endpoint.received_messages += 1
+            await asyncio.Event().wait()
+
+        handle = SimpleNamespace(
+            closing=False,
+            restarting=False,
+            endpoint=endpoint,
+            process=SimpleNamespace(is_alive=lambda: True),
+            request=ping,
+        )
+        manager = make_manager({})
+        manager.health_check_interval = 0.001
+        manager.health_check_timeout = 0.01
+        manager._handle_worker_failure = AsyncMock()
+        await asyncio.wait_for(manager._health_loop(handle), 1)
+        assert attempts == 2
+        manager._handle_worker_failure.assert_awaited_once_with(handle, "ping timeout")
+        await manager.aclose()
+
+    run(check())
+
+
+def test_delegate_input_preparation_keeps_manager_loop_responsive(monkeypatch) -> None:
+    from seamless_dask import transformer_client
+    from seamless_transformer.worker import _WorkerManager
+
+    async def check():
+        loop = asyncio.get_running_loop()
+        responsive = threading.Event()
+
+        def get_input(_checksum):
+            loop.call_soon_threadsafe(responsive.set)
+            if not responsive.wait(0.5):
+                raise RuntimeError("manager loop blocked")
+            raise RuntimeError("input preparation finished")
+
+        client = SimpleNamespace(get_fat_checksum_future=get_input)
+        monkeypatch.setattr(
+            transformer_client, "get_seamless_dask_client", lambda: client
+        )
+        manager = _WorkerManager.__new__(_WorkerManager)
+        manager._delegate_owner_by_handle = {}
+        manager._get_cached_transformation_result = AsyncMock(return_value=None)
+        manager._prefetch_transformation_assets = AsyncMock()
+        result = await manager._handle_delegate_transformation_submit(
+            SimpleNamespace(name="test"),
+            {
+                "tf_checksum": "01" * 32,
+                "transformation_dict": {"a": ("plain", None, "02" * 32)},
+            },
+        )
+        assert result["status"] == "error"
+        assert "input preparation finished" in result["error"]
+
+    run(check())
 
 
 def test_processing_owner_task_is_alive_without_direct_waiter() -> None:

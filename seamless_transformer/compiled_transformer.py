@@ -673,6 +673,7 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
             env=self._environment._to_lowlevel(),
             language=self.language,
             optional_pins=self._optional_pins,
+            literal_pins=(set(arguments) - set(deps)) | {"code", "objects"},
         )
         deferred_prepare_sync, deferred_prepare_async = _deferred_validation_hooks(self._schema)
         derived_dunder_validation = lambda prepared: _validate_derived_compiled_dunders(

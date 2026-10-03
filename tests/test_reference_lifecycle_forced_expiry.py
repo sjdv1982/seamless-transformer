@@ -265,7 +265,7 @@ def test_cancellation_after_completed_publication_is_a_noop():
     transformation._release_refholds()
 
 
-def test_scratch_pretransformation_transfers_tempref_to_transformation_bridge():
+def test_literal_pretransformation_overrules_scratch_tempref():
     checksum = Buffer(_unique("scratch-input").encode(), "bytes").get_checksum()
     checksum.tempref()
     checksum.mark_scratch()
@@ -277,8 +277,8 @@ def test_scratch_pretransformation_transfers_tempref_to_transformation_bridge():
         }
     )
     pre.prepare_transformation()
-    assert pre._value_refs == []
-    assert get_buffer_cache().reference_snapshot().get(checksum, (0, 0, False))[0] == 0
+    assert any(role == "input:value" for _, role in pre._value_refs)
+    assert get_buffer_cache().reference_snapshot()[checksum][0] > 0
     from seamless_transformer.transformation_class import transformation_from_pretransformation
 
     transformation = transformation_from_pretransformation(

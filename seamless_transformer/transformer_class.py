@@ -450,6 +450,12 @@ class TransformerCore(Generic[P, R]):
             for argname, arg in arguments.items()
             if isinstance(arg, (Transformation, Expression))
         }
+        literal_pins = (
+            set(frozen.literal_pins)
+            if frozen.literal_pins is not None
+            else set(arguments) - set(deps) | {"code"}
+        )
+        literal_pins.update(frozen.modules)
         if frozen.compilation is not None or frozen.schema is not None:
             from .pretransformation import compiled_transformer_to_pretransformation
             from .compiled_transformer import (
@@ -468,7 +474,8 @@ class TransformerCore(Generic[P, R]):
                 compilation=deepcopy(frozen.compilation), objects=deepcopy(frozen.objects),
                 meta=deepcopy(frozen.meta), celltypes=deepcopy(frozen.celltypes),
                 arguments=arguments, env=deepcopy(frozen.environment), language=frozen.language,
-                optional_pins=frozen.optional_pins, scratch=frozen.scratch)
+                optional_pins=frozen.optional_pins, scratch=frozen.scratch,
+                literal_pins=literal_pins | {"objects"})
             def validate_dunders(prepared):
                 _validate_derived_compiled_dunders(prepared, header=frozen.header)
             return transformation_from_pretransformation(
@@ -506,6 +513,7 @@ class TransformerCore(Generic[P, R]):
             language=frozen.language,
             optional_pins=frozen.optional_pins,
             scratch=frozen.scratch,
+            literal_pins=literal_pins,
         )
         return cast(
             Transformation[R],
@@ -663,10 +671,20 @@ class TransformerCore(Generic[P, R]):
         if self._workflow_backend is not None:
             self._workflow_backend.allow_input_fingertip = value
             return
+        previous = self.allow_input_fingertip
         if value:
             self.meta = {"allow_input_fingertip": True}
         else:
             self._meta.pop("allow_input_fingertip", None)
+        if previous != value:
+            from seamless import Checksum
+
+            for name, memo in self._pin_memos.items():
+                checksum = memo["checksum"]
+                ref = self._args.get(name, (None, None))[0]
+                if checksum is not None and not isinstance(ref, Checksum):
+                    checksum.incref_refholder(scratch=value)
+                    checksum.decref_refholder()
 
     @property
     def direct_print(self):
@@ -781,13 +799,13 @@ class TransformerCore(Generic[P, R]):
             return
         raise AttributeError(_no_such_attribute(self, name))
 
-    def _replace_checksum_field(self, old, new) -> None:
+    def _replace_checksum_field(self, old, new, *, scratch: bool = False) -> None:
         from seamless import Checksum
 
         old_checksum = old if isinstance(old, Checksum) else None
         new_checksum = new if isinstance(new, Checksum) else None
         if new_checksum is not None:
-            new_checksum.incref_refholder()
+            new_checksum.incref_refholder(scratch=scratch)
         if old_checksum is not None:
             old_checksum.decref_refholder()
 

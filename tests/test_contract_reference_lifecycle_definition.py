@@ -62,7 +62,8 @@ def test_definition_is_written_and_claimed_non_scratch_even_for_scratch(writes, 
     assert cache.reference_snapshot().get(definition, (0, 0, False))[0] == 0
 
 
-def test_pretransformation_code_claim_follows_scratch_policy(writes):
+def test_pretransformation_literal_code_claim_publishes(writes):
+    """pins.md, *Scratch at the pin*: a literal code pin always publishes."""
     cache = get_buffer_cache()
     builder = delayed(_tag)
     builder.local = True
@@ -80,7 +81,7 @@ def test_pretransformation_code_claim_follows_scratch_policy(writes):
     try:
         result = transformation.compute()
         assert result is not None, transformation.exception
-        assert code_checksum not in writes
-        assert cache.is_scratch_ref(code_checksum) is True
+        assert code_checksum in writes
+        assert cache.is_scratch_ref(code_checksum) is False
     finally:
         transformation._release_refholds()

@@ -48,6 +48,7 @@ def test_pretransformation_tempref_only_input_is_not_scratch():
 
 
 def test_pretransformation_scratch_input_is_tempref_only():
+    """pins.md, *Scratch at the pin*: opted-in non-literal pins stay scratch."""
     checksum = Buffer(b"pretransformation scratch").get_checksum()
     checksum.tempref()
     checksum.mark_scratch()
@@ -55,6 +56,7 @@ def test_pretransformation_scratch_input_is_tempref_only():
         {
             "__language__": "python",
             "__output__": ("result", "mixed", None),
+            "__meta__": {"allow_input_fingertip": True},
             "value": ("text", None, checksum),
         }
     )
@@ -65,6 +67,7 @@ def test_pretransformation_scratch_input_is_tempref_only():
 
 
 def test_mixed_scratch_and_non_scratch_pins_have_exact_roles():
+    """pins.md, *Scratch at the pin*: literal pins publish under the opt-in."""
     scratch_buffer = Buffer(b"mixed-scratch")
     scratch = scratch_buffer.get_checksum()
     scratch.tempref()
@@ -75,9 +78,11 @@ def test_mixed_scratch_and_non_scratch_pins_have_exact_roles():
         {
             "__language__": "python",
             "__output__": ("result", "mixed", None),
+            "__meta__": {"allow_input_fingertip": True},
             "scratch": ("bytes", None, scratch),
             "normal": ("bytes", None, normal),
-        }
+        },
+        literal_pins={"normal"},
     )
     pre.prepare_transformation()
     assert pre._value_refs == [(normal, "input:normal")]

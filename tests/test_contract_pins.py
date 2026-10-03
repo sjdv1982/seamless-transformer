@@ -8,6 +8,7 @@ pin-path rules are checked on the standalone Transformer too.
 import re
 
 import pytest
+from seamless.checksum.hash_type_validation import HashTypeValidationError
 from seamless import AuthorityError, Buffer, CacheMissError, Cell, Checksum, Expression
 from seamless_transformer import delayed
 from seamless_transformer.transformation_class import TransformationError
@@ -568,3 +569,40 @@ def test_standalone_pin_inspection_reads_checksum_first(first_read):
         assert "Cannot convert" in pin.exception
     assert pin.checksum is None
     assert pin.state == "failed"
+
+
+@pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
+@pytest.mark.parametrize("value,valid", [({"k": "ab" * 32}, True), ({"n": {"k": "ab" * 32}}, False)])
+def test_deep_pin_buffer_validates_index_without_resolving_members(celltype, value, valid):
+    index = Buffer(value, "plain")
+    index.tempref()
+    tf = builder(celltype=celltype)
+    tf.pins.value.set_checksum(index.get_checksum())
+    pin = tf.pins.value
+    for _ in range(2):
+        if valid:
+            assert pin.buffer.get_checksum() == index.get_checksum()
+        else:
+            with pytest.raises(ValueError, match="nested"):
+                _ = pin.buffer
+        assert pin.checksum == index.get_checksum()
+        assert pin.state == "complete"
+        assert pin.exception is None
+
+
+@pytest.mark.parametrize("celltype,content,attr", [
+    ("plain", b"not JSON", "buffer"),
+    ("plain", b"not JSON", "value"),
+    ("python", b"def broken(:\n", "value"),
+])
+def test_result_validation_and_parse_failures_never_fail_pin(celltype, content, attr):
+    source = Buffer(content)
+    source.tempref()
+    pin = builder(celltype=celltype).pins.value
+    pin.set_checksum(source.get_checksum())
+    for _ in range(2):
+        with pytest.raises(HashTypeValidationError):
+            getattr(pin, attr)
+        assert pin.state == "complete"
+        assert pin.exception is None
+        assert pin.checksum == source.get_checksum()

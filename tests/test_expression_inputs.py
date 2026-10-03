@@ -57,14 +57,15 @@ def test_transformation_expression_dependency_uses_auto(monkeypatch):
     "pretransformation_cls",
     [PreTransformation, PreparedPreTransformation],
 )
+@pytest.mark.parametrize("allow_input_fingertip", [False, True])
 def test_pretransformation_expression_paths_request_auto(
-    monkeypatch, pretransformation_cls
+    monkeypatch, pretransformation_cls, allow_input_fingertip
 ):
     expected = _checksum(43, "int")
     executions = []
 
     def record_execution(self, *, execution, **kwargs):
-        executions.append(execution)
+        executions.append((execution, kwargs["scratch"], kwargs["materialize"]))
         return expected
 
     monkeypatch.setattr(Expression, "_evaluate_internal", record_execution)
@@ -74,10 +75,13 @@ def test_pretransformation_expression_paths_request_auto(
         input_celltype="plain",
         celltype="int",
     )
-    pretransformation = pretransformation_cls({"__language__": "python"})
+    pretransformation = pretransformation_cls({
+        "__language__": "python",
+        "__meta__": {"allow_input_fingertip": allow_input_fingertip},
+    })
 
     assert pretransformation._prepare_pin_value("value", expr, "int") == expected
-    assert executions == ["auto"]
+    assert executions == [("auto", allow_input_fingertip, not allow_input_fingertip)]
 
 
 def test_transformation_consumes_expression_over_transformation_result():

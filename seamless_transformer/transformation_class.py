@@ -7,11 +7,12 @@ import os
 import threading
 import traceback
 import concurrent.futures as _cf
+from contextvars import ContextVar
 from copy import deepcopy
 from types import MappingProxyType
 from typing import Any, Dict, Generic, Optional, TYPE_CHECKING, TypeVar
 
-from seamless import Checksum, Buffer, ensure_open, is_worker
+from seamless import Checksum, Buffer, CacheMissError, ensure_open, is_worker
 from seamless.util.get_event_loop import get_event_loop
 from .transformation_utils import (
     extract_tf_dunder,
@@ -19,6 +20,10 @@ from .transformation_utils import (
     tf_get_buffer,
 )
 from . import worker
+
+_SCRATCH_REQUEST: ContextVar[tuple[int, bool] | None] = ContextVar(
+    "transformation_scratch_request", default=None
+)
 
 try:  # Optional Dask integration
     from seamless_dask.transformation_mixin import TransformationDaskMixin
@@ -97,48 +102,55 @@ def _dependency_exception(dep: Any) -> str | None:
     return getattr(dep, "exception", None)
 
 
-def _dependency_is_evaluated(dep: Any) -> bool:
+def _start_dependency(dep: Any, *, loop: asyncio.AbstractEventLoop | None = None,
+                      scratch: bool = True) -> None:
     if _is_expression(dep):
-        return dep._result_checksum_internal() is not None
-    return bool(getattr(dep, "_evaluated", False))
-
-
-def _start_dependency(dep: Any, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
-    if _is_expression(dep):
+        return
+    if not scratch:
+        # A value request must set the dispatch policy before the job starts.
         return
     dep.start(loop=loop, _internal=True)
 
 
-def _dependency_result_checksum(dep: Any) -> Checksum:
+def _dependency_result_checksum(dep: Any, *, scratch: bool = True) -> Checksum:
     if _is_expression(dep):
-        # Input-side: a dispatched input is written by the executing side;
-        # any recorded checksum answers (checksum-reference-lifecycle.md, §1).
         result = dep._evaluate_internal(
-            execution="auto", scratch=False, materialize=False
+            execution="auto", scratch=scratch, materialize=not scratch
         )
         if result is None:
             raise RuntimeError("Expression result is empty")
         return Checksum(result)
-    if not _dependency_is_evaluated(dep) and hasattr(dep, "_compute_dependency"):
-        dep._compute_dependency()
+    if hasattr(dep, "_compute_dependency"):
+        if isinstance(dep, Transformation):
+            dep._compute_dependency(require_value=not scratch,
+                                    scratch_override=False if not scratch else None)
+        else:
+            dep._compute_dependency()
     dep_exception = _dependency_exception(dep)
     if dep_exception is not None:
         raise RuntimeError(dep_exception)
     return dep._result_checksum_internal()
 
 
-async def _dependency_computation(dep: Any, *, require_value: bool) -> Checksum | None:
+async def _dependency_computation(dep: Any, *, require_value: bool,
+                                  scratch: bool = True) -> Checksum | None:
     if _is_expression(dep):
         result = await dep._evaluate_internal_async(
-            execution="auto", scratch=False, materialize=False
+            execution="auto", scratch=scratch, materialize=not scratch
         )
         if result is None:
             raise RuntimeError("Expression result is empty")
         return Checksum(result)
     if hasattr(dep, "_compute_dependency_async"):
-        await dep._compute_dependency_async(require_value=require_value)
+        if isinstance(dep, Transformation):
+            await dep._compute_dependency_async(
+                require_value=not scratch,
+                scratch_override=False if not scratch else None,
+            )
+        else:
+            await dep._compute_dependency_async(require_value=not scratch)
     else:
-        await dep._computation(require_value=require_value)
+        await dep._computation(require_value=not scratch)
     return dep._result_checksum_internal()
 
 
@@ -333,6 +345,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         strict_dunder: bool = False,
         definition_payload_template: dict[str, Any] | None = None,
         optional_pins=None,
+        literal_pins=None,
     ) -> None:
         self._result_celltype = result_celltype
         self._upstream_dependencies = (upstream_dependencies or {}).copy()
@@ -367,6 +380,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             else None
         )
         self._optional_pins = frozenset(optional_pins or ())
+        self._literal_pins = frozenset(literal_pins or ())
         self._dask_futures: TransformationFutures | None = None
         self._computation_task: Optional[asyncio.Task] = None
         self._computation_future: Optional[asyncio.Future] = None
@@ -392,7 +406,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     def _replace_input_role(self, role: str, checksum: Checksum | None) -> None:
         old = next((value for value, old_role in self._input_refholds if old_role == role), None)
         if checksum is not None:
-            checksum.incref_refholder(scratch=self._scratch)
+            scratch = (self.allow_input_fingertip and
+                       role.removeprefix("input:") not in self._literal_pins and
+                       not role.startswith("envelope:"))
+            checksum.incref_refholder(scratch=scratch)
             self._input_refholds = [
                 (value, old_role)
                 for value, old_role in self._input_refholds
@@ -410,6 +427,13 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     def _adopt_input_checksum(self, pin: str, checksum: Checksum) -> None:
         self._replace_input_role(f"input:{pin}", Checksum(checksum))
+
+    def _pin_scratch(self, pinname: str) -> bool:
+        return self.allow_input_fingertip and pinname not in self._literal_pins
+
+    def _requested_scratch(self) -> bool:
+        request = _SCRATCH_REQUEST.get()
+        return request[1] if request is not None and request[0] == id(self) else self._scratch
 
     def _publish_definition(self, checksum: Checksum | str | bytes) -> Checksum:
         checksum = Checksum(checksum)
@@ -751,10 +775,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
         return is_cached_sync(self._transformation_checksum)
 
-    def _evaluate(self) -> Checksum | None:
+    def _evaluate(self, *, force: bool = False) -> Checksum | None:
         if self._cancelled:
             return None
-        if self._evaluated:
+        if self._evaluated and not force:
             return self._result_checksum
         self.construct()
         if self._exception is not None:
@@ -800,10 +824,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         except Exception as exc:
             self._exception = _record_exception(exc)
 
-    async def _evaluation(self, require_value: bool) -> Checksum | None:
+    async def _evaluation(self, require_value: bool, *, force: bool = False) -> Checksum | None:
         if self._cancelled:
             return None
-        if self._evaluated:
+        if self._evaluated and not force:
             if require_value:
                 await self._ensure_result_value()
             return self._result_checksum
@@ -848,10 +872,11 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             self._verify_sync_construct(loop)
             self.start(loop=loop, _internal=True)
             for depname, dep in self._upstream_dependencies.items():
-                _start_dependency(dep, loop=loop)
+                _start_dependency(dep, loop=loop, scratch=self._pin_scratch(depname))
             for depname, dep in self._upstream_dependencies.items():
                 try:
-                    result = _dependency_result_checksum(dep)
+                    result = _dependency_result_checksum(
+                        dep, scratch=self._pin_scratch(depname))
                     self._adopt_input_checksum(depname, result)
                 except Exception as exc:
                     raise RuntimeError(_dependency_message(depname, dep, exc)) from exc
@@ -868,7 +893,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         loop = get_event_loop()
         for depname, dep in self._upstream_dependencies.items():
             tasks[depname] = loop.create_task(
-                _dependency_computation(dep, require_value=require_value)
+                _dependency_computation(
+                    dep, require_value=require_value,
+                    scratch=self._pin_scratch(depname))
             )
         task_errors = {}
         pending = set(tasks.values())
@@ -1045,17 +1072,55 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._computation_task = None
         return self._result_checksum
 
-    def _compute_dependency(self) -> Checksum | None:
-        """Synchronously evaluate as a dependency without result interest."""
+    def _compute_dependency(self, *, require_value: bool = False,
+                            scratch_override: bool | None = None) -> Checksum | None:
+        """Evaluate for a pin's checksum or value request."""
+        if scratch_override is None:
+            result = self._compute_sync("dependency")
+            if require_value and result is not None:
+                result.fingertip_sync(self.celltype)
+            return result
+        if require_value and self._result_checksum is not None:
+            try:
+                self._result_checksum.resolve()
+            except CacheMissError:
+                pass
+            else:
+                return self._result_checksum
+        token = _SCRATCH_REQUEST.set((id(self), scratch_override))
+        try:
+            if self._computation_task is not None or self._computation_future is not None:
+                self._compute_sync("dependency")
+            if _dask_available() and not self._prefer_local_execution():
+                return self._compute_with_dask(require_value=require_value)
+            return self._evaluate(force=True)
+        finally:
+            _SCRATCH_REQUEST.reset(token)
 
-        return self._compute_sync("dependency")
-
-    async def _compute_dependency_async(self, *, require_value: bool = False) -> Checksum | None:
+    async def _compute_dependency_async(self, *, require_value: bool = False,
+                                        scratch_override: bool | None = None) -> Checksum | None:
         """Asynchronously evaluate as a dependency without result interest."""
 
         ensure_open("transformation computation")
         if self._cancelled:
             return None
+        if scratch_override is not None:
+            if require_value and self._result_checksum is not None:
+                try:
+                    await self._result_checksum.resolution()
+                except CacheMissError:
+                    pass
+                else:
+                    return self._result_checksum
+            token = _SCRATCH_REQUEST.set((id(self), scratch_override))
+            try:
+                if self._computation_task is not None or self._computation_future is not None:
+                    await self._compute_dependency_async(require_value=False)
+                if _dask_available() and not self._prefer_local_execution():
+                    return await self._compute_with_dask_async(require_value=require_value)
+                return await self._evaluation(require_value=require_value, force=True)
+            finally:
+                _SCRATCH_REQUEST.reset(token)
         if self._computation_task is None and self._computation_future is None:
             if _dask_available() and not self._prefer_local_execution():
                 return await self._compute_with_dask_async(require_value=require_value)
@@ -1211,7 +1276,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         if self._cancelled:
             return self
         for _depname, dep in self._upstream_dependencies.items():
-            _start_dependency(dep)
+            _start_dependency(dep, scratch=self._pin_scratch(_depname))
         if _dask_available() and not self._prefer_local_execution():
             if self._computation_task is None:
                 loop = loop or _sync_task_loop()
@@ -1510,7 +1575,8 @@ def transformation_from_pretransformation(
             if dep_exception is not None:
                 raise RuntimeError(_dependency_message(pinname, dep, dep_exception))
             celltype, subcelltype, _value = transformation_dict[pinname]
-            result_checksum = _dependency_result_checksum(dep)
+            result_checksum = _dependency_result_checksum(
+                dep, scratch=transformation_obj._pin_scratch(pinname))
             if transformation_dict.get("__compiled__"):
                 from seamless.checksum.null import canonicalize_checksum
                 result_checksum = canonicalize_checksum(result_checksum, celltype)
@@ -1591,7 +1657,7 @@ def transformation_from_pretransformation(
     ) -> Checksum:
         if prepared_execution_dict is None:
             raise TransformationError("Transformation has not been constructed")
-        scratch = transformation_obj.scratch
+        scratch = transformation_obj._requested_scratch()
         tf_dunder_payload = _inject_dependency_dunder(
             transformation_obj, prepared_tf_dunder
         )
@@ -1607,7 +1673,7 @@ def transformation_from_pretransformation(
     async def evaluator_async(transformation_obj, require_value: bool) -> Checksum:
         if prepared_execution_dict is None:
             raise TransformationError("Transformation has not been constructed")
-        scratch = transformation_obj.scratch
+        scratch = transformation_obj._requested_scratch()
         tf_dunder_payload = _inject_dependency_dunder(
             transformation_obj, prepared_tf_dunder
         )
@@ -1638,6 +1704,7 @@ def transformation_from_pretransformation(
         strict_dunder=strict_dunder,
         definition_payload_template=frozen_payload_template,
         optional_pins=optional_pins,
+        literal_pins=pre_transformation._literal_pins,
     )
     # The Transformation has acquired its own direct input/definition roles
     # during construction.  Drop the temporary PreTransformation ownership
@@ -1658,10 +1725,14 @@ def transformation_from_dict(
     from .pretransformation import PreparedPreTransformation
 
     pre_transformation = PreparedPreTransformation(transformation_dict)
+    dict_meta = transformation_dict.get("__meta__")
+    effective_meta = dict(dict_meta) if isinstance(dict_meta, dict) else {}
+    if meta:
+        effective_meta.update(meta)
     return transformation_from_pretransformation(
         pre_transformation,
         upstream_dependencies={},
-        meta=meta or {},
+        meta=effective_meta,
         scratch=scratch,
         tf_dunder=tf_dunder,
         strict_dunder=strict_dunder,
