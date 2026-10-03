@@ -250,9 +250,13 @@ class StandalonePinBackend:
             return None
         try:
             from seamless.checksum.hash_type_validation import validate_deserializable_as
-            validate_deserializable_as(checksum, self.celltype)
+            from seamless.buffer_class import Buffer
+            celltype = Buffer._map_celltype(self.celltype)
+            validate_deserializable_as(checksum, celltype)
             buffer = checksum.resolve()
-            validate_deserializable_as(checksum, self.celltype, buffer=buffer)
+            validate_deserializable_as(checksum, celltype, buffer=buffer)
+            if self.celltype in {"deepcell", "deepfolder", "folder"}:
+                buffer.get_value(self.celltype)
             return buffer
         except Exception as exc:
             return self._materialization_error(exc)

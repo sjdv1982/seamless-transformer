@@ -247,8 +247,10 @@ def test_bash_undeclared_keyword_raises_at_build():
     tf = Transformer("bash", direct=True)
     tf.local = True
     tf.code = "cat input > RESULT"
-    with pytest.raises(Exception):  # type unstated by the contract
+    with pytest.raises(TypeError, match="Unexpected keyword argument: 'input'"):
         tf.build(input="hi")
+    with pytest.raises(TypeError, match="Unexpected keyword argument: 'input'"):
+        tf(input="hi")
 
 
 # --- snapshot isolation --------------------------------------------------------
