@@ -47,9 +47,8 @@ def test_literal_pin_is_serialized_and_checksum_refheld():
 
 @pytest.mark.parametrize("scratch", [False, True])
 def test_literal_pin_is_published_whatever_the_transformer_scratch(writes, scratch):
-    # checksum-reference-lifecycle.md: a pin claim is input-side, so it
-    # refholds and publishes whatever the transformer's scratch; scratch only
-    # governs the result.
+    # pins.md, *Scratch at the pin*: a literal pin publishes regardless of
+    # the transformer's result scratch.
     transformer = delayed(identity)
     transformer.scratch = scratch
     literal = f"published literal {uuid.uuid4().hex}"

@@ -1,11 +1,11 @@
 """Contract tests: a transformer's inputs reverse-publish
 (contracts/internal/checksum-reference-lifecycle.md, §1, ruling 2026-09-30).
 
-Pins and Expression inputs are input-side owners. When resolving one
+Non-scratch pins and their Expression inputs are input-side owners. When resolving one
 dispatches an Expression (its input is on the hashserver only), the request
 carries scratch=False, so the executing side writes the result to the
-hashserver, where a transformation running anywhere can find it. It is still
-a checksum request: any recorded checksum answers it.
+hashserver, where a transformation running anywhere can find it. A recorded
+checksum without reachable bytes does not answer the value request.
 """
 import os
 import subprocess

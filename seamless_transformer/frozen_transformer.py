@@ -41,6 +41,8 @@ class FrozenTransformer:
     objects: Any = None
     header: str | None = None
     input_celltypes: dict[str, str] = field(default_factory=dict)
+    # None means a standalone call, whose direct arguments are literals.
+    literal_pins: frozenset[str] | None = None
     # Optional neutral hand-over leases supplied by a bound backend.
     leases: tuple[Any, ...] = ()
 

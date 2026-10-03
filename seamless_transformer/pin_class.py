@@ -47,7 +47,10 @@ class StandalonePinBackend:
 
     @_result_checksum.setter
     def _result_checksum(self, value):
-        self.owner._replace_checksum_field(self._memo['checksum'], value)
+        scratch = (self.owner.allow_input_fingertip and
+                   not isinstance(self._input_ref, Checksum))
+        self.owner._replace_checksum_field(
+            self._memo['checksum'], value, scratch=scratch)
         self._memo['checksum'] = value
 
     def _identity(self):
@@ -186,9 +189,10 @@ class StandalonePinBackend:
         from seamless.error_envelope import RunningLoopRefusal
         from seamless.checksum.null import canonicalize_checksum, is_null
         try:
-            # Input-side: what a pin dispatches is written by the executing
-            # side (checksum-reference-lifecycle.md, §1).
-            input_checksum = _available_input_checksum(self._input_ref, scratch=False)
+            scratch = (self.owner.allow_input_fingertip and
+                       not isinstance(self._input_ref, Checksum))
+            input_checksum = _available_input_checksum(
+                self._input_ref, scratch=scratch, materialize=not scratch)
             if input_checksum is None:
                 return None
             input_checksum = canonicalize_checksum(input_checksum, self.input_celltype)
@@ -211,7 +215,7 @@ class StandalonePinBackend:
                     input_checksum,
                     input_celltype=self.input_celltype,
                     celltype=self.celltype,
-                )._compute_for_owner(scratch=False)
+                )._evaluate_internal(scratch=scratch, materialize=not scratch)
         except RunningLoopRefusal:
             return None
         except Exception as exc:

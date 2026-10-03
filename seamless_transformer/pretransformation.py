@@ -33,6 +33,7 @@ class PreTransformation:
         optional_pins=None,
         compiled_signature=None,
         scratch: bool = False,
+        literal_pins=None,
     ):
         if "__language__" not in pretransformation_dict:
             raise ValueError("pretransformation dict must include __language__")
@@ -43,6 +44,7 @@ class PreTransformation:
         self._compiled_wildcards = {}
         self._compiled_signature = compiled_signature
         self._scratch = bool(scratch)
+        self._literal_pins = frozenset({"code"} if literal_pins is None else literal_pins)
         self._code_refs: list[tuple[Checksum, Checksum]] = []
         self._value_refs: list[tuple[Checksum, str]] = []
         self._refholds_released = False
@@ -175,18 +177,19 @@ class PreTransformation:
             if value.exception is not None:
                 msg = f"Dependency '{argname}' has an exception:\n{value.exception}"
                 raise RuntimeError(msg)
-            if value._result_checksum_internal() is None:
-                value._compute_dependency()
+            scratch = self._pin_scratch(argname)
+            if value._result_checksum_internal() is None or not scratch:
+                value._compute_dependency(require_value=not scratch,
+                                          scratch_override=False if not scratch else None)
             result = value._result_checksum_internal()
             if result is None:
                 raise RuntimeError(f"Dependency '{argname}' has no result")
             return result
         if isinstance(value, Expression):
             try:
-                # Input-side: a dispatched input is written by the executing
-                # side; any recorded checksum answers (lifecycle §1).
+                scratch = self._pin_scratch(argname)
                 result = value._evaluate_internal(
-                    execution="auto", scratch=False, materialize=False
+                    execution="auto", scratch=scratch, materialize=not scratch
                 )
                 if result is None:
                     raise RuntimeError("Expression result is empty")
@@ -226,7 +229,8 @@ class PreTransformation:
         if is_worker():
             try:
                 code_buffer.tempref()  # local: upload to parent so nested workers can resolve
-                code_buffer.transfer_write()  # remote: definition input, not scratch
+                if not self._pin_scratch("code"):
+                    code_buffer.transfer_write()
             except Exception:
                 pass
         try:
@@ -240,10 +244,10 @@ class PreTransformation:
             code_buffer
         )
         self._code_manager.incref_syntactic(
-            syntactic_checksum, scratch=self._scratch
+            syntactic_checksum, scratch=self._pin_scratch("code")
         )
         self._code_manager.incref_semantic(
-            semantic_checksum, scratch=self._scratch
+            semantic_checksum, scratch=self._pin_scratch("code")
         )
         self._code_refs.append((semantic_checksum, syntactic_checksum))
         self._pretransformation_dict["__code_checksum__"] = syntactic_checksum.hex()
@@ -266,7 +270,8 @@ class PreTransformation:
             if is_worker():
                 try:
                     buffer.tempref()  # local: ensure parent sees worker-created buffers
-                    buffer.transfer_write()  # remote: definition input, not scratch
+                    if not self._pin_scratch(role.removeprefix("input:")):
+                        buffer.transfer_write()
                 except Exception:
                     pass
         from seamless.checksum.hash_type_validation import validate_deserializable_as
@@ -296,21 +301,17 @@ class PreTransformation:
             if celltype not in DEEP_CELLTYPES:
                 validate_deserializable_as(checksum, celltype or "mixed", buffer=buffer)
         if not is_worker():
-            try:
-                from seamless.caching.buffer_cache import get_buffer_cache
-
-                scratch_ref = get_buffer_cache().is_scratch_ref(checksum)
-            except Exception:
-                scratch_ref = False
-            meta = self._pretransformation_dict.get("__meta__")
-            if isinstance(meta, dict) and meta.get("allow_input_fingertip"):
-                scratch_ref = True
-            if scratch_ref:
+            if self._pin_scratch(pinname):
                 checksum.tempref()
             else:
                 checksum.incref_refholder(scratch=False)
                 self._value_refs.append((checksum, role))
         return checksum
+
+    def _pin_scratch(self, pinname: str) -> bool:
+        meta = self._pretransformation_dict.get("__meta__")
+        return (isinstance(meta, dict) and bool(meta.get("allow_input_fingertip"))
+                and pinname not in self._literal_pins)
 
 
 class PreparedPreTransformation(PreTransformation):
@@ -318,6 +319,9 @@ class PreparedPreTransformation(PreTransformation):
 
     This avoids re-processing code pins for already-prepared transformation dicts.
     """
+
+    def __init__(self, pretransformation_dict):
+        super().__init__(pretransformation_dict, literal_pins=())
 
     def _prepare_pin_value(self, argname: str, value, celltype: str):
         from .transformation_class import Transformation
@@ -327,18 +331,19 @@ class PreparedPreTransformation(PreTransformation):
             if value.exception is not None:
                 msg = f"Dependency '{argname}' has an exception:\n{value.exception}"
                 raise RuntimeError(msg)
-            if value._result_checksum_internal() is None:
-                value._compute_dependency()
+            scratch = self._pin_scratch(argname)
+            if value._result_checksum_internal() is None or not scratch:
+                value._compute_dependency(require_value=not scratch,
+                                          scratch_override=False if not scratch else None)
             result = value._result_checksum_internal()
             if result is None:
                 raise RuntimeError(f"Dependency '{argname}' has no result")
             return result
         if isinstance(value, Expression):
             try:
-                # Input-side: a dispatched input is written by the executing
-                # side; any recorded checksum answers (lifecycle §1).
+                scratch = self._pin_scratch(argname)
                 result = value._evaluate_internal(
-                    execution="auto", scratch=False, materialize=False
+                    execution="auto", scratch=scratch, materialize=not scratch
                 )
                 if result is None:
                     raise RuntimeError("Expression result is empty")
@@ -364,6 +369,7 @@ def direct_transformer_to_pretransformation(
     code_manager: Optional[CodeManager] = None,
     optional_pins=None,
     scratch: bool = False,
+    literal_pins=None,
 ) -> PreTransformation:
     """Create a PreTransformation instance for a direct transformer call."""
     result_celltype = celltypes["result"]
@@ -449,6 +455,7 @@ def direct_transformer_to_pretransformation(
         code_manager=code_manager,
         optional_pins=optional_pins,
         scratch=scratch,
+        literal_pins=literal_pins,
     )
 
 
@@ -479,6 +486,7 @@ def compiled_transformer_to_pretransformation(
     code_manager: Optional[CodeManager] = None,
     optional_pins=None,
     scratch: bool = False,
+    literal_pins=None,
 ) -> PreTransformation:
     """Create a PreTransformation for a compiled transformer call."""
 
@@ -514,6 +522,7 @@ def compiled_transformer_to_pretransformation(
         optional_pins=optional_pins,
         compiled_signature=signature,
         scratch=scratch,
+        literal_pins=literal_pins,
     )
 
 

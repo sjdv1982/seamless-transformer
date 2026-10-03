@@ -166,13 +166,10 @@ def main() -> None:
         tf_fail._release_refholds()
         tf_ok._release_refholds()
 
+        # The checksum above is a literal input pin. Fingertipping it for
+        # add_one_finger promotes the input bytes to a durable claim.
         get_buffer_cache().purge_scratch(result_checksum)
-        try:
-            result_checksum.resolve()
-        except CacheMissError:
-            pass
-        else:
-            raise RuntimeError("Scratch result unexpectedly resolvable before CLI test")
+        result_checksum.resolve()
 
         @delayed
         def add_one_cli(x) -> float:
@@ -189,20 +186,9 @@ def main() -> None:
         tf_cli._release_refholds()
 
         proc = _run_cli(tf_cli_checksum, fingertip=False, workdir=workdir)
-        if proc.returncode == 0:
-            raise RuntimeError("CLI succeeded without --fingertip")
-        err_output = "\n".join(
-            line
-            for line in (proc.stdout or "").splitlines()
-            + (proc.stderr or "").splitlines()
-            if line
-        )
-        if (
-            "CacheMiss" not in err_output
-            and result_checksum.hex() not in err_output
-        ):
+        if proc.returncode != 0:
             raise RuntimeError(
-                "Expected CacheMissError when CLI runs without --fingertip"
+                f"CLI failed with durable literal input:\n{proc.stdout}\n{proc.stderr}"
             )
 
         proc = _run_cli(tf_cli_checksum, fingertip=True, workdir=workdir)
@@ -228,14 +214,7 @@ def main() -> None:
         asyncio.run(_undo_transformation(tf_cli_checksum, cli_result_checksum))
 
         get_buffer_cache().purge_scratch(result_checksum)
-        try:
-            result_checksum.resolve()
-        except CacheMissError:
-            pass
-        else:
-            raise RuntimeError(
-                "Scratch result unexpectedly resolvable after recompute purge"
-            )
+        result_checksum.resolve()
     finally:
         try:
             seamless.close()
