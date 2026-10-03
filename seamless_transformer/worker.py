@@ -831,6 +831,7 @@ class _WorkerManager:
         self._manager.add_parent_handler("downloaded", self._handle_downloaded)
         self._manager.add_parent_handler("ref_op", self._handle_ref_op)
         self._manager.add_parent_handler("upload", self._handle_upload)
+        self._manager.add_parent_handler("report_irreproducible", self._handle_report_irreproducible)
         self._manager.add_parent_handler(
             "delegate_transformation_submit",
             self._handle_delegate_transformation_submit,
@@ -2190,6 +2191,13 @@ class _WorkerManager:
         return await self._allocate_pointer(
             length,
             {"checksum": checksum.hex(), "length": length, "direction": "upload"},
+        )
+
+    async def _handle_report_irreproducible(self, _handle, payload):
+        from seamless_remote import database_remote
+
+        return await database_remote.report_irreproducible_result(
+            Checksum(payload["checksum"]), Checksum(payload["result"])
         )
 
     async def _handle_upload(self, _handle, payload: Dict[str, Any]) -> Dict[str, str]:

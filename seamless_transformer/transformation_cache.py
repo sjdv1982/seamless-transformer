@@ -3,6 +3,7 @@
 from typing import Any, Dict
 
 import asyncio
+import logging
 import concurrent.futures
 from copy import deepcopy
 from dataclasses import dataclass
@@ -203,13 +204,78 @@ class TransformationCache:
         tf_checksum: Checksum,
         result_checksum: Checksum,
         tf_dunder: Dict[str, Any] | None = None,
-    ) -> None:
+    ) -> str:
         tf_checksum = Checksum(tf_checksum)
         result_checksum = Checksum(result_checksum)
         self._remember_transformation_dunder(tf_checksum, tf_dunder)
+        recorded = self._transformation_cache.get(tf_checksum)
+        if recorded is not None:
+            if recorded != result_checksum:
+                logging.getLogger(__name__).warning(
+                    "Transformation %s already records %s; observed %s",
+                    tf_checksum, recorded, result_checksum,
+                )
+                return "MISMATCH"
+            return "SAME"
         self._transformation_cache[tf_checksum] = result_checksum
         rev = self._rev_transformation_cache.setdefault(result_checksum, set())
         rev.add(tf_checksum)
+        return "NEW"
+
+    async def _record_transformation_result(
+        self,
+        tf_checksum,
+        result_checksum,
+        tf_dunder=None,
+        execution_record=None,
+        remote_database=None,
+    ) -> str:
+        """Compare once; record only a new mapping and report every divergence."""
+        database = remote_database if remote_database is not None else database_remote
+        tf_checksum, result_checksum = Checksum(tf_checksum), Checksum(result_checksum)
+        outcome = self._register_transformation_result(
+            tf_checksum, result_checksum, tf_dunder=tf_dunder
+        )
+        if outcome == "NEW" and database is not None and not is_worker():
+            from seamless_remote.database_client import TransformationResultConflict
+            try:
+                await database.set_transformation_result(tf_checksum, result_checksum)
+            except TransformationResultConflict:
+                recorded = await database.get_transformation_result(tf_checksum)
+                if recorded is None:
+                    raise
+                recorded = Checksum(recorded)
+                # The just-inserted result was provisional: the database has
+                # an existing authoritative mapping. Remove its reverse link.
+                self._transformation_cache[tf_checksum] = recorded
+                self._rev_transformation_cache[result_checksum].discard(tf_checksum)
+                self._rev_transformation_cache.setdefault(recorded, set()).add(tf_checksum)
+                outcome = "MISMATCH"
+            else:
+                if execution_record is not None:
+                    await execution_record()
+        if outcome == "MISMATCH":
+            recorded = self._transformation_cache[tf_checksum]
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Irreproducible transformation %s: recorded %s, produced %s",
+                tf_checksum, recorded, result_checksum,
+            )
+            from seamless_remote.client import _remote_clients_allowed_in_worker
+            if is_worker() and not _remote_clients_allowed_in_worker():
+                accepted = await worker._request_parent_async(
+                    "report_irreproducible",
+                    {"checksum": tf_checksum.hex(), "result": result_checksum.hex()},
+                )
+            elif database is not None:
+                accepted = await database.report_irreproducible_result(
+                    tf_checksum, result_checksum
+                )
+            else:
+                accepted = False
+            if not accepted:
+                logger.warning("Automatic irreproducible report refused for %s", tf_checksum)
+        return outcome
 
     def get_transformation_dunder(self, tf_checksum: Checksum) -> Dict[str, Any]:
         tf_checksum = Checksum(tf_checksum)
@@ -273,6 +339,9 @@ class TransformationCache:
             remote_result = await database_remote.get_transformation_result(tf_checksum)
             _debug(f"remote db result {remote_result}")
             if remote_result is not None:
+                self._register_transformation_result(
+                    tf_checksum, remote_result, tf_dunder=tf_dunder
+                )
                 if require_value:
                     try:
                         _debug("waiting for result resolution")
@@ -852,7 +921,7 @@ class TransformationCache:
             try:
                 _debug("ensuring result is resolvable")
                 await result_checksum.resolution()
-            except Exception:
+            except CacheMissError:
                 _debug("result resolution failed; will continue")
 
         if active_submission is not None and active_submission.canceled:
@@ -864,10 +933,7 @@ class TransformationCache:
         else:
             result_checksum.mark_scratch()
 
-        if database_remote is not None and not is_worker():
-            await database_remote.set_transformation_result(
-                tf_checksum, result_checksum
-            )
+        async def write_execution_record():
             record_probe = is_record_probe(transformation_dict, tf_dunder)
             if store_execution_record and not record_probe:
                 record_runtime_metadata = dict(runtime_metadata or {})
@@ -979,8 +1045,9 @@ class TransformationCache:
         if active_submission is not None and active_submission.canceled:
             raise TransformationCancelledError("Transformation was canceled")
 
-        self._register_transformation_result(
-            tf_checksum, result_checksum, tf_dunder=tf_dunder
+        await self._record_transformation_result(
+            tf_checksum, result_checksum, tf_dunder=tf_dunder,
+            execution_record=write_execution_record,
         )
         await _await_buffer_writer(result_checksum)
 
@@ -1190,7 +1257,7 @@ async def recompute_from_transformation_checksum(
     try:
         tf_checksum_obj = Checksum(tf_checksum)
         transformation_dict = await tf_checksum_obj.resolution(celltype="plain")
-    except Exception:
+    except CacheMissError:
         return None
     if not isinstance(transformation_dict, dict):
         return None
@@ -1216,7 +1283,7 @@ def recompute_from_transformation_checksum_sync(
     try:
         tf_checksum_obj = Checksum(tf_checksum)
         transformation_dict = tf_checksum_obj.resolve(celltype="plain")
-    except Exception:
+    except CacheMissError:
         return None
     if not isinstance(transformation_dict, dict):
         return None

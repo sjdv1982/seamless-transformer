@@ -75,3 +75,29 @@ def test_nested_scratch_run_in_worker_fingertips_without_publishing(
     assert result["value"] == word + "-inner"
     inner_result = Buffer(word + "-inner", "mixed").get_checksum()
     assert inner_result not in writes, "the scratch inner result was published"
+
+
+def test_worker_forwards_automatic_irreproducible_observation(temporary_spawned_workers, monkeypatch):
+    from seamless_remote import database_remote
+    reports = []
+    async def report(tf_checksum, result_checksum):
+        reports.append((tf_checksum.hex(), result_checksum.hex()))
+        return True
+    monkeypatch.setattr(database_remote, "report_irreproducible_result", report)
+    def outer(tf_hex, recorded_hex, observed_hex):
+        import asyncio
+        from seamless import Checksum
+        from seamless_transformer.transformation_cache import get_transformation_cache
+        cache = get_transformation_cache()
+        cache._register_transformation_result(Checksum(tf_hex), Checksum(recorded_hex))
+        outcome = asyncio.run(cache._record_transformation_result(Checksum(tf_hex), Checksum(observed_hex)))
+        return {"outcome": outcome, "recorded": cache._transformation_cache[Checksum(tf_hex)].hex()}
+    builder = delayed(outer)
+    builder.local = True
+    tf_hex, recorded_hex, observed_hex = "a" * 64, "b" * 64, "c" * 64
+    tf = builder(tf_hex, recorded_hex, observed_hex)
+    try:
+        assert tf.run() == {"outcome": "MISMATCH", "recorded": recorded_hex}
+        assert reports == [(tf_hex, observed_hex)]
+    finally:
+        tf._release_refholds()

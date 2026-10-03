@@ -3,6 +3,8 @@ import asyncio
 import pytest
 
 from seamless import CacheMissError, Checksum, Expression
+from seamless.error_envelope import ExecutionCanceledError
+from aiohttp import ClientConnectionError, ClientPayloadError
 import seamless.config
 from seamless.caching.buffer_cache import get_buffer_cache
 from seamless.checksum.cached_calculate_checksum import checksum_cache
@@ -108,3 +110,229 @@ def test_run_fingertip_scratch():
     assert value == pytest.approx(12.84)
 
     seamless.close()
+
+
+def _random_scratch_transformation():
+    import uuid
+    @delayed
+    def random_result(nonce) -> bytes:
+        import os
+        return os.urandom(32)
+    random_result.scratch = True
+    random_result.local = True
+    tf = random_result(uuid.uuid4().hex)
+    result = tf.compute()
+    assert isinstance(result, Checksum), tf.exception
+    return tf, result
+
+
+def test_irreproducible_fingertip_preserves_recorded_identity():
+    from seamless import FingertipCategory
+    from seamless_remote import database_remote
+    from seamless_transformer.transformation_cache import get_transformation_cache
+    seamless.config.init()
+    tf, recorded = _random_scratch_transformation()
+    tf_checksum = tf.construct()
+    get_buffer_cache().purge_scratch(recorded)
+    with pytest.raises(CacheMissError) as caught:
+        asyncio.run(recorded.fingertip())
+    assert caught.value.fingertip_category == FingertipCategory.IRREPRODUCIBLE_TRANSFORMATION
+    assert asyncio.run(database_remote.get_transformation_result(tf_checksum)) == recorded
+    assert tf_checksum in asyncio.run(database_remote.get_rev_transformations(recorded))
+    rows = asyncio.run(database_remote.get_irreproducible_records(tf_checksum))
+    assert len(rows) == 1 and rows[0]["result"] != recorded.hex()
+    assert get_transformation_cache()._transformation_cache[tf_checksum] == recorded
+
+
+def test_plain_rerun_returns_divergence_unrecorded():
+    from seamless_remote import database_remote
+    from seamless_transformer.transformation_cache import get_transformation_cache
+    seamless.config.init()
+    tf, recorded = _random_scratch_transformation()
+    tf_checksum = tf.construct()
+    get_buffer_cache().purge_scratch(recorded)
+    produced = asyncio.run(get_transformation_cache().run(
+        tf_checksum.resolve("plain"), tf_checksum=tf_checksum,
+        tf_dunder=tf._tf_dunder, scratch=True, require_value=True,
+    ))
+    assert produced != recorded
+    assert asyncio.run(database_remote.get_transformation_result(tf_checksum)) == recorded
+    assert get_transformation_cache()._transformation_cache[tf_checksum] == recorded
+    rows = asyncio.run(database_remote.get_irreproducible_records(tf_checksum))
+    assert len(rows) == 1 and rows[0]["result"] == produced.hex()
+
+
+def test_reproducible_rerun_writes_nothing(monkeypatch):
+    import uuid
+    from seamless_remote import database_remote
+    seamless.config.init()
+    @delayed
+    def reproduce(nonce):
+        return nonce + "-reproduced"
+    reproduce.scratch = True
+    reproduce.local = True
+    tf = reproduce(uuid.uuid4().hex)
+    result = tf.compute()
+    writes = []
+    async def unexpected_write(*args):
+        writes.append(args)
+        raise AssertionError("recomputation wrote an existing mapping")
+    monkeypatch.setattr(database_remote, "set_transformation_result", unexpected_write)
+    monkeypatch.setattr(database_remote, "set_execution_record", unexpected_write)
+    get_buffer_cache().purge_scratch(result)
+    assert asyncio.run(result.fingertip("mixed")).endswith("-reproduced")
+    assert writes == []
+
+
+def test_failed_transformation_category(monkeypatch):
+    import uuid
+    from seamless import FingertipCategory
+    seamless.config.init()
+    variable = "SEAMLESS_FINGERTIP_TEST_RUN"
+    monkeypatch.setenv(variable, "first")
+    @delayed
+    def first_only(nonce):
+        import os
+        if "SEAMLESS_FINGERTIP_TEST_RUN" not in os.environ:
+            raise RuntimeError("recompute failure")
+        return nonce + "-first-only"
+    first_only.scratch = True
+    first_only.local = True
+    tf = first_only(uuid.uuid4().hex)
+    result = tf.compute()
+    monkeypatch.delenv(variable)
+    get_buffer_cache().purge_scratch(result)
+    with pytest.raises(CacheMissError) as caught:
+        asyncio.run(result.fingertip())
+    assert caught.value.fingertip_category == FingertipCategory.FAILED_TRANSFORMATION
+
+
+def test_materialization_without_candidate_or_input(monkeypatch):
+    import uuid
+    from seamless import FingertipCategory, Buffer
+    seamless.config.init()
+    with pytest.raises(CacheMissError) as caught:
+        asyncio.run(Checksum("d" * 64).fingertip())
+    assert caught.value.fingertip_category == FingertipCategory.MATERIALIZATION
+    @delayed
+    def consume(value):
+        return value + "-consumed"
+    consume.scratch = True
+    consume.local = True
+    source = Buffer(uuid.uuid4().hex, "mixed")
+    tf = consume(source.get_checksum())
+    result = tf.compute()
+    assert isinstance(result, Checksum), tf.exception
+    input_checksum = source.get_checksum()
+    original_resolve = Checksum.resolve
+    original_resolution = Checksum.resolution
+    def resolve(checksum, *args, **kwargs):
+        if checksum == input_checksum:
+            raise CacheMissError(checksum)
+        return original_resolve(checksum, *args, **kwargs)
+    async def resolution(checksum, *args, **kwargs):
+        if checksum == input_checksum:
+            raise CacheMissError(checksum)
+        return await original_resolution(checksum, *args, **kwargs)
+    monkeypatch.setattr(Checksum, "resolve", resolve)
+    monkeypatch.setattr(Checksum, "resolution", resolution)
+    _drop_expression_buffer(input_checksum)
+    get_buffer_cache().purge_scratch(result)
+    with pytest.raises(CacheMissError) as caught:
+        asyncio.run(result.fingertip())
+    assert caught.value.fingertip_category == FingertipCategory.MATERIALIZATION
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_candidate_ranking_is_order_independent(monkeypatch, reverse):
+    from seamless import FingertipCategory
+    import seamless_transformer.transformation_cache as cache_mod
+    from seamless_remote import database_remote
+    candidates = [Checksum("a" * 64), Checksum("b" * 64)]
+    if reverse:
+        candidates.reverse()
+    monkeypatch.setattr(database_remote, "has_read_database", lambda: False)
+    monkeypatch.setattr(cache_mod.get_transformation_cache(), "get_reverse_transformations", lambda result: candidates)
+    async def recompute(tf, **kwargs):
+        if tf == "a" * 64:
+            raise RuntimeError("failed candidate")
+        return Checksum("e" * 64)
+    monkeypatch.setattr(cache_mod, "recompute_from_transformation_checksum", recompute)
+    with pytest.raises(CacheMissError) as caught:
+        asyncio.run(Checksum("c" * 64).fingertip())
+    assert caught.value.fingertip_category == FingertipCategory.IRREPRODUCIBLE_TRANSFORMATION
+
+
+def test_nested_transformation_fingertip_keeps_category(monkeypatch):
+    import uuid
+    from seamless import FingertipCategory
+    seamless.config.init()
+    from seamless_transformer.transformation_cache import get_transformation_cache
+    @delayed
+    def inner_func(nonce) -> bytes:
+        import os
+        return os.urandom(32)
+    inner_func.local = True
+    inner_func.scratch = True
+    inner = inner_func(uuid.uuid4().hex)
+    inner_checksum = inner.construct()
+    cache = get_transformation_cache()
+    input_result = asyncio.run(cache.run(
+        inner_checksum.resolve("plain"), tf_checksum=inner_checksum,
+        tf_dunder=inner._tf_dunder, scratch=True, require_value=True,
+    ))
+    @delayed
+    def outer(value, nonce) -> bytes:
+        return value.content + nonce.encode()
+    outer.scratch = True
+    outer.local = True
+    outer.celltypes.value = "bytes"
+    outer.meta = {"allow_input_fingertip": True}
+    tf = outer(input_result, uuid.uuid4().hex)
+    result = tf.compute()
+    assert isinstance(result, Checksum), tf.exception
+    get_buffer_cache().purge_scratch(input_result)
+    get_buffer_cache().purge_scratch(result)
+    _drop_expression_buffer(input_result)
+    _drop_expression_buffer(result)
+    # Simulate both buffers being absent from every endpoint. Construction
+    # may have published an input representation to the persistent hashserver.
+    original_resolve, original_resolution = Checksum.resolve, Checksum.resolution
+    missing = {input_result, result}
+    def resolve(checksum, *args, **kwargs):
+        if checksum in missing:
+            raise CacheMissError(checksum)
+        return original_resolve(checksum, *args, **kwargs)
+    async def resolution(checksum, *args, **kwargs):
+        if checksum in missing:
+            raise CacheMissError(checksum)
+        return await original_resolution(checksum, *args, **kwargs)
+    monkeypatch.setattr(Checksum, "resolve", resolve)
+    monkeypatch.setattr(Checksum, "resolution", resolution)
+    with pytest.raises(CacheMissError) as caught:
+        asyncio.run(result.fingertip())
+    assert caught.value.fingertip_category == FingertipCategory.IRREPRODUCIBLE_TRANSFORMATION
+
+
+@pytest.mark.parametrize("exception", [asyncio.CancelledError, ExecutionCanceledError, ClientConnectionError, ClientPayloadError, TimeoutError])
+def test_fingertip_candidate_control_and_infrastructure_errors_propagate(monkeypatch, exception):
+    import seamless_transformer.transformation_cache as cache_mod
+    from seamless_remote import database_remote
+    monkeypatch.setattr(database_remote, "has_read_database", lambda: False)
+    monkeypatch.setattr(cache_mod.get_transformation_cache(), "get_reverse_transformations", lambda result: [Checksum("a" * 64)])
+    async def canceled(*args, **kwargs):
+        raise exception()
+    monkeypatch.setattr(cache_mod, "recompute_from_transformation_checksum", canceled)
+    with pytest.raises(exception):
+        asyncio.run(Checksum("f" * 64).fingertip())
+
+
+def test_fingertip_database_infrastructure_error_propagates(monkeypatch):
+    from aiohttp import ClientConnectionError
+    from seamless_remote import database_remote
+    monkeypatch.setattr(database_remote, "has_read_database", lambda: True)
+    async def unavailable(*args):
+        raise ClientConnectionError("database unavailable")
+    monkeypatch.setattr(database_remote, "get_rev_transformations", unavailable)
+    with pytest.raises(ClientConnectionError):
+        asyncio.run(Checksum("f" * 64).fingertip())
