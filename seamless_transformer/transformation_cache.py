@@ -934,6 +934,7 @@ class TransformationCache:
             result_checksum.mark_scratch()
 
         async def write_execution_record():
+            nonlocal probe_context, compilation_context
             record_probe = is_record_probe(transformation_dict, tf_dunder)
             if store_execution_record and not record_probe:
                 record_runtime_metadata = dict(runtime_metadata or {})

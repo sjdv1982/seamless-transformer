@@ -71,13 +71,18 @@ def _run(tmp_path, body):
 def test_dispatched_expression_input_is_written_to_the_hashserver(tmp_path):
     _run(tmp_path, '''
         seamless_config.init()
+        buffer_remote._read_folders_clients.clear()
         try:
             word = "input-" + uuid.uuid4().hex
             source = hashserver_only({"a": word}, "plain")
             expr = Expression(source, "a", input_celltype="plain", celltype="str")
             expected = Buffer(word, "str").get_checksum()
             drop_buffer(expected)
-            assert delayed(echo)(value=expr).run() == word + "!"
+            builder = delayed(echo)
+            builder.celltypes.value = "str"
+            builder.allow_input_fingertip = False
+            transformation = builder(value=expr)
+            assert transformation.run() == word + "!"
             assert on_hashserver(expected), "the dispatched input was not written"
         finally:
             seamless.close()
@@ -88,6 +93,7 @@ def test_dispatched_expression_input_is_written_to_the_hashserver(tmp_path):
 def test_dispatched_pin_conversion_is_written_to_the_hashserver(tmp_path):
     _run(tmp_path, '''
         seamless_config.init()
+        buffer_remote._read_folders_clients.clear()
         try:
             word = "pin-" + uuid.uuid4().hex
             cell = Cell("str", checksum=hashserver_only(word, "str"))

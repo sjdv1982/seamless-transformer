@@ -675,7 +675,7 @@ class TransformerCore(Generic[P, R]):
         if value:
             self.meta = {"allow_input_fingertip": True}
         else:
-            self._meta.pop("allow_input_fingertip", None)
+            self._meta["allow_input_fingertip"] = False
         if previous != value:
             from seamless import Checksum
 
