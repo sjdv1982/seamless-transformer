@@ -1,6 +1,2 @@
-<<<<<<< Updated upstream
 - cluster: local
 - nparallel: 4
-=======
-- cluster: mbi
->>>>>>> Stashed changes
