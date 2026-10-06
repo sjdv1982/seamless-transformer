@@ -7,3 +7,4 @@ tests/cmd/calc_pi.job*
 tests/run-tests.log
 tests/*/run-tests.log
 dist/
+build/

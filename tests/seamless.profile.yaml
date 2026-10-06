@@ -1,16 +1,16 @@
-- cluster: local
+- cluster: mbi
 
 - stage spawn-config:
-          - cluster: null
+    - cluster: null
 
 - stage spawn-remote:
-          - cluster: local
+    - cluster: local
 
 - stage jobserver-test:
-          - cluster: local
+    - cluster: local
 
 - stage persistent-test:
-          - cluster: local
+    - cluster: local
 
 - stage fingertip:
-          - cluster: local
+    - cluster: local
