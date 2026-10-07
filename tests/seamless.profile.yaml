@@ -1,4 +1,4 @@
-- cluster: mbi
+- cluster: local
 
 - stage spawn-config:
     - cluster: null
