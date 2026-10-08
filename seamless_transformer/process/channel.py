@@ -35,6 +35,7 @@ class Endpoint:
         self._name = name or f"endpoint-{id(self):x}"
         self._pending: Dict[int, asyncio.Future[Any]] = {}
         self._handlers: Dict[str, Callable[[Any], Any]] = {}
+        self._event_handlers: Dict[str, Callable[[Any], Any]] = {}
         self._request_counter = itertools.count(1)
         self._send_lock = asyncio.Lock()
         self._closed = False
@@ -45,6 +46,9 @@ class Endpoint:
 
     def add_request_handler(self, op: str, handler: Callable[[Any], Any]) -> None:
         self._handlers[op] = handler
+
+    def add_event_handler(self, op: str, handler: Callable[[Any], Any]) -> None:
+        self._event_handlers[op] = handler
 
     def remove_request_handler(self, op: str) -> None:
         self._handlers.pop(op, None)
@@ -69,6 +73,12 @@ class Endpoint:
             return await asyncio.wait_for(fut, timeout)
         finally:
             self._pending.pop(request_id, None)
+
+    async def notify(self, op: str, payload: Any = None) -> None:
+        """Send a one-way event without allocating a response future."""
+        if self._closed:
+            raise ConnectionClosed(f"{self._name} is closed")
+        await self._send({"kind": "event", "op": op, "payload": payload})
 
     async def _send(self, message: Any) -> None:
         async with self._send_lock:
@@ -124,6 +134,17 @@ class Endpoint:
                 future.set_result(message.get("payload"))
             else:
                 future.set_exception(RuntimeError(message.get("error", "error")))
+            return
+        if kind == "event":
+            handler = self._event_handlers.get(message.get("op"))
+            if handler is None:
+                return
+            try:
+                await run_handler(handler, message.get("payload"))
+            except Exception:
+                self._logger.exception(
+                    "Event handler %s on %s failed", message.get("op"), self._name
+                )
             return
         if kind != "request":
             self._logger.warning("%s received unknown message: %s", self._name, message)
@@ -252,6 +273,9 @@ class ChildChannel:
     def add_request_handler(self, op: str, handler: Callable[[Any], Any]) -> None:
         self._endpoint.add_request_handler(op, handler)
 
+    def add_event_handler(self, op: str, handler: Callable[[Any], Any]) -> None:
+        self._endpoint.add_event_handler(op, handler)
+
     async def request(
         self, op: str, payload: Any = None, *, timeout: Optional[float] = None
     ) -> Any:
@@ -259,6 +283,9 @@ class ChildChannel:
         if op == "__worker_ready__":
             self._ready_notified = True
         return result
+
+    async def notify(self, op: str, payload: Any = None) -> None:
+        await self._endpoint.notify(op, payload)
 
     async def notify_ready(self, metadata: Optional[Dict[str, Any]] = None) -> Any:
         payload: Dict[str, Any] = {"pid": os.getpid()}

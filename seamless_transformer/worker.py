@@ -26,6 +26,7 @@ import logging
 import multiprocessing as mp
 import string
 import time
+import math
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.thread import _worker as _cf_worker
 import weakref
@@ -58,6 +59,55 @@ _quiet = False
 _DEBUG_SHUTDOWN = bool(os.environ.get("SEAMLESS_DEBUG_SHUTDOWN"))
 _DELEGATION_REFUSED = "_DELEGATION_REFUSED"
 _LOCAL_BUFFERS: Dict[str, bytes] = {}
+_STREAM_THROTTLE_LOCK = threading.RLock()
+
+
+def _stream_settings_from_env() -> dict[str, float | int]:
+    try:
+        max_payload = int(os.environ.get("SEAMLESS_STREAM_MAX_PAYLOAD_BYTES", "8192"))
+    except (TypeError, ValueError):
+        max_payload = 8192
+    try:
+        min_interval = float(os.environ.get("SEAMLESS_STREAM_MIN_INTERVAL_SECONDS", "2.0"))
+    except (TypeError, ValueError):
+        min_interval = 2.0
+    if not math.isfinite(min_interval):
+        min_interval = 2.0
+    return {
+        "max_payload": min(max(max_payload, 1), 10_240),
+        "min_interval": min(max(min_interval, 0.0), 3600.0),
+    }
+
+
+_STREAM_THROTTLE: dict[str, float | int] = _stream_settings_from_env()
+
+
+def get_stream_throttle() -> dict[str, float | int]:
+    with _STREAM_THROTTLE_LOCK:
+        return dict(_STREAM_THROTTLE)
+
+
+def set_stream_throttle(*, max_payload: int, min_interval: float) -> None:
+    try:
+        payload_size = min(max(int(max_payload), 1), 10_240)
+    except (TypeError, ValueError, OverflowError):
+        payload_size = 8192
+    try:
+        interval = float(min_interval)
+        if not math.isfinite(interval):
+            interval = 2.0
+        interval = min(max(interval, 0.0), 3600.0)
+    except (TypeError, ValueError, OverflowError):
+        interval = 2.0
+    with _STREAM_THROTTLE_LOCK:
+        _STREAM_THROTTLE.update(
+            max_payload=payload_size,
+            min_interval=interval,
+        )
+        throttle = dict(_STREAM_THROTTLE)
+    manager = _worker_manager
+    if manager is not None:
+        manager.update_stream_throttle(throttle)
 
 
 # Throttle how many concurrent tasks a single worker can handle.
@@ -594,12 +644,52 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
 
     stdout_buffer = io.BytesIO()
     stderr_buffer = io.BytesIO()
-    stdout_wrapper = io.TextIOWrapper(
-        stdout_buffer, encoding="utf-8", write_through=True
-    )
-    stderr_wrapper = io.TextIOWrapper(
-        stderr_buffer, encoding="utf-8", write_through=True
-    )
+    streaming = bool(payload.get("streaming", False))
+    if streaming:
+        from .stream_capture import _StreamingTap
+
+        stream_throttle = payload.get("stream_throttle") or get_stream_throttle()
+        owner_dask_key = payload.get("owner_dask_key")
+
+        def _notify_stream_chunk(chunk: dict[str, Any]) -> None:
+            channel = _child_channel
+            loop = _child_loop
+            if channel is None or loop is None or loop.is_closed():
+                return
+            message = dict(chunk)
+            message["owner_dask_key"] = owner_dask_key
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    channel.notify("stream_chunk", message), loop
+                )
+                future.result(timeout=10.0)
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "Failed to send a streamed output chunk to the parent",
+                    exc_info=True,
+                )
+
+        stdout_wrapper = _StreamingTap(
+            stream_name="stdout",
+            sink=stdout_buffer,
+            notifier=_notify_stream_chunk,
+            max_payload=stream_throttle.get("max_payload", 8192),
+            min_interval=stream_throttle.get("min_interval", 2.0),
+        )
+        stderr_wrapper = _StreamingTap(
+            stream_name="stderr",
+            sink=stderr_buffer,
+            notifier=_notify_stream_chunk,
+            max_payload=stream_throttle.get("max_payload", 8192),
+            min_interval=stream_throttle.get("min_interval", 2.0),
+        )
+    else:
+        stdout_wrapper = io.TextIOWrapper(
+            stdout_buffer, encoding="utf-8", write_through=True
+        )
+        stderr_wrapper = io.TextIOWrapper(
+            stderr_buffer, encoding="utf-8", write_through=True
+        )
     previous_stdout = sys.stdout
     previous_stderr = sys.stderr
     sys.stdout = stdout_wrapper
@@ -616,17 +706,21 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
         try:
             stdout_wrapper.flush()
             stderr_wrapper.flush()
+            if streaming:
+                stdout_wrapper.close()
+                stderr_wrapper.close()
         finally:
             sys.stdout = previous_stdout
             sys.stderr = previous_stderr
-            try:
-                stdout_wrapper.detach()
-            except Exception:
-                pass
-            try:
-                stderr_wrapper.detach()
-            except Exception:
-                pass
+            if not streaming:
+                try:
+                    stdout_wrapper.detach()
+                except Exception:
+                    pass
+                try:
+                    stderr_wrapper.detach()
+                except Exception:
+                    pass
     if isinstance(result, str):
         stdout_text = stdout_buffer.getvalue().decode("utf-8", errors="replace")
         stderr_text = stderr_buffer.getvalue().decode("utf-8", errors="replace")
@@ -753,11 +847,27 @@ async def _child_initializer(channel: ChildChannel) -> None:
                 logging.ERROR
             )
         except Exception:
-            pass
+                pass
         return "ok"
+
+    def handle_stream_throttle(payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        try:
+            from .stream_capture import update_active_throttles
+
+            update_active_throttles(
+                max_payload=payload.get("max_payload", 8192),
+                min_interval=payload.get("min_interval", 2.0),
+            )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Failed to apply stream throttle update in child", exc_info=True
+            )
 
     channel.add_request_handler("execute_transformation", handle_execute)
     channel.add_request_handler("quiet", handle_quiet)
+    channel.add_event_handler("stream_throttle", handle_stream_throttle)
     if not channel.ready_notified:
         try:
             await channel.notify_ready({"role": "worker"})
@@ -791,6 +901,7 @@ class _WorkerManager:
         )
         self._handles = []
         self._load: Dict[str, int] = {}
+        self._stream_dispatches: Dict[str, Dict[str, Any]] = {}
         self._pointers: Dict[str, _Pointer] = {}
         self._pointer_lock: Optional[asyncio.Lock] = None
         self._prefetched_buffers: Dict[str, bytes] = {}
@@ -854,6 +965,14 @@ class _WorkerManager:
             self._handles.append(handle)
             self._load[handle.name] = 0
             self._limits[handle.name] = asyncio.Semaphore(TRANSFORMATION_THROTTLE)
+            endpoint = handle.endpoint
+            if endpoint is not None:
+                endpoint.add_event_handler(
+                    "stream_chunk",
+                    lambda payload, _handle=handle: self._handle_stream_chunk(
+                        _handle, payload
+                    ),
+                )
         await asyncio.gather(*(h.wait_until_ready() for h in self._handles))
         self._delegate_cleanup_task = asyncio.create_task(self._delegate_cleanup_loop())
 
@@ -951,9 +1070,38 @@ class _WorkerManager:
         enforce_limit: bool = True,
         owner_dask_key: str | None = None,
         owner_dask_priority: int | None = None,
+        streaming: bool = False,
+        stream_worker_address: str | None = None,
+        stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
     ) -> Checksum | str:
         await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
         tf_hex = Checksum(tf_checksum).hex()
+        stream_context = None
+        stream_key = owner_dask_key
+        if streaming:
+            if not stream_key:
+                stream_key = f"stream-{uuid.uuid4().hex}"
+            active_streams = len(self._stream_dispatches) + int(
+                stream_key not in self._stream_dispatches
+            )
+            throttle = get_stream_throttle()
+            concurrency_interval = active_streams / 2.0
+            initial_throttle = {
+                "max_payload": throttle["max_payload"],
+                "min_interval": max(
+                    float(throttle["min_interval"]), concurrency_interval
+                ),
+            }
+            stream_context = {
+                "topic": f"seamless-stream-{stream_key}",
+                "worker_address": stream_worker_address,
+                "event_logger": stream_event_logger,
+                "handle": None,
+                "throttle": initial_throttle,
+                "concurrency_interval": concurrency_interval,
+            }
+            self._stream_dispatches[stream_key] = stream_context
+            await self._refresh_stream_concurrency()
         retry_attempts = 0
         max_retries = max(1, len(self._handles) * 3)
         while True:
@@ -1013,6 +1161,24 @@ class _WorkerManager:
                 }
                 if owner_dask_key is not None:
                     payload["owner_dask_key"] = owner_dask_key
+                if streaming:
+                    payload["streaming"] = True
+                    payload["owner_dask_key"] = stream_key
+                    if stream_context is not None:
+                        stream_context["handle"] = handle
+                        current_throttle = get_stream_throttle()
+                        stream_context["throttle"] = {
+                            "max_payload": current_throttle["max_payload"],
+                            "min_interval": max(
+                                float(current_throttle["min_interval"]),
+                                float(stream_context["concurrency_interval"]),
+                            ),
+                        }
+                        payload["stream_throttle"] = dict(
+                            stream_context["throttle"]
+                        )
+                    else:
+                        payload["stream_throttle"] = get_stream_throttle()
                 if owner_dask_priority is not None:
                     payload["owner_dask_priority"] = owner_dask_priority
                 result = await handle.request("execute_transformation", payload)
@@ -1049,6 +1215,157 @@ class _WorkerManager:
                 return result
             await asyncio.sleep(0.05)
 
+    def update_stream_throttle(self, throttle: dict[str, float | int]) -> None:
+        if self.loop.is_closed():
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._push_stream_throttle(throttle), self.loop
+            )
+            future.add_done_callback(self._log_stream_throttle_push_failure)
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Could not schedule a child stream throttle update", exc_info=True
+            )
+
+    def _unregister_stream_dispatch(self, stream_key: str | None) -> None:
+        if not stream_key or self.loop.is_closed():
+            return
+        try:
+            self.loop.call_soon_threadsafe(self._remove_stream_dispatch, stream_key)
+        except RuntimeError:
+            pass
+
+    def _remove_stream_dispatch(self, stream_key: str) -> None:
+        if self._stream_dispatches.pop(stream_key, None) is not None:
+            asyncio.create_task(self._refresh_stream_concurrency())
+
+    async def _refresh_stream_concurrency(self) -> None:
+        """Keep all active stream taps under the shared worker message cap."""
+        active_streams = len(self._stream_dispatches)
+        throttle = get_stream_throttle()
+        for context in tuple(self._stream_dispatches.values()):
+            interval = active_streams / 2.0
+            context["concurrency_interval"] = interval
+            effective = {
+                "max_payload": throttle["max_payload"],
+                "min_interval": max(float(throttle["min_interval"]), interval),
+            }
+            if context.get("throttle") == effective:
+                continue
+            handle = context.get("handle")
+            endpoint = handle.endpoint if handle is not None else None
+            if endpoint is None:
+                context["throttle"] = effective
+                continue
+            try:
+                await endpoint.notify("stream_throttle", effective)
+            except (ConnectionClosed, OSError):
+                continue
+            context["throttle"] = effective
+
+    @staticmethod
+    def _log_stream_throttle_push_failure(future) -> None:
+        try:
+            future.result()
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Could not push a stream throttle update to child processes",
+                exc_info=True,
+            )
+
+    async def _push_stream_throttle(
+        self, throttle: dict[str, float | int]
+    ) -> None:
+        for context in tuple(self._stream_dispatches.values()):
+            effective = {
+                "max_payload": throttle["max_payload"],
+                "min_interval": max(
+                    float(throttle["min_interval"]),
+                    float(context.get("concurrency_interval", 0.0)),
+                ),
+            }
+            if context.get("throttle") == effective:
+                continue
+            handle = context.get("handle")
+            endpoint = handle.endpoint if handle is not None else None
+            if endpoint is None:
+                continue
+            try:
+                await endpoint.notify("stream_throttle", effective)
+                context["throttle"] = effective
+            except (ConnectionClosed, OSError):
+                continue
+
+    async def _handle_stream_chunk(
+        self, handle: ProcessHandle, payload: Any
+    ) -> None:
+        if not isinstance(payload, dict):
+            return
+        stream_key = payload.get("owner_dask_key")
+        if not isinstance(stream_key, str) or not stream_key:
+            return
+        context = self._stream_dispatches.get(stream_key)
+        if context is None or context.get("handle") is not handle:
+            return
+
+        throttle = get_stream_throttle()
+        effective = {
+            "max_payload": throttle["max_payload"],
+            "min_interval": max(
+                float(throttle["min_interval"]),
+                float(context.get("concurrency_interval", 0.0)),
+            ),
+        }
+        previous = context.get("throttle") or {}
+        if (
+            previous.get("max_payload") != effective["max_payload"]
+            or previous.get("min_interval") != effective["min_interval"]
+        ):
+            endpoint = handle.endpoint
+            if endpoint is not None:
+                try:
+                    await endpoint.notify("stream_throttle", effective)
+                except (ConnectionClosed, OSError):
+                    pass
+            context["throttle"] = effective
+
+        chunk = dict(payload)
+        text = chunk.get("text")
+        if not isinstance(text, str):
+            return
+        try:
+            max_payload = min(max(int(effective["max_payload"]), 1), 10_240)
+        except (TypeError, ValueError, OverflowError):
+            max_payload = 8192
+        encoded = text.encode("utf-8", errors="replace")
+        truncated = 0
+        if len(encoded) > max_payload:
+            truncated = len(encoded) - max_payload
+            encoded = encoded[truncated:]
+            while encoded and encoded[0] & 0xC0 == 0x80:
+                encoded = encoded[1:]
+                truncated += 1
+            chunk["text"] = encoded.decode("utf-8", errors="replace")
+        try:
+            existing_truncated = int(chunk.get("truncated_head_bytes", 0))
+        except (TypeError, ValueError, OverflowError):
+            existing_truncated = 0
+        chunk["truncated_head_bytes"] = existing_truncated + truncated
+        chunk["owner_dask_key"] = stream_key
+        if context.get("worker_address"):
+            chunk["_worker"] = context["worker_address"]
+        logger = context.get("event_logger")
+        if logger is None:
+            return
+        try:
+            logger(context["topic"], chunk)
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Failed to forward a streamed chunk to the Dask scheduler",
+                exc_info=True,
+            )
+
     async def run_transformation_async(
         self,
         transformation_dict: Dict[str, Any] | None,
@@ -1058,7 +1375,12 @@ class _WorkerManager:
         strict_dunder: bool = False,
         owner_dask_key: str | None = None,
         owner_dask_priority: int | None = None,
+        streaming: bool = False,
+        stream_worker_address: str | None = None,
+        stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
     ) -> Checksum | str:
+        if streaming and not owner_dask_key:
+            owner_dask_key = f"stream-{uuid.uuid4().hex}"
         fut = asyncio.run_coroutine_threadsafe(
             self._dispatch(
                 transformation_dict,
@@ -1069,6 +1391,9 @@ class _WorkerManager:
                 enforce_limit=True,
                 owner_dask_key=owner_dask_key,
                 owner_dask_priority=owner_dask_priority,
+                streaming=streaming,
+                stream_worker_address=stream_worker_address,
+                stream_event_logger=stream_event_logger,
             ),
             self.loop,
         )
@@ -1078,6 +1403,8 @@ class _WorkerManager:
             return await asyncio.wrap_future(fut)
         finally:
             self._forget_active_dispatch(tf_checksum_hex, fut)
+            if streaming:
+                self._unregister_stream_dispatch(owner_dask_key)
 
     def run_transformation_sync(
         self,
@@ -1088,7 +1415,12 @@ class _WorkerManager:
         strict_dunder: bool = False,
         owner_dask_key: str | None = None,
         owner_dask_priority: int | None = None,
+        streaming: bool = False,
+        stream_worker_address: str | None = None,
+        stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
     ) -> Checksum | str:
+        if streaming and not owner_dask_key:
+            owner_dask_key = f"stream-{uuid.uuid4().hex}"
         fut = asyncio.run_coroutine_threadsafe(
             self._dispatch(
                 transformation_dict,
@@ -1099,6 +1431,9 @@ class _WorkerManager:
                 enforce_limit=True,
                 owner_dask_key=owner_dask_key,
                 owner_dask_priority=owner_dask_priority,
+                streaming=streaming,
+                stream_worker_address=stream_worker_address,
+                stream_event_logger=stream_event_logger,
             ),
             self.loop,
         )
@@ -1108,6 +1443,8 @@ class _WorkerManager:
             return fut.result()
         finally:
             self._forget_active_dispatch(tf_checksum_hex, fut)
+            if streaming:
+                self._unregister_stream_dispatch(owner_dask_key)
 
     def _remember_active_dispatch(self, tf_checksum_hex: str, fut: _cf.Future) -> None:
         with self._active_dispatch_lock:
@@ -2427,6 +2764,9 @@ async def dispatch_to_workers(
     strict_dunder: bool = False,
     owner_dask_key: str | None = None,
     owner_dask_priority: int | None = None,
+    streaming: bool = False,
+    stream_worker_address: str | None = None,
+    stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
 ) -> Checksum | str:
     manager = _require_manager()
     result = await manager.run_transformation_async(
@@ -2437,6 +2777,9 @@ async def dispatch_to_workers(
         strict_dunder=strict_dunder,
         owner_dask_key=owner_dask_key,
         owner_dask_priority=owner_dask_priority,
+        streaming=streaming,
+        stream_worker_address=stream_worker_address,
+        stream_event_logger=stream_event_logger,
     )
 
     if isinstance(result, dict) and "error" in result:
