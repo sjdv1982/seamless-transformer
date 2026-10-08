@@ -15,7 +15,9 @@ Would be a seamless-core (buffer cache) feature.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
+import json
 import os
 import threading
 import concurrent.futures as _cf
@@ -647,11 +649,35 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
     streaming = bool(payload.get("streaming", False))
     if streaming:
         from .stream_capture import _StreamingTap
+        from .stream_tqdm import install_tqdm_patch
 
         stream_throttle = payload.get("stream_throttle") or get_stream_throttle()
         owner_dask_key = payload.get("owner_dask_key")
 
+        def _capture_tqdm_watermark() -> dict[int, int]:
+            from .stream_capture import capture_stream_tap_watermark
+
+            return capture_stream_tap_watermark(owner_dask_key=owner_dask_key)
+
+        def _before_tqdm_update(force: bool, watermark: dict[int, int] | None) -> bool:
+            from .stream_capture import (
+                flush_active_stream_taps,
+                has_pending_stream_taps,
+            )
+
+            if force:
+                flush_active_stream_taps(owner_dask_key=owner_dask_key)
+                return True
+            return not has_pending_stream_taps(
+                owner_dask_key=owner_dask_key,
+                watermark=watermark,
+            )
+
         def _notify_stream_chunk(chunk: dict[str, Any]) -> None:
+            if chunk.get("kind") in {"tqdm_open", "tqdm_close"}:
+                from .stream_capture import flush_active_stream_taps
+
+                flush_active_stream_taps(owner_dask_key=owner_dask_key)
             channel = _child_channel
             loop = _child_loop
             if channel is None or loop is None or loop.is_closed():
@@ -669,12 +695,20 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
                     exc_info=True,
                 )
 
+        tqdm_patch = install_tqdm_patch(
+            _notify_stream_chunk,
+            min_interval=stream_throttle.get("min_interval", 2.0),
+            before_update=_before_tqdm_update,
+            capture_watermark=_capture_tqdm_watermark,
+        )
+
         stdout_wrapper = _StreamingTap(
             stream_name="stdout",
             sink=stdout_buffer,
             notifier=_notify_stream_chunk,
             max_payload=stream_throttle.get("max_payload", 8192),
             min_interval=stream_throttle.get("min_interval", 2.0),
+            owner_dask_key=owner_dask_key,
         )
         stderr_wrapper = _StreamingTap(
             stream_name="stderr",
@@ -682,8 +716,10 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
             notifier=_notify_stream_chunk,
             max_payload=stream_throttle.get("max_payload", 8192),
             min_interval=stream_throttle.get("min_interval", 2.0),
+            owner_dask_key=owner_dask_key,
         )
     else:
+        tqdm_patch = contextlib.nullcontext()
         stdout_wrapper = io.TextIOWrapper(
             stdout_buffer, encoding="utf-8", write_through=True
         )
@@ -701,7 +737,8 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
                 return str(exc)
             return _format_pruned_exec_traceback()
 
-        result = _execute_transformation_impl(payload, _format_request_exc)
+        with tqdm_patch:
+            result = _execute_transformation_impl(payload, _format_request_exc)
     finally:
         try:
             stdout_wrapper.flush()
@@ -855,10 +892,14 @@ async def _child_initializer(channel: ChildChannel) -> None:
             return
         try:
             from .stream_capture import update_active_throttles
+            from .stream_tqdm import update_active_tqdm_throttles
 
             update_active_throttles(
                 max_payload=payload.get("max_payload", 8192),
                 min_interval=payload.get("min_interval", 2.0),
+            )
+            update_active_tqdm_throttles(
+                min_interval=payload.get("min_interval", 2.0)
             )
         except Exception:
             logging.getLogger(__name__).debug(
@@ -880,6 +921,96 @@ async def _child_initializer(channel: ChildChannel) -> None:
             except Exception:
                 pass
             return
+
+
+def _bounded_stream_text(value: str, max_bytes: int) -> str:
+    raw = value.encode("utf-8", errors="replace")
+    if len(raw) <= max_bytes:
+        return value
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _bound_tqdm_event_payload(
+    chunk: dict[str, Any], *, max_bytes: int = 10_240
+) -> dict[str, Any]:
+    """Keep progress metadata serializable and below the stream event limit."""
+    allowed = {
+        "kind",
+        "bar_id",
+        "desc",
+        "total",
+        "unit",
+        "unit_scale",
+        "mininterval",
+        "bar_format",
+        "n",
+        "elapsed",
+        "rate",
+        "postfix",
+        "owner_dask_key",
+        "_worker",
+    }
+    bounded = {key: value for key, value in chunk.items() if key in allowed}
+    string_limits = {
+        "bar_id": 256,
+        "desc": 1024,
+        "unit": 64,
+        "bar_format": 2048,
+        "postfix": 1024,
+        "owner_dask_key": 512,
+        "_worker": 256,
+    }
+    for key, limit in string_limits.items():
+        value = bounded.get(key)
+        if isinstance(value, str):
+            bounded[key] = _bounded_stream_text(value, limit)
+
+    for key in ("n", "total", "mininterval", "elapsed", "rate", "unit_scale"):
+        value = bounded.get(key)
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, int):
+            bounded[key] = max(-(10**18), min(value, 10**18))
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                bounded[key] = None
+            else:
+                bounded[key] = max(-1e300, min(value, 1e300))
+        elif key in {"n", "total"}:
+            bounded[key] = None
+
+    def encoded_size() -> int:
+        return len(
+            json.dumps(
+                bounded,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        )
+
+    if encoded_size() > max_bytes:
+        for key in (
+            "bar_format",
+            "postfix",
+            "desc",
+            "_worker",
+            "unit",
+        ):
+            value = bounded.get(key)
+            if not isinstance(value, str):
+                continue
+            current_size = encoded_size()
+            if current_size <= max_bytes:
+                break
+            raw = value.encode("utf-8", errors="replace")
+            reduction = current_size - max_bytes + 8
+            bounded[key] = raw[: max(0, len(raw) - reduction)].decode(
+                "utf-8", errors="ignore"
+            )
+    if encoded_size() > max_bytes:
+        return {}
+    return bounded
 
 
 class _WorkerManager:
@@ -1099,6 +1230,7 @@ class _WorkerManager:
                 "handle": None,
                 "throttle": initial_throttle,
                 "concurrency_interval": concurrency_interval,
+                "progress_bars": set(),
             }
             self._stream_dispatches[stream_key] = stream_context
             await self._refresh_stream_concurrency()
@@ -1242,10 +1374,13 @@ class _WorkerManager:
 
     async def _refresh_stream_concurrency(self) -> None:
         """Keep all active stream taps under the shared worker message cap."""
-        active_streams = len(self._stream_dispatches)
+        active_sources = sum(
+            2 + len(context.get("progress_bars", ()))
+            for context in self._stream_dispatches.values()
+        )
         throttle = get_stream_throttle()
         for context in tuple(self._stream_dispatches.values()):
-            interval = active_streams / 2.0
+            interval = active_sources / 4.0
             context["concurrency_interval"] = interval
             effective = {
                 "max_payload": throttle["max_payload"],
@@ -1309,6 +1444,26 @@ class _WorkerManager:
         if context is None or context.get("handle") is not handle:
             return
 
+        chunk = dict(payload)
+        kind = chunk.get("kind", "stream")
+        if kind == "stream":
+            if not isinstance(chunk.get("text"), str):
+                return
+        elif kind in {"tqdm_open", "tqdm_update", "tqdm_close"}:
+            bar_id = chunk.get("bar_id")
+            if not isinstance(bar_id, str) or not bar_id:
+                return
+            progress_bars = context.setdefault("progress_bars", set())
+            previous_count = len(progress_bars)
+            if kind == "tqdm_open":
+                progress_bars.add(bar_id)
+            elif kind == "tqdm_close":
+                progress_bars.discard(bar_id)
+            if len(progress_bars) != previous_count:
+                await self._refresh_stream_concurrency()
+        else:
+            return
+
         throttle = get_stream_throttle()
         effective = {
             "max_payload": throttle["max_payload"],
@@ -1330,31 +1485,38 @@ class _WorkerManager:
                     pass
             context["throttle"] = effective
 
-        chunk = dict(payload)
-        text = chunk.get("text")
-        if not isinstance(text, str):
-            return
-        try:
-            max_payload = min(max(int(effective["max_payload"]), 1), 10_240)
-        except (TypeError, ValueError, OverflowError):
-            max_payload = 8192
-        encoded = text.encode("utf-8", errors="replace")
-        truncated = 0
-        if len(encoded) > max_payload:
-            truncated = len(encoded) - max_payload
-            encoded = encoded[truncated:]
-            while encoded and encoded[0] & 0xC0 == 0x80:
-                encoded = encoded[1:]
-                truncated += 1
-            chunk["text"] = encoded.decode("utf-8", errors="replace")
-        try:
-            existing_truncated = int(chunk.get("truncated_head_bytes", 0))
-        except (TypeError, ValueError, OverflowError):
-            existing_truncated = 0
-        chunk["truncated_head_bytes"] = existing_truncated + truncated
+        if kind == "stream":
+            try:
+                max_payload = min(max(int(effective["max_payload"]), 1), 10_240)
+            except (TypeError, ValueError, OverflowError):
+                max_payload = 8192
+            encoded = chunk["text"].encode("utf-8", errors="replace")
+            truncated = 0
+            if len(encoded) > max_payload:
+                truncated = len(encoded) - max_payload
+                encoded = encoded[truncated:]
+                while encoded and encoded[0] & 0xC0 == 0x80:
+                    encoded = encoded[1:]
+                    truncated += 1
+                chunk["text"] = encoded.decode("utf-8", errors="replace")
+            try:
+                existing_truncated = int(chunk.get("truncated_head_bytes", 0))
+            except (TypeError, ValueError, OverflowError):
+                existing_truncated = 0
+            chunk["truncated_head_bytes"] = existing_truncated + truncated
+
         chunk["owner_dask_key"] = stream_key
         if context.get("worker_address"):
             chunk["_worker"] = context["worker_address"]
+        if kind in {"tqdm_open", "tqdm_update", "tqdm_close"}:
+            try:
+                max_payload = min(max(int(effective["max_payload"]), 1), 10_240)
+            except (TypeError, ValueError, OverflowError):
+                max_payload = 8192
+            chunk = _bound_tqdm_event_payload(chunk, max_bytes=max_payload)
+            if not chunk:
+                return
+
         logger = context.get("event_logger")
         if logger is None:
             return

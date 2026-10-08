@@ -52,14 +52,18 @@ class _StreamingTap(io.TextIOBase):
         notifier: Callable[[dict[str, Any]], Any] | None = None,
         max_payload: int = 8192,
         min_interval: float = 2.0,
+        owner_dask_key: str | None = None,
     ) -> None:
         super().__init__()
         self.stream_name = str(stream_name)
         self.sink = sink if sink is not None else io.BytesIO()
         self.notifier = notifier or (lambda _chunk: None)
+        self.owner_dask_key = owner_dask_key
         self._max_payload = _bounded_payload_size(max_payload)
         self._min_interval = _bounded_interval(min_interval)
         self._pending = bytearray()
+        self._write_generation = 0
+        self._pending_first_generation = 0
         self._dropped_head_bytes = 0
         self._last_flush = time.monotonic()
         self._seq = 0
@@ -94,6 +98,10 @@ class _StreamingTap(io.TextIOBase):
             if self._tap_closed:
                 raise ValueError("I/O operation on closed stream")
             if encoded:
+                old_pending_length = len(self._pending)
+                self._write_generation += 1
+                if not self._pending:
+                    self._pending_first_generation = self._write_generation
                 self.sink.write(encoded)
                 self._pending.extend(encoded)
                 max_buffer = self._max_payload * _BUFFER_MULTIPLIER
@@ -101,6 +109,8 @@ class _StreamingTap(io.TextIOBase):
                 if overflow > 0:
                     del self._pending[:overflow]
                     self._dropped_head_bytes += overflow
+                    if overflow >= old_pending_length:
+                        self._pending_first_generation = self._write_generation
         return len(s)
 
     def flush(self) -> None:
@@ -134,6 +144,7 @@ class _StreamingTap(io.TextIOBase):
                 raw = bytes(self._pending)
                 dropped = self._dropped_head_bytes
                 self._pending.clear()
+                self._pending_first_generation = 0
                 self._dropped_head_bytes = 0
                 if len(raw) > self._max_payload:
                     overflow = len(raw) - self._max_payload
@@ -169,6 +180,7 @@ class _StreamingTap(io.TextIOBase):
                 raw = bytes(self._pending)
                 dropped = self._dropped_head_bytes
                 self._pending.clear()
+                self._pending_first_generation = 0
                 self._dropped_head_bytes = 0
                 if len(raw) > self._max_payload:
                     overflow = len(raw) - self._max_payload
@@ -209,6 +221,59 @@ def update_active_throttles(*, max_payload: int, min_interval: float) -> None:
         tap.update_throttle(max_payload=max_payload, min_interval=min_interval)
 
 
+def flush_active_stream_taps(*, owner_dask_key: str | None) -> None:
+    """Flush pending text before a progress event for the same transformation.
+
+    Taking the snapshot under ``_TAPS_LOCK`` and sending after releasing it
+    preserves close/registration lock ordering while keeping mixed text and
+    progress events in source order.
+    """
+    with _TAPS_LOCK:
+        taps = tuple(
+            tap for tap in _TAPS if tap.owner_dask_key == owner_dask_key
+        )
+    for tap in taps:
+        tap._maybe_flush(force=True)
+
+
+def capture_stream_tap_watermark(*, owner_dask_key: str | None) -> dict[int, int]:
+    """Capture how much text was written when a progress update became pending."""
+    with _TAPS_LOCK:
+        taps = tuple(
+            tap for tap in _TAPS if tap.owner_dask_key == owner_dask_key
+        )
+    watermark = {}
+    for tap in taps:
+        with tap._lock:
+            if not tap._tap_closed:
+                watermark[id(tap)] = tap._write_generation
+    return watermark
+
+
+def has_pending_stream_taps(
+    *, owner_dask_key: str | None, watermark: dict[int, int] | None
+) -> bool:
+    """Return whether text older than a queued progress update is still pending."""
+    if not watermark:
+        return False
+    with _TAPS_LOCK:
+        taps = tuple(
+            tap for tap in _TAPS if tap.owner_dask_key == owner_dask_key
+        )
+    for tap in taps:
+        cutoff = watermark.get(id(tap))
+        if cutoff is None:
+            continue
+        with tap._lock:
+            if (
+                not tap._tap_closed
+                and tap._pending
+                and tap._pending_first_generation <= cutoff
+            ):
+                return True
+    return False
+
+
 def _ensure_flusher_locked() -> None:
     global _FLUSHER
     if _FLUSHER is not None and _FLUSHER.is_alive():
@@ -231,6 +296,12 @@ def _flush_loop() -> None:
                 return
         for tap in taps:
             tap._maybe_flush()
+        try:
+            from .stream_tqdm import flush_active_tqdm_updates
+
+            flush_active_tqdm_updates()
+        except Exception:
+            _LOGGER.debug("Failed to flush pending tqdm progress", exc_info=True)
         intervals = []
         for tap in taps:
             with tap._lock:
