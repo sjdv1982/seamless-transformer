@@ -1,2 +1,2 @@
-- cluster: mbi
+- cluster: local
 - nparallel: 4
