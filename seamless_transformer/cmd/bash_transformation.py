@@ -1,7 +1,8 @@
 """Build a Seamless bash transformation from a parsed cmd-seamless command line"""
 
-import os
+import asyncio
 import builtins
+import os
 
 from seamless import Checksum
 from seamless.checksum.serialize import serialize_sync as serialize
@@ -188,14 +189,23 @@ def prepare_bash_transformation(
     tf_buffer.transfer_write()
 
     return tf_checksum, transformation_dict
+
+
+async def _declare_irreproducible_transformation(transformation, result_checksum):
+    from seamless_remote import database_remote
+
+    accepted = await database_remote.report_irreproducible_result(
+        Checksum(transformation.transformation_checksum), Checksum(result_checksum)
+    )
+    if not accepted:
+        raise RuntimeError("Transformation could not be declared irreproducible")
+
+
 def run_transformation(
     transformation_dict: dict, *, undo: bool, fingertip=False, scratch=False
 ):
     """Run a cmd-seamless transformation dict.
     First convert it into a bash transformation."""
-    if undo:
-        raise NotImplementedError("Undo is not supported in seamless-transformer yet")
-
     from seamless_transformer.transformation_class import (
         compute_transformation_sync,
         transformation_from_dict,
@@ -216,6 +226,10 @@ def run_transformation(
         if transformation.exception is not None:
             raise RuntimeError(transformation.exception)
         raise RuntimeError("Result checksum unavailable")
+    if undo:
+        asyncio.run(
+            _declare_irreproducible_transformation(transformation, result_checksum)
+        )
     return Checksum(result_checksum)
 
 
@@ -224,9 +238,6 @@ async def run_transformation_async(
 ):
     """Run a cmd-seamless transformation dict.
     First convert it into a bash transformation."""
-    if undo:
-        raise NotImplementedError("Undo is not supported in seamless-transformer yet")
-
     from seamless_transformer.transformation_class import transformation_from_dict
 
     tf_dunder = extract_tf_dunder(transformation_dict)
@@ -241,4 +252,6 @@ async def run_transformation_async(
         if transformation.exception is not None:
             raise RuntimeError(transformation.exception)
         raise RuntimeError("Result checksum unavailable")
+    if undo:
+        await _declare_irreproducible_transformation(transformation, result_checksum)
     return Checksum(result_checksum)

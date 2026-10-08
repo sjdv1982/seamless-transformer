@@ -13,6 +13,7 @@ import threading
 import logging
 import functools
 import signal
+import subprocess
 import time
 import pathlib
 import warnings
@@ -36,7 +37,6 @@ from seamless_transformer.cmd.file_load import files_to_checksums
 from seamless_transformer.cmd.bash_transformation import (
     prepare_bash_transformation,
 )
-from seamless_transformer.cmd import interface
 from seamless_transformer.cmd.exceptions import SeamlessSystemExit
 from seamless_transformer.cmd.bytes2human import human2bytes
 from seamless_transformer.remote_job import REMOTE_JOB_META_KEY, RemoteJobWritten
@@ -59,6 +59,52 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 CONFIG_FILENAMES = ("seamless.yaml", "seamless.profile.yaml")
+
+
+def resolve_executable(command):
+    """Resolve the mapped executable path for the first command word.
+
+    Returns the mapped executable path, or None if the first arg is a POSIX tool.
+    """
+    mapped_execarg = None
+
+    args1 = [pathlib.Path(command[0]), pathlib.Path(command[0]).expanduser()]
+    for arg1 in args1:
+        if arg1.as_posix().strip() in ("conda",):
+            is_posix = True
+        else:
+            execarg1 = subprocess.getoutput("which {}".format(arg1.as_posix())).strip()
+            if execarg1:
+                msg(
+                    2,
+                    "first argument '{}' is in PATH, map to '{}'".format(
+                        arg1.as_posix(), execarg1
+                    ),
+                )
+                execarg1dir = os.path.split(execarg1)[0]
+                if (
+                    not execarg1dir.endswith("/bin")
+                    and not execarg1dir.endswith("/sbin")
+                    and not execarg1dir.endswith("/usr")
+                ):
+                    msg(
+                        1,
+                        "first argument '{}' does not seem a POSIX tool. "
+                        "Explicitly upload it as '{}'".format(
+                            arg1.as_posix(), execarg1
+                        ),
+                    )
+                    mapped_execarg = execarg1
+
+                arg1 = pathlib.Path(execarg1)
+                is_posix = False
+            else:
+                is_posix = True
+        if is_posix:
+            mapped_execarg = arg1.as_posix()
+        break
+
+    return mapped_execarg
 
 
 @contextmanager
@@ -650,7 +696,7 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
 
     first_command = commands[primary_index]
 
-    first_mapped_execarg = interface.resolve_executable(first_command.words)
+    first_mapped_execarg = resolve_executable(first_command.words)
 
     msg(1, f"First command: {first_command.commandstring}")
 
@@ -782,7 +828,7 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
     for commandnr, command in enumerate(commands):
         if commandnr != primary_index:
             msg(1, f"Command #{commandnr+1}: {command.commandstring}")
-            mapped_execarg = interface.resolve_executable(command.words)
+            mapped_execarg = resolve_executable(command.words)
             if mapped_execarg:
                 wordnode = command.wordnodes[0]
                 old_word = command.words[0]
