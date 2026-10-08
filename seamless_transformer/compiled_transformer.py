@@ -512,6 +512,7 @@ class CompiledMixin:
         meta.setdefault("metavars", self._metavars.to_dict())
         pin_args, input_celltypes = self._frozen_pin_inputs()
         return FrozenTransformer(
+            streaming=self._streaming,
             codebuf=Buffer(self._code_text, "text") if self._code_text is not None else None,
             language=self.language, celltypes=deepcopy(self._celltypes),
             optional_pins=frozenset(self._optional_pins), args=pin_args,

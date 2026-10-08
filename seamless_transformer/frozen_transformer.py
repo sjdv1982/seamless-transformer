@@ -45,6 +45,8 @@ class FrozenTransformer:
     literal_pins: frozenset[str] | None = None
     # Optional neutral hand-over leases supplied by a bound backend.
     leases: tuple[Any, ...] = ()
+    # Operational only: passed on to the built Transformation, never part of identity.
+    streaming: bool = False
 
 
 __all__ = ["FrozenTransformer"]
