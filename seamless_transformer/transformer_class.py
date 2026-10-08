@@ -83,6 +83,7 @@ def _clone_transformer_builder(source, target_cls):
             target._modules[key] = value if isinstance(value, ModuleType) else deepcopy(value)
         target._globals = deepcopy(frozen.globals)
         target._meta = deepcopy(frozen.meta)
+        target._streaming = frozen.streaming
         source_environment = getattr(source, "_environment", frozen.environment)
         target._environment = deepcopy(source_environment)
         target._workflow_callable = frozen.callable
@@ -165,6 +166,7 @@ class TransformerCore(Generic[P, R]):
         self._workflow_callable = None
         self._code_checksum_ref = None
         self._refholds_released = False
+        self._streaming = False
         self.scratch = scratch
         self.direct_print = direct_print
         from seamless.reference_lifecycle import register_refholder
@@ -183,6 +185,7 @@ class TransformerCore(Generic[P, R]):
             return self._workflow_backend.freeze()
         pin_args, input_celltypes = self._frozen_pin_inputs()
         return FrozenTransformer(
+            streaming=self._streaming,
             codebuf=self._get_codebuf(),
             language=self.language,
             celltypes=deepcopy(self._celltypes),
@@ -427,6 +430,11 @@ class TransformerCore(Generic[P, R]):
                     raise type(exc)(f"Pin {argname!r} conversion from {arg.celltype!r} to {celltype!r}: {exc}") from exc
 
     def _build_from_frozen(self, frozen, *args, **kwargs) -> Transformation[R]:
+        tf = self._build_from_frozen_core(frozen, *args, **kwargs)
+        tf.streaming = frozen.streaming
+        return tf
+
+    def _build_from_frozen_core(self, frozen, *args, **kwargs) -> Transformation[R]:
         ensure_open("transformer call")
         if frozen.compilation is not None or frozen.schema is not None:
             from .compiled_validation import validate_stage1
@@ -702,6 +710,25 @@ class TransformerCore(Generic[P, R]):
         if not isinstance(value, bool) and value is not None:
             raise TypeError(type(value))
         self.meta = {"__direct_print__": value}
+
+    @property
+    def streaming(self) -> bool:
+        """Stream stdout/stderr of generated transformations (daskserver only).
+
+        Operational only: not part of transformation identity. Read when the
+        transformation is built, and passed on to it.
+        """
+
+        if self._workflow_backend is not None:
+            return self._workflow_backend.streaming
+        return self._streaming
+
+    @streaming.setter
+    def streaming(self, value: bool):
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.streaming = value
+            return
+        self._streaming = bool(value)
 
     @property
     def driver(self) -> bool:

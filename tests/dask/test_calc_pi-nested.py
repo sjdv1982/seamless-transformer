@@ -1,5 +1,6 @@
 import os
 
+import seamless
 import seamless.config
 
 seamless.config.init()
@@ -12,6 +13,7 @@ def calc_pi_all(seed, ntrials, *, checksum_only, ndots=1000000000):
 
     import os
     import numpy as np
+    from tqdm import tqdm
 
     from seamless.transformer import delayed, direct
 
@@ -35,23 +37,27 @@ def calc_pi_all(seed, ntrials, *, checksum_only, ndots=1000000000):
     np.random.seed(seed)
     seeds = np.random.randint(0, 999999, ntrials)
 
+    print("Nested transformer START")
     tasks = [calc_pi(seeds[idx], ndots).start() for idx in range(ntrials)]
-    results0 = [tf.compute() for tf in tasks]
-    for n in range(ntrials):
+    results0 = []
+    for n in tqdm(range(ntrials), desc="Nested tasks"):
+        results0.append(tasks[n].compute())
         if tasks[n].exception:
             raise RuntimeError(n, tasks[n].exception)
 
     if checksum_only:
         return [str(cs) for cs in results0]
+    print("Nested transformer RESOLVE")
 
     results = [cs.resolve("mixed") for cs in results0]
     results = np.array(results)
 
+    print("Nested transformer END")
     return results.mean(), results.std(), np.pi
 
 
-# calc_pi_all.celltypes["result"] = "bytes"
 calc_pi_all.driver = True
+calc_pi_all.streaming = True
 
 
 def test_calc_pi():
@@ -61,9 +67,12 @@ def test_calc_pi():
     # ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "300000000"))  # on a compute cluster
     ndots = int(os.environ.get("SEAMLESS_TEST_PI_DOTS", "30000000"))  # on one machine
     checksum_only = False
+    print("START")
     result = calc_pi_all(seed, ntrials, checksum_only=checksum_only, ndots=ndots)
+    print("END")
     print(result)
 
 
 if __name__ == "__main__":
     test_calc_pi()
+    seamless.close()
