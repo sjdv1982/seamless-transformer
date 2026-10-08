@@ -265,6 +265,22 @@ def _set_current_owner_dask_priority(value: int | None) -> int | None:
     return previous
 
 
+def _normalize_nparallel(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def current_nparallel() -> int | None:
+    """Return this process's configured nparallel, or None if it is not set."""
+    try:
+        from seamless_config.select import get_nparallel
+
+        return get_nparallel()
+    except Exception:
+        return None
+
+
 def _scheduler_task_states(
     dask_scheduler, keys: list[str]
 ) -> Dict[str, tuple[str | None, bool | None]]:
@@ -794,6 +810,13 @@ def _execute_transformation_impl(
         payload.get("owner_dask_priority")
     )
     previous_priority = _set_current_owner_dask_priority(owner_dask_priority)
+    nparallel = _normalize_nparallel(payload.get("nparallel"))
+    if nparallel is not None:
+        # Process-wide and not restored: a worker runs several transformations
+        # concurrently, and nested code may read nparallel from any thread.
+        from seamless_config.select import select_nparallel
+
+        select_nparallel(nparallel)
     try:
         tf_checksum = Checksum(payload["tf_checksum"])
         scratch = bool(payload.get("scratch", False))
@@ -1204,6 +1227,7 @@ class _WorkerManager:
         streaming: bool = False,
         stream_worker_address: str | None = None,
         stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
+        nparallel: int | None = None,
     ) -> Checksum | str:
         await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
         tf_hex = Checksum(tf_checksum).hex()
@@ -1313,6 +1337,8 @@ class _WorkerManager:
                         payload["stream_throttle"] = get_stream_throttle()
                 if owner_dask_priority is not None:
                     payload["owner_dask_priority"] = owner_dask_priority
+                if nparallel is not None:
+                    payload["nparallel"] = nparallel
                 result = await handle.request("execute_transformation", payload)
             except (ProcessError, ConnectionClosed):
                 # A canceled checksum whose worker we just terminated must abort,
@@ -1540,6 +1566,7 @@ class _WorkerManager:
         streaming: bool = False,
         stream_worker_address: str | None = None,
         stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
+        nparallel: int | None = None,
     ) -> Checksum | str:
         if streaming and not owner_dask_key:
             owner_dask_key = f"stream-{uuid.uuid4().hex}"
@@ -1556,6 +1583,7 @@ class _WorkerManager:
                 streaming=streaming,
                 stream_worker_address=stream_worker_address,
                 stream_event_logger=stream_event_logger,
+                nparallel=nparallel,
             ),
             self.loop,
         )
@@ -1580,6 +1608,7 @@ class _WorkerManager:
         streaming: bool = False,
         stream_worker_address: str | None = None,
         stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
+        nparallel: int | None = None,
     ) -> Checksum | str:
         if streaming and not owner_dask_key:
             owner_dask_key = f"stream-{uuid.uuid4().hex}"
@@ -1596,6 +1625,7 @@ class _WorkerManager:
                 streaming=streaming,
                 stream_worker_address=stream_worker_address,
                 stream_event_logger=stream_event_logger,
+                nparallel=nparallel,
             ),
             self.loop,
         )
@@ -2020,6 +2050,7 @@ class _WorkerManager:
             owner_dask_priority = _normalize_owner_dask_priority(
                 payload.get("owner_dask_priority")
             )
+            nparallel = _normalize_nparallel(payload.get("nparallel"))
             if not owner_dask_key:
                 owner_dask_key = self._delegate_owner_by_handle.get(
                     getattr(_handle, "name", None) or ""
@@ -2069,6 +2100,7 @@ class _WorkerManager:
                                 require_value=False,
                                 allow_input_fingertip=allow_input_fingertip,
                                 strict_dunder=strict_dunder,
+                                nparallel=nparallel,
                             )
                             dep_checksums = _dependency_checksums_from_tf_dunder(tf_dunder)
                             inputs: Dict[str, TransformationInputSpec] = {}
@@ -2163,6 +2195,7 @@ class _WorkerManager:
                     scratch,
                     enforce_limit=True,
                     owner_dask_key=owner_dask_key,
+                    nparallel=nparallel,
                 )
                 if isinstance(result, Checksum):
                     try:
@@ -2337,6 +2370,7 @@ class _WorkerManager:
             owner_dask_priority = _normalize_owner_dask_priority(
                 payload.get("owner_dask_priority")
             )
+            nparallel = _normalize_nparallel(payload.get("nparallel"))
             cached_result = await self._get_cached_transformation_result(tf_checksum)
             if cached_result is not None:
                 try:
@@ -2378,6 +2412,7 @@ class _WorkerManager:
                     scratch=scratch,
                     require_value=False,
                     strict_dunder=strict_dunder,
+                    nparallel=nparallel,
                 )
 
                 permission_denied = object()
@@ -2929,6 +2964,7 @@ async def dispatch_to_workers(
     streaming: bool = False,
     stream_worker_address: str | None = None,
     stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
+    nparallel: int | None = None,
 ) -> Checksum | str:
     manager = _require_manager()
     result = await manager.run_transformation_async(
@@ -2942,6 +2978,7 @@ async def dispatch_to_workers(
         streaming=streaming,
         stream_worker_address=stream_worker_address,
         stream_event_logger=stream_event_logger,
+        nparallel=nparallel,
     )
 
     if isinstance(result, dict) and "error" in result:
@@ -3037,6 +3074,9 @@ async def forward_to_parent(
     owner_dask_priority = _get_current_owner_dask_priority()
     if owner_dask_priority is not None:
         payload["owner_dask_priority"] = owner_dask_priority
+    nparallel = current_nparallel()
+    if nparallel is not None:
+        payload["nparallel"] = nparallel
     response = await _request_parent_async("delegate_transformation_submit", payload)
     if isinstance(response, dict):
         status = response.get("status")
