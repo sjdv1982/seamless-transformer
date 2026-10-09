@@ -248,10 +248,12 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
         process.wait()
 
         if process.returncode:
-            if process.stdout:
-                sys.stdout.buffer.write(process.stdout.read())
+            # stdout has already been consumed and printed by the loop above.
+            # sys.stdout/sys.stderr may be proxies without a .buffer, so write text.
             if process.stderr:
-                sys.stderr.buffer.write(process.stderr.read())
+                errtext = process.stderr.read().decode(errors="ignore")
+                if errtext:
+                    sys.stderr.write(errtext)
             raise SeamlessStreamTransformationError(
                 """
 Bash transformer exception
