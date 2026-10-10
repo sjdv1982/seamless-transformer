@@ -3052,6 +3052,68 @@ async def dispatch_expression(
         thin.release()
         future.release()
 
+async def dispatch_celljoin(
+    celljoin_checksum,
+    celltype,
+    *,
+    scratch=False,
+):
+    """Dispatch a celljoin using its hashserver definition and identity."""
+    from seamless.checksum.celljoin import (
+        evaluate_celljoin_local_async,
+        parse_celljoin,
+    )
+    from seamless.checksum.expression import ExpressionEvaluationError
+
+    celljoin_checksum = Checksum(celljoin_checksum)
+    if celltype not in ("mixed", "plain"):
+        raise ExpressionEvaluationError(
+            f"Remote celljoin evaluation does not support celltype {celltype!r}"
+        )
+    scratch = bool(scratch)
+
+    try:
+        from seamless_dask.transformer_client import get_seamless_dask_client
+
+        client = get_seamless_dask_client()
+    except ImportError:
+        client = None
+    if client is None:
+        definition = await celljoin_checksum.resolution()
+        spec = parse_celljoin(definition, celltype)
+        result = await evaluate_celljoin_local_async(
+            spec, materialize=not scratch
+        )
+        if not scratch:
+            from seamless_remote import buffer_remote
+
+            result_buffer = await result.resolution()
+            await buffer_remote.write_buffer(result, result_buffer)
+        return Checksum(result)
+
+    from seamless.error_envelope import decode_error
+
+    payload = {
+        "celljoin_checksum": celljoin_checksum.hex(),
+        "celltype": celltype,
+        "scratch": scratch,
+    }
+    definition_future = client.get_fat_checksum_future(celljoin_checksum)
+    future = client.get_celljoin_future(payload, definition_future)
+    from seamless_dask.client import _celljoin_checksum_task
+
+    thin = client.client.submit(
+        _celljoin_checksum_task, future, key=future.key + "-checksum"
+    )
+    try:
+        result, error = await asyncio.to_thread(thin.result)
+        if error:
+            raise decode_error(error)
+        return Checksum(result)
+    finally:
+        thin.release()
+        future.release()
+
 
 async def forward_to_parent(
     transformation_dict: Dict[str, Any],
