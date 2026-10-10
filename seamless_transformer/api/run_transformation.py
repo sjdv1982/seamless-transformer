@@ -9,7 +9,7 @@ import logging
 import os
 import signal
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import seamless
@@ -158,7 +158,11 @@ def _main(argv: list[str] | None = None) -> int:
     # TODO: restore when ncores support lands in the new code base.
     # parser.add_argument("--ncores", type=int, default=None)
 
-    parser.add_argument("--direct-print", dest="direct_print", action="store_true")
+    parser.add_argument(
+        "--streaming",
+        help="Stream transformer output live (daskserver only)",
+        action="store_true",
+    )
     parser.add_argument(
         "--verbose",
         help="Verbose mode, setting the Seamless logger to INFO",
@@ -246,14 +250,11 @@ def _main(argv: list[str] | None = None) -> int:
         print(excs, file=sys.stderr)
         return 1
 
-    if args.direct_print or args.fingertip:
+    if args.fingertip:
         meta = transformation_dict.get("__meta__")
         if not isinstance(meta, dict):
             meta = {}
-        if args.direct_print:
-            meta["__direct_print__"] = True
-        if args.fingertip:
-            meta["allow_input_fingertip"] = True
+        meta["allow_input_fingertip"] = True
         transformation_dict["__meta__"] = meta
 
     tf_dunder = extract_tf_dunder(transformation_dict)
@@ -266,10 +267,18 @@ def _main(argv: list[str] | None = None) -> int:
                 scratch=bool(args.scratch),
                 strict_dunder=bool(args.strict_dunder),
             )
-            result_checksum = compute_transformation_sync(
-                transformation,
-                require_value=False,
-            )
+            transformation.streaming = bool(args.streaming)
+            if args.streaming:
+                from seamless_transformer.stream_output import stream_output_to
+
+                stream_context = stream_output_to(sys.stderr)
+            else:
+                stream_context = nullcontext()
+            with stream_context:
+                result_checksum = compute_transformation_sync(
+                    transformation,
+                    require_value=False,
+                )
         if result_checksum is None:
             raise RuntimeError("Result checksum unavailable")
     except KeyboardInterrupt:

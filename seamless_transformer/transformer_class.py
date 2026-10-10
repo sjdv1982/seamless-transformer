@@ -67,7 +67,6 @@ def _clone_transformer_builder(source, target_cls):
     target = target_cls(
         code,
         scratch=frozen.scratch,
-        direct_print=frozen.direct_print,
         local=bool(frozen.local) if frozen.local is not None else False,
     )
     try:
@@ -150,7 +149,6 @@ class TransformerCore(Generic[P, R]):
         *,
         language: str,
         scratch: bool,
-        direct_print: bool,
         local: bool,
     ) -> None:
         self._language = language
@@ -168,7 +166,6 @@ class TransformerCore(Generic[P, R]):
         self._refholds_released = False
         self._streaming = False
         self.scratch = scratch
-        self.direct_print = direct_print
         from seamless.reference_lifecycle import register_refholder
 
         register_refholder(self)
@@ -197,7 +194,6 @@ class TransformerCore(Generic[P, R]):
             meta=deepcopy(self._meta),
             environment=self._environment._to_lowlevel(),
             scratch=bool(self.scratch),
-            direct_print=bool(self.direct_print),
             local=self.local,
             call_mode="direct" if isinstance(self, DirectCallMixin) else "delayed",
             callable=self._workflow_callable,
@@ -695,23 +691,6 @@ class TransformerCore(Generic[P, R]):
                     checksum.decref_refholder()
 
     @property
-    def direct_print(self):
-        """Print stdout/stderr directly instead of only storing logs."""
-
-        if self._workflow_backend is not None:
-            return self._workflow_backend.direct_print
-        return self._meta.get("__direct_print__", False)
-
-    @direct_print.setter
-    def direct_print(self, value):
-        if getattr(self, "_workflow_backend", None) is not None:
-            self._workflow_backend.direct_print = value
-            return
-        if not isinstance(value, bool) and value is not None:
-            raise TypeError(type(value))
-        self.meta = {"__direct_print__": value}
-
-    @property
     def streaming(self) -> bool:
         """Stream stdout/stderr of generated transformations (daskserver only).
 
@@ -921,13 +900,11 @@ class PythonMixin(Generic[P, R]):
         *,
         language: str,
         scratch: bool,
-        direct_print: bool,
         local: bool,
     ):
         self._init_core(
             language=language,
             scratch=scratch,
-            direct_print=direct_print,
             local=local,
         )
         self._codebuf = None
@@ -1049,14 +1026,12 @@ class PythonTransformer(PythonBashBaseTransformer[P, R]):
         code: Callable[P, R] | str | Checksum | None = None,
         *,
         scratch: bool = False,
-        direct_print: bool = False,
         local: bool = False,
     ):
         super().__init__(
             code,
             language="python",
             scratch=scratch,
-            direct_print=direct_print,
             local=local,
         )
 
@@ -1069,14 +1044,12 @@ class BashTransformer(PythonBashBaseTransformer):
         code: str | Checksum | None = None,
         *,
         scratch: bool = False,
-        direct_print: bool = False,
         local: bool = False,
     ):
         super().__init__(
             code,
             language="bash",
             scratch=scratch,
-            direct_print=direct_print,
             local=local,
         )
 

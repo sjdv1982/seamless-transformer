@@ -31,7 +31,6 @@ class FrozenTransformer:
     meta: dict[str, Any]
     environment: Any
     scratch: bool
-    direct_print: bool
     local: bool | None
     call_mode: str
     callable: Any = None

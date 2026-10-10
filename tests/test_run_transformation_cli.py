@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import uuid
+from types import SimpleNamespace
 
 from seamless import Buffer, Checksum
 
@@ -135,7 +136,7 @@ def _extract_labeled_checksum(label, proc):
 def test_run_transformation_cli_wires_strict(monkeypatch, capsys):
     checksum = Checksum("1" * 64)
     calls = []
-    fake_transformation = object()
+    fake_transformation = SimpleNamespace(streaming=False)
 
     monkeypatch.setattr(
         run_transformation.seamless_config, "init", lambda **kwargs: None
@@ -193,9 +194,9 @@ def test_run_transformation_cli_loads_sibling_dunder(monkeypatch, tmp_path, caps
     job_dir.mkdir()
     checksum_file = job_dir / "transformation.json.CHECKSUM"
     checksum_file.write_text(checksum)
-    (job_dir / "dunder.json").write_text('{"__meta__": {"direct_print": true}}')
+    (job_dir / "dunder.json").write_text('{"__meta__": {"trace": true}}')
     calls = []
-    fake_transformation = object()
+    fake_transformation = SimpleNamespace(streaming=False)
 
     monkeypatch.setattr(
         run_transformation.seamless_config, "init", lambda **kwargs: None
@@ -243,7 +244,7 @@ def test_run_transformation_cli_loads_sibling_dunder(monkeypatch, tmp_path, caps
     )
 
     assert run_transformation._main([str(checksum_file)]) == 0
-    assert calls[0]["tf_dunder"]["__meta__"] == {"direct_print": True}
+    assert calls[0]["tf_dunder"]["__meta__"] == {"trace": True}
     assert capsys.readouterr().out.strip() == "3" * 64
 
 
