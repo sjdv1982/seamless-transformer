@@ -44,6 +44,7 @@ from seamless.caching.buffer_cache import get_buffer_cache
 from .process import ChildChannel, ProcessManager, ConnectionClosed
 from .process.manager import ProcessError, ProcessHandle
 from .remote_job import parse_remote_job_written
+from .output_routing import install_output_routing, output_route
 from .run import run_transformation_dict
 
 _DASK_AVAILABLE_ENV = "SEAMLESS_DASK_AVAILABLE"
@@ -654,7 +655,64 @@ def _patch_worker_primitives() -> None:
 
 
 def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
-    return _execute_transformation_impl(payload, _format_pruned_exec_traceback)
+    stdout_buffer = io.BytesIO()
+    stderr_buffer = io.BytesIO()
+    stdout_wrapper = io.TextIOWrapper(
+        stdout_buffer, encoding="utf-8", write_through=True
+    )
+    stderr_wrapper = io.TextIOWrapper(
+        stderr_buffer, encoding="utf-8", write_through=True
+    )
+    try:
+        with output_route(stdout=stdout_wrapper, stderr=stderr_wrapper):
+            result = _execute_transformation_impl(
+                payload, _format_pruned_exec_traceback
+            )
+    finally:
+        try:
+            stdout_wrapper.flush()
+            stderr_wrapper.flush()
+        finally:
+            try:
+                stdout_wrapper.detach()
+            except Exception:
+                pass
+            try:
+                stderr_wrapper.detach()
+            except Exception:
+                pass
+    return _append_output_trailers(result, stdout_buffer, stderr_buffer)
+
+
+def _append_output_trailers(
+    result: Checksum | str,
+    stdout_buffer: io.BytesIO,
+    stderr_buffer: io.BytesIO,
+) -> Checksum | str:
+    if isinstance(result, str):
+        stdout_text = stdout_buffer.getvalue().decode("utf-8", errors="replace")
+        stderr_text = stderr_buffer.getvalue().decode("utf-8", errors="replace")
+        if stdout_text:
+            if not result:
+                result = "\n"
+            result += (
+                "\n*************************************************\n"
+                "* Standard output\n"
+                "*************************************************\n"
+                f"{stdout_text}\n"
+                "*************************************************\n"
+            )
+        if stderr_text:
+            if not result:
+                result = "\n"
+            result += (
+                "\n*************************************************\n"
+                "* Standard error\n"
+                "*************************************************\n"
+                f"{stderr_text}\n"
+                "*************************************************\n"
+            )
+    return result
 
 
 def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
@@ -742,10 +800,6 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
         stderr_wrapper = io.TextIOWrapper(
             stderr_buffer, encoding="utf-8", write_through=True
         )
-    previous_stdout = sys.stdout
-    previous_stderr = sys.stderr
-    sys.stdout = stdout_wrapper
-    sys.stderr = stderr_wrapper
     try:
 
         def _format_request_exc(exc: BaseException) -> str:
@@ -753,8 +807,13 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
                 return str(exc)
             return _format_pruned_exec_traceback()
 
-        with tqdm_patch:
-            result = _execute_transformation_impl(payload, _format_request_exc)
+        with output_route(
+            stdout=stdout_wrapper,
+            stderr=stderr_wrapper,
+            tqdm_patch=tqdm_patch if streaming else None,
+        ):
+            with tqdm_patch:
+                result = _execute_transformation_impl(payload, _format_request_exc)
     finally:
         try:
             stdout_wrapper.flush()
@@ -763,8 +822,6 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
                 stdout_wrapper.close()
                 stderr_wrapper.close()
         finally:
-            sys.stdout = previous_stdout
-            sys.stderr = previous_stderr
             if not streaming:
                 try:
                     stdout_wrapper.detach()
@@ -774,30 +831,7 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
                     stderr_wrapper.detach()
                 except Exception:
                     pass
-    if isinstance(result, str):
-        stdout_text = stdout_buffer.getvalue().decode("utf-8", errors="replace")
-        stderr_text = stderr_buffer.getvalue().decode("utf-8", errors="replace")
-        if stdout_text:
-            if not result:
-                result = "\n"
-            result += (
-                "\n*************************************************\n"
-                "* Standard output\n"
-                "*************************************************\n"
-                f"{stdout_text}\n"
-                "*************************************************\n"
-            )
-        if stderr_text:
-            if not result:
-                result = "\n"
-            result += (
-                "\n*************************************************\n"
-                "* Standard error\n"
-                "*************************************************\n"
-                f"{stderr_text}\n"
-                "*************************************************\n"
-            )
-    return result
+    return _append_output_trailers(result, stdout_buffer, stderr_buffer)
 
 
 def _execute_transformation_impl(
@@ -884,6 +918,7 @@ async def _child_initializer(channel: ChildChannel) -> None:
     global _child_channel, _child_loop, _quiet
     _child_channel = channel
     _child_loop = asyncio.get_running_loop()
+    install_output_routing()
     set_is_worker(True)
     _patch_worker_primitives()
     set_remote_clients_from_env(include_dask=True)
