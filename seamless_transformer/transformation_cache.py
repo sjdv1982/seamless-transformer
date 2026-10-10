@@ -1,6 +1,7 @@
 """Transformation cache helpers."""
 
 from typing import Any, Dict
+from collections import OrderedDict
 
 import asyncio
 import logging
@@ -81,6 +82,7 @@ _DEBUG = os.environ.get("SEAMLESS_DEBUG_TRANSFORMATION", "").lower() in (
 )
 
 _ORIGINAL_RUN_TRANSFORMATION_DICT = run_transformation_dict
+_LOG_CACHE_SIZE = 256
 
 
 def _debug(msg: str) -> None:
@@ -184,12 +186,48 @@ async def _await_buffer_writer(checksum: Checksum) -> None:
 class TransformationCache:
     """Singleton wrapper for transformation cache helpers."""
 
-    def __init__(self) -> None:
+    def __init__(self, log_cache_size: int = _LOG_CACHE_SIZE) -> None:
         self._transformation_cache: dict[Checksum, Checksum] = {}
         self._rev_transformation_cache: dict[Checksum, set[Checksum]] = {}
         self._transformation_dunder_cache: dict[Checksum, Dict[str, Any]] = {}
         self._active_submissions: dict[Checksum, _ActiveSubmission] = {}
         self._active_lock = threading.RLock()
+        self._transformation_logs: OrderedDict[Checksum, dict[str, Any]] = (
+            OrderedDict()
+        )
+        self._log_cache_size = max(0, int(log_cache_size))
+        self._log_lock = threading.RLock()
+
+    def get_transformation_log(self, tf_checksum) -> dict[str, Any] | None:
+        tf_checksum = Checksum(tf_checksum)
+        with self._log_lock:
+            entry = self._transformation_logs.get(tf_checksum)
+            if entry is None:
+                return None
+            self._transformation_logs.move_to_end(tf_checksum)
+            return dict(entry)
+
+    def set_transformation_log(self, tf_checksum, log: dict[str, Any]) -> None:
+        tf_checksum = Checksum(tf_checksum)
+        if self._log_cache_size == 0:
+            return
+        stdout = log.get("stdout", "")
+        stderr = log.get("stderr", "")
+        entry = {
+            "stdout": stdout if isinstance(stdout, str) else str(stdout),
+            "stderr": stderr if isinstance(stderr, str) else str(stderr),
+            "wall_time_seconds": log.get("wall_time_seconds", 0.0),
+        }
+        with self._log_lock:
+            self._transformation_logs.pop(tf_checksum, None)
+            self._transformation_logs[tf_checksum] = entry
+            while len(self._transformation_logs) > self._log_cache_size:
+                self._transformation_logs.popitem(last=False)
+
+    def clear_transformation_log(self, tf_checksum) -> None:
+        tf_checksum = Checksum(tf_checksum)
+        with self._log_lock:
+            self._transformation_logs.pop(tf_checksum, None)
 
     def _remember_transformation_dunder(
         self, tf_checksum: Checksum, tf_dunder: Dict[str, Any] | None
@@ -739,6 +777,8 @@ class TransformationCache:
         record_mode: bool,
         active_submission: _ActiveSubmission | None = None,
     ) -> Checksum:
+        self.clear_transformation_log(tf_checksum)
+        captured_logs: dict[str, Any] | None = None
         execution = "process" if force_local else get_execution()
         meta = (
             transformation_dict.get("__meta__")
@@ -813,6 +853,7 @@ class TransformationCache:
                     compilation_context = result_checksum.get("compilation_context")
                     job_validation_payload = result_checksum.get("job_validation")
                     runtime_metadata = result_checksum.get("record_runtime")
+                    captured_logs = result_checksum.get("logs")
                     result_checksum = result_checksum.get("result_checksum")
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
@@ -824,16 +865,21 @@ class TransformationCache:
             result_checksum = Checksum(result_checksum)
         elif worker.has_spawned() and not is_worker() and not force_local:
             _debug("dispatching transformation to worker pool")
-            result_checksum = await _await_with_active_cancellation(
+            dispatch_result = await _await_with_active_cancellation(
                 worker.dispatch_to_workers(
                     transformation_dict,
                     tf_checksum=tf_checksum,
                     tf_dunder=tf_dunder,
                     scratch=scratch,
                     strict_dunder=strict_dunder,
+                    with_logs=True,
                 ),
                 active_submission,
             )
+            if isinstance(dispatch_result, tuple) and len(dispatch_result) == 2:
+                result_checksum, captured_logs = dispatch_result
+            else:
+                result_checksum = dispatch_result
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
                 if remote_job_dir is not None:
@@ -1052,6 +1098,10 @@ class TransformationCache:
         )
         await _await_buffer_writer(result_checksum)
 
+        log_entry = dict(captured_logs) if isinstance(captured_logs, dict) else {}
+        log_entry["wall_time_seconds"] = wall_time_seconds
+        self.set_transformation_log(tf_checksum, log_entry)
+
         return result_checksum
 
     def run_sync(
@@ -1152,6 +1202,18 @@ def get_transformation_cache() -> TransformationCache:
     if _transformation_cache_instance is None:
         _transformation_cache_instance = TransformationCache()
     return _transformation_cache_instance
+
+
+def get_transformation_log(tf_checksum) -> dict[str, Any] | None:
+    return get_transformation_cache().get_transformation_log(tf_checksum)
+
+
+def set_transformation_log(tf_checksum, log: dict[str, Any]) -> None:
+    get_transformation_cache().set_transformation_log(tf_checksum, log)
+
+
+def clear_transformation_log(tf_checksum) -> None:
+    get_transformation_cache().clear_transformation_log(tf_checksum)
 
 
 async def run(
@@ -1319,6 +1381,9 @@ __all__ = [
     "TransformationCache",
     "build_compilation_context_checksum",
     "get_transformation_cache",
+    "get_transformation_log",
+    "set_transformation_log",
+    "clear_transformation_log",
     "is_cached",
     "is_cached_sync",
     "run",

@@ -715,7 +715,20 @@ def _append_output_trailers(
     return result
 
 
-def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
+def _truncate_log_text(value: str) -> str:
+    if len(value) <= 10_000:
+        return value
+    skipped = len(value) - 9_960
+    return (
+        value[:4_960]
+        + f"\n...(skipped {skipped} characters)...\n"
+        + value[-5_000:]
+    )
+
+
+def _execute_transformation_request(
+    payload: Dict[str, Any],
+) -> Checksum | str | tuple[Checksum, Dict[str, str]]:
     from . import SeamlessStreamTransformationError
 
     stdout_buffer = io.BytesIO()
@@ -831,7 +844,15 @@ def _execute_transformation_request(payload: Dict[str, Any]) -> Checksum | str:
                     stderr_wrapper.detach()
                 except Exception:
                     pass
-    return _append_output_trailers(result, stdout_buffer, stderr_buffer)
+    result = _append_output_trailers(result, stdout_buffer, stderr_buffer)
+    if payload.get("want_logs") and isinstance(result, Checksum):
+        stdout_text = stdout_buffer.getvalue().decode("utf-8", errors="replace")
+        stderr_text = stderr_buffer.getvalue().decode("utf-8", errors="replace")
+        return result, {
+            "stdout": _truncate_log_text(stdout_text),
+            "stderr": _truncate_log_text(stderr_text),
+        }
+    return result
 
 
 def _execute_transformation_impl(
@@ -1263,7 +1284,8 @@ class _WorkerManager:
         stream_worker_address: str | None = None,
         stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
         nparallel: int | None = None,
-    ) -> Checksum | str:
+        want_logs: bool = False,
+    ) -> Checksum | str | tuple[Checksum, Dict[str, str]]:
         await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
         tf_hex = Checksum(tf_checksum).hex()
         stream_context = None
@@ -1340,7 +1362,7 @@ class _WorkerManager:
             if owner_dask_key:
                 self._delegate_owner_by_handle[handle.name] = owner_dask_key
             retry = False
-            result: Checksum | str | None = None
+            result: Checksum | str | tuple[Checksum, Dict[str, str]] | None = None
             self._remember_active_handle(tf_hex, handle)
             try:
                 payload = {
@@ -1350,6 +1372,8 @@ class _WorkerManager:
                     "scratch": scratch,
                     "strict_dunder": bool(strict_dunder),
                 }
+                if want_logs:
+                    payload["want_logs"] = True
                 if owner_dask_key is not None:
                     payload["owner_dask_key"] = owner_dask_key
                 if streaming:
@@ -1405,6 +1429,14 @@ class _WorkerManager:
                     limit.release()
             if not retry:
                 assert result is not None
+                if want_logs:
+                    if (
+                        isinstance(result, tuple)
+                        and len(result) == 2
+                        and isinstance(result[1], dict)
+                    ):
+                        return result
+                    return result, None
                 return result
             await asyncio.sleep(0.05)
 
@@ -1602,7 +1634,8 @@ class _WorkerManager:
         stream_worker_address: str | None = None,
         stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
         nparallel: int | None = None,
-    ) -> Checksum | str:
+        with_logs: bool = False,
+    ) -> Checksum | str | tuple[Checksum, Dict[str, str] | None]:
         if streaming and not owner_dask_key:
             owner_dask_key = f"stream-{uuid.uuid4().hex}"
         fut = asyncio.run_coroutine_threadsafe(
@@ -1619,6 +1652,7 @@ class _WorkerManager:
                 stream_worker_address=stream_worker_address,
                 stream_event_logger=stream_event_logger,
                 nparallel=nparallel,
+                want_logs=with_logs,
             ),
             self.loop,
         )
@@ -1644,7 +1678,8 @@ class _WorkerManager:
         stream_worker_address: str | None = None,
         stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
         nparallel: int | None = None,
-    ) -> Checksum | str:
+        with_logs: bool = False,
+    ) -> Checksum | str | tuple[Checksum, Dict[str, str] | None]:
         if streaming and not owner_dask_key:
             owner_dask_key = f"stream-{uuid.uuid4().hex}"
         fut = asyncio.run_coroutine_threadsafe(
@@ -1661,6 +1696,7 @@ class _WorkerManager:
                 stream_worker_address=stream_worker_address,
                 stream_event_logger=stream_event_logger,
                 nparallel=nparallel,
+                want_logs=with_logs,
             ),
             self.loop,
         )
@@ -1764,7 +1800,7 @@ class _WorkerManager:
                 return {"status": "cancelled"}
             if not thin.done():
                 return {"status": "cancelled"}
-            tf_checksum_hex, result_checksum_hex, exc = thin.result()
+            tf_checksum_hex, result_checksum_hex, exc, _logs = thin.result()
         except Exception as exc:
             return {"status": "error", "error": repr(exc)}
         if exc:
@@ -2347,7 +2383,7 @@ class _WorkerManager:
             if not thin.done():
                 continue
             try:
-                _tf_checksum_hex, result_checksum_hex, exc = thin.result()
+                _tf_checksum_hex, result_checksum_hex, exc, _logs = thin.result()
             except Exception as exc:
                 entry = await self._pop_delegate_entry(token)
                 if entry is not None:
@@ -2582,7 +2618,7 @@ class _WorkerManager:
                             priority_boost=priority_boost,
                         )
                         try:
-                            _tf_checksum_hex, result_checksum_hex, exc = (
+                            _tf_checksum_hex, result_checksum_hex, exc, _logs = (
                                 futures.thin.result()
                             )
                         except BaseException as exc:
@@ -3000,7 +3036,8 @@ async def dispatch_to_workers(
     stream_worker_address: str | None = None,
     stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
     nparallel: int | None = None,
-) -> Checksum | str:
+    with_logs: bool = False,
+) -> Checksum | str | tuple[Checksum | str, Dict[str, str] | None]:
     manager = _require_manager()
     result = await manager.run_transformation_async(
         transformation_dict,
@@ -3014,12 +3051,18 @@ async def dispatch_to_workers(
         stream_worker_address=stream_worker_address,
         stream_event_logger=stream_event_logger,
         nparallel=nparallel,
+        with_logs=with_logs,
     )
 
+    logs = None
+    if with_logs and isinstance(result, tuple) and len(result) == 2:
+        result, logs = result
     if isinstance(result, dict) and "error" in result:
         from seamless.error_envelope import decode_error
 
         raise decode_error(result)
+    if with_logs:
+        return result, logs
     return result
 
 
