@@ -594,6 +594,15 @@ class TransformerCore(Generic[P, R]):
             )
         return self._workflow_backend.exception
 
+    @property
+    def logs(self):
+        """Return the log associated with a bound workflow transformer."""
+        if self._workflow_backend is None:
+            raise AttributeError(
+                "logs is only available for bound workflow transformers"
+            )
+        return self._workflow_backend.logs
+
     def compute(self, timeout=None):
         if self._workflow_backend is not None:
             return self._workflow_backend.compute(timeout=timeout)

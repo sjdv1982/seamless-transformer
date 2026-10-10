@@ -1197,6 +1197,38 @@ class TransformationCache:
 _transformation_cache_instance: TransformationCache | None = None
 
 
+def format_transformation_log(entry: dict[str, Any]) -> str:
+    """Format a stored successful execution log for the public logs API."""
+    separator = "*" * 49
+
+    def truncate(stream: str) -> str:
+        if len(stream) <= 10_000:
+            return stream
+        skipped = len(stream) - 4_960 - 5_000
+        return (
+            stream[:4_960]
+            + f"\n...(skipped {skipped} characters)...\n"
+            + stream[-5_000:]
+        )
+
+    sections = []
+    stdout = entry.get("stdout", "")
+    stderr = entry.get("stderr", "")
+    if stdout:
+        sections.append(
+            f"{separator}\n* Standard output\n{separator}\n{truncate(stdout)}"
+        )
+    if stderr:
+        sections.append(
+            f"{separator}\n* Standard error\n{separator}\n{truncate(stderr)}"
+        )
+    wall_time_seconds = entry.get("wall_time_seconds", 0.0)
+    sections.append(
+        f"{separator}\nExecution time: {wall_time_seconds:.1f} seconds\n{separator}"
+    )
+    return "\n".join(sections)
+
+
 def get_transformation_cache() -> TransformationCache:
     global _transformation_cache_instance
     if _transformation_cache_instance is None:
@@ -1382,6 +1414,7 @@ __all__ = [
     "build_compilation_context_checksum",
     "get_transformation_cache",
     "get_transformation_log",
+    "format_transformation_log",
     "set_transformation_log",
     "clear_transformation_log",
     "is_cached",
