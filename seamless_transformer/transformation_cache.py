@@ -6,6 +6,7 @@ from collections import OrderedDict
 import asyncio
 import logging
 import concurrent.futures
+import io
 from copy import deepcopy
 from dataclasses import dataclass
 import os
@@ -51,6 +52,7 @@ from .record_utils import (
 )
 from .remote_job import RemoteJobWritten, parse_remote_job_written
 from .run import run_transformation_dict
+from .output_routing import process_output_route
 from seamless_config.select import (
     check_remote_redundancy,
     get_execution,
@@ -109,8 +111,55 @@ class _ActiveSubmission:
     canceled: bool = False
 
 
-class SpawnedTransformationError(RuntimeError):
+class FormattedTransformationError(RuntimeError):
+    """An already-formatted transformation failure."""
+
+
+class SpawnedTransformationError(FormattedTransformationError):
     """A spawned worker's already-formatted transformation traceback."""
+
+
+def _run_process_transformation_with_capture(
+    transformation_dict,
+    tf_checksum,
+    tf_dunder,
+    scratch,
+    require_value,
+):
+    with process_output_route() as (stdout_capture, stderr_capture):
+        try:
+            result = run_transformation_dict(
+                transformation_dict,
+                tf_checksum,
+                tf_dunder,
+                scratch,
+                require_value,
+            )
+        except Exception as exc:
+            if isinstance(exc, TransformationCancelledError):
+                raise
+            from seamless.error_envelope import error_kind
+
+            if error_kind(exc) == "execution":
+                from .transformation_class import _format_exception
+
+                formatted = _format_exception(exc)
+                formatted = worker._append_output_trailers(
+                    formatted,
+                    io.BytesIO(
+                        stdout_capture.getvalue().encode("utf-8", errors="replace")
+                    ),
+                    io.BytesIO(
+                        stderr_capture.getvalue().encode("utf-8", errors="replace")
+                    ),
+                )
+                raise FormattedTransformationError(formatted) from exc
+            raise
+
+    return result, {
+        "stdout": stdout_capture.getvalue(),
+        "stderr": stderr_capture.getvalue(),
+    }
 
 
 from seamless.error_envelope import ExecutionCanceledError as TransformationCancelledError
@@ -924,10 +973,10 @@ class TransformationCache:
             loop = asyncio.get_running_loop()
             gpu_sampler = start_gpu_memory_sampler()
             try:
-                result_checksum = await _await_with_active_cancellation(
+                result_checksum, captured_logs = await _await_with_active_cancellation(
                     loop.run_in_executor(
                         None,
-                        run_transformation_dict,
+                        _run_process_transformation_with_capture,
                         transformation_dict,
                         tf_checksum,
                         tf_dunder,

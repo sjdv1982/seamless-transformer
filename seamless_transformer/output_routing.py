@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import io
 import threading
 from contextlib import contextmanager
 from typing import Any, Iterator, TextIO
@@ -13,6 +14,11 @@ _CURRENT_ROUTE: contextvars.ContextVar["_OutputRoute | None"] = contextvars.Cont
     "seamless_worker_output_route", default=None
 )
 _ROUTED_START_MARKER = "_seamless_output_route_wrapper"
+_PROCESS_OUTPUT_LOCK = threading.RLock()
+_PROCESS_OUTPUT_USERS = 0
+_PROCESS_OUTPUT_STATE: (
+    tuple[TextIO, TextIO, "_RoutingStream", "_RoutingStream"] | None
+) = None
 
 
 class _OutputRoute:
@@ -23,11 +29,14 @@ class _OutputRoute:
         *,
         tqdm_patch: Any = None,
         parent: "_OutputRoute | None" = None,
+        thread_only: bool = False,
     ) -> None:
         self.stdout = stdout
         self.stderr = stderr
         self.parent = parent
         self._tqdm_patch = tqdm_patch
+        self._thread_only = thread_only
+        self._owner_thread_id = threading.get_ident() if thread_only else None
         self._active = True
         self._lock = threading.RLock()
 
@@ -35,6 +44,14 @@ class _OutputRoute:
     def active(self) -> bool:
         with self._lock:
             return self._active
+
+    @property
+    def applies_to_current_thread(self) -> bool:
+        with self._lock:
+            return self._active and (
+                not self._thread_only
+                or self._owner_thread_id == threading.get_ident()
+            )
 
     @property
     def tqdm_patch(self) -> Any:
@@ -109,6 +126,13 @@ def _write_fallback_bytes(fallback: TextIO, value: bytes) -> int:
     return fallback.write(value.decode(encoding, errors=errors))
 
 
+def _current_output_route() -> _OutputRoute | None:
+    route = _CURRENT_ROUTE.get()
+    if route is None or not route.applies_to_current_thread:
+        return None
+    return route
+
+
 class _RoutedBinaryStream:
     def __init__(self, stream: "_RoutingStream") -> None:
         self._stream = stream
@@ -117,7 +141,7 @@ class _RoutedBinaryStream:
         if not isinstance(value, (bytes, bytearray, memoryview)):
             raise TypeError("a bytes-like object is required")
         data = bytes(value)
-        route = _CURRENT_ROUTE.get()
+        route = _current_output_route()
         if route is None:
             return _write_fallback_bytes(self._stream._fallback, data)
         return route.write_bytes(
@@ -143,7 +167,7 @@ class _RoutingStream:
 
     @property
     def encoding(self) -> str | None:
-        route = _CURRENT_ROUTE.get()
+        route = _current_output_route()
         stream = (
             self._fallback
             if route is None
@@ -153,7 +177,7 @@ class _RoutingStream:
 
     @property
     def errors(self) -> str | None:
-        route = _CURRENT_ROUTE.get()
+        route = _current_output_route()
         stream = (
             self._fallback
             if route is None
@@ -168,7 +192,7 @@ class _RoutingStream:
     def write(self, value: str) -> int:
         if not isinstance(value, str):
             raise TypeError("write() argument must be str")
-        route = _CURRENT_ROUTE.get()
+        route = _current_output_route()
         if route is None:
             return self._fallback.write(value)
         return route.write(self._stream_name, value, self._fallback)
@@ -178,14 +202,14 @@ class _RoutingStream:
             self.write(line)
 
     def flush(self) -> None:
-        route = _CURRENT_ROUTE.get()
+        route = _current_output_route()
         if route is None:
             self._fallback.flush()
         else:
             route.flush(self._stream_name, self._fallback)
 
     def isatty(self) -> bool:
-        route = _CURRENT_ROUTE.get()
+        route = _current_output_route()
         stream = (
             self._fallback
             if route is None
@@ -220,15 +244,15 @@ def output_route(
     stderr: TextIO | None = None,
     *,
     tqdm_patch: Any = None,
+    thread_only: bool = False,
 ) -> Iterator[_OutputRoute]:
-    parent = _CURRENT_ROUTE.get()
-    if parent is not None and not parent.active:
-        parent = None
+    parent = _current_output_route()
     route = _OutputRoute(
         stdout,
         stderr,
         tqdm_patch=tqdm_patch,
         parent=parent,
+        thread_only=thread_only,
     )
     token = _CURRENT_ROUTE.set(route)
     try:
@@ -239,10 +263,164 @@ def output_route(
 
 
 def current_tqdm_patch() -> Any:
-    route = _CURRENT_ROUTE.get()
+    route = _current_output_route()
     if route is None:
         return None
     return route.tqdm_patch
+
+
+class _TeeStream:
+    def __init__(self, live: TextIO, capture: TextIO) -> None:
+        self._live = live
+        self._capture = capture
+        self._binary_stream = _TeeBinaryStream(self)
+
+    @property
+    def encoding(self) -> str | None:
+        return getattr(self._live, "encoding", None)
+
+    @property
+    def errors(self) -> str | None:
+        return getattr(self._live, "errors", None)
+
+    @property
+    def buffer(self) -> "_TeeBinaryStream":
+        return self._binary_stream
+
+    @property
+    def closed(self) -> bool:
+        return False
+
+    def write(self, value: str) -> int:
+        if not isinstance(value, str):
+            raise TypeError("write() argument must be str")
+        try:
+            written = self._live.write(value)
+        finally:
+            self._capture.write(value)
+        return len(value) if written is None else written
+
+    def writelines(self, lines: Any) -> None:
+        for line in lines:
+            self.write(line)
+
+    def flush(self) -> None:
+        try:
+            self._live.flush()
+        finally:
+            self._capture.flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._live, "isatty", lambda: False)())
+
+    def fileno(self) -> int:
+        return self._live.fileno()
+
+    def writable(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        self.flush()
+
+
+class _TeeBinaryStream:
+    def __init__(self, stream: _TeeStream) -> None:
+        self._stream = stream
+
+    def write(self, value: bytes | bytearray | memoryview) -> int:
+        if not isinstance(value, (bytes, bytearray, memoryview)):
+            raise TypeError("a bytes-like object is required")
+        data = bytes(value)
+        encoding = self._stream.encoding or "utf-8"
+        try:
+            live_buffer = getattr(self._stream._live, "buffer", None)
+            if live_buffer is None:
+                written = self._stream._live.write(
+                    data.decode(
+                        encoding, errors=self._stream.errors or "replace"
+                    )
+                )
+            else:
+                written = live_buffer.write(data)
+        finally:
+            self._stream._capture.write(data.decode(encoding, errors="replace"))
+        return len(data) if written is None else written
+
+    def flush(self) -> None:
+        live_buffer = getattr(self._stream._live, "buffer", None)
+        try:
+            if live_buffer is None:
+                self._stream._live.flush()
+            else:
+                live_buffer.flush()
+        finally:
+            self._stream._capture.flush()
+
+    def writable(self) -> bool:
+        return True
+
+    @property
+    def closed(self) -> bool:
+        return False
+
+
+def _underlying_stream(stream: TextIO) -> TextIO:
+    while isinstance(stream, _RoutingStream):
+        stream = stream._fallback
+    return stream
+
+
+@contextmanager
+def process_output_route() -> Iterator[tuple[TextIO, TextIO]]:
+    """Capture one in-process transformation while teeing to caller streams.
+
+    The router is installed for the lifetime of all overlapping captures, but
+    the route itself belongs only to the thread that enters this context.
+    """
+    import sys
+
+    global _PROCESS_OUTPUT_USERS, _PROCESS_OUTPUT_STATE
+
+    stdout_capture = io.StringIO()
+    stderr_capture = io.StringIO()
+    with _PROCESS_OUTPUT_LOCK:
+        if _PROCESS_OUTPUT_USERS == 0:
+            original_stdout, original_stderr = sys.stdout, sys.stderr
+            stdout_router = _RoutingStream(original_stdout, "stdout")
+            stderr_router = _RoutingStream(original_stderr, "stderr")
+            sys.stdout = stdout_router
+            sys.stderr = stderr_router
+            _PROCESS_OUTPUT_STATE = (
+                original_stdout,
+                original_stderr,
+                stdout_router,
+                stderr_router,
+            )
+        else:
+            assert _PROCESS_OUTPUT_STATE is not None
+            original_stdout, original_stderr, _, _ = _PROCESS_OUTPUT_STATE
+        _PROCESS_OUTPUT_USERS += 1
+
+    try:
+        with output_route(
+            _TeeStream(_underlying_stream(original_stdout), stdout_capture),
+            _TeeStream(_underlying_stream(original_stderr), stderr_capture),
+            thread_only=True,
+        ):
+            yield stdout_capture, stderr_capture
+    finally:
+        with _PROCESS_OUTPUT_LOCK:
+            _PROCESS_OUTPUT_USERS -= 1
+            if _PROCESS_OUTPUT_USERS == 0:
+                assert _PROCESS_OUTPUT_STATE is not None
+                original_stdout, original_stderr, stdout_router, stderr_router = (
+                    _PROCESS_OUTPUT_STATE
+                )
+                if sys.stdout is stdout_router:
+                    sys.stdout = original_stdout
+                if sys.stderr is stderr_router:
+                    sys.stderr = original_stderr
+                _PROCESS_OUTPUT_STATE = None
 
 
 def install_output_routing() -> None:

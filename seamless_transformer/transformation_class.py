@@ -58,10 +58,10 @@ def _record_exception(exc):
 
 
 def _format_exception(exc: BaseException) -> str:
-    from .transformation_cache import SpawnedTransformationError
+    from .transformation_cache import FormattedTransformationError
     from seamless.error_envelope import format_exception
 
-    if isinstance(exc, SpawnedTransformationError):
+    if isinstance(exc, FormattedTransformationError):
         return str(exc)
     return format_exception(exc)
 
