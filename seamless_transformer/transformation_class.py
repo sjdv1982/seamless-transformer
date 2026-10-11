@@ -313,6 +313,14 @@ def _dask_available() -> bool:
     return get_seamless_dask_client() is not None
 
 
+def _driver_context_active() -> bool:
+    try:
+        from .run import is_driver_context
+    except Exception:
+        return False
+    return bool(is_driver_context())
+
+
 class Transformation(TransformationDaskMixin, Generic[T]):
     """Resolve and evaluate transformation checksums, sync or async.
 
@@ -365,6 +373,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._input_refholds: list[tuple[Checksum, str]] = []
         self._definition_refheld = False
         self._evaluated = False
+        self._driver_context: bool | None = None
         self._exception = None
         self._cancelled = False
         self._cancel_requested = False
@@ -1156,6 +1165,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             await self._ensure_result_value()
         return self._result_checksum
 
+    def _record_driver_context(self) -> None:
+        if getattr(self, "_driver_context", None) is None:
+            self._driver_context = _driver_context_active()
+
     def _compute(self, api_origin: str) -> Checksum | None:
         """Evaluate through a public entry point.
 
@@ -1166,6 +1179,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
         if api_origin == "dependency":
             return self._compute_dependency()
+        self._record_driver_context()
         self._enable_result_holding()
         return self._compute_sync(api_origin)
 
@@ -1189,23 +1203,13 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         await self._evaluation(require_value=require_value)
         return self._result_checksum
 
-    def _compute_in_thread(
-        self, require_value: bool, driver_context: bool = False
-    ) -> None:
+    def _compute_in_thread(self, require_value: bool) -> None:
         """Run the computation in a dedicated event loop in a worker thread."""
 
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            try:
-                from .run import _driver_context
-            except Exception:
-                loop.run_until_complete(self._computation(require_value=require_value))
-            else:
-                with _driver_context(driver_context):
-                    loop.run_until_complete(
-                        self._computation(require_value=require_value)
-                    )
+            loop.run_until_complete(self._computation(require_value=require_value))
         finally:
             try:
                 loop.run_until_complete(loop.shutdown_asyncgens())
@@ -1224,6 +1228,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         (If only the checksum is available, the transformation will be recomputed.)
         """
         ensure_open("transformation computation")
+        self._record_driver_context()
         self._enable_result_holding()
         if self._cancelled:
             return None
@@ -1280,6 +1285,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     ) -> "Transformation[T]":
         """Ensure the computation task is scheduled; return self for chaining."""
         ensure_open("transformation start")
+        self._record_driver_context()
         if not _internal:
             self._enable_result_holding()
         if self._cancelled:
@@ -1303,41 +1309,17 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             except Exception:
                 local_only = False
             if not local_only:
-                driver_context = False
-                driver_ctx_manager = None
-                try:
-                    from .run import is_driver_context, _driver_context
-                except Exception:
-                    is_driver_context = None
-                else:
-                    driver_context = is_driver_context()
-                    driver_ctx_manager = _driver_context
                 loop = loop or get_event_loop()
                 _ensure_loop_running(loop)
-                if driver_ctx_manager is None:
-                    self._computation_task = loop.create_task(
-                        self._computation(require_value=False)
-                    )
-                else:
-
-                    async def _run_with_driver():
-                        with driver_ctx_manager(driver_context):
-                            return await self._computation(require_value=False)
-
-                    self._computation_task = loop.create_task(_run_with_driver())
+                self._computation_task = loop.create_task(
+                    self._computation(require_value=False)
+                )
                 self._computation_task.add_done_callback(self._future_cleanup)
                 return self
         if is_worker() or worker.has_spawned():
             # Offload to a thread with its own event loop for concurrency.
-            driver_context = False
-            try:
-                from .run import is_driver_context
-
-                driver_context = is_driver_context()
-            except Exception:
-                driver_context = False
             self._computation_future = _COMPUTE_EXECUTOR.submit(
-                self._compute_in_thread, False, driver_context
+                self._compute_in_thread, False
             )
             return self
         loop = loop or _sync_task_loop()
@@ -1440,6 +1422,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         First runs .compute, then resolve the result checksum into a value.
         Raise RuntimeError in case of an exception."""
         ensure_open("transformation task")
+        self._record_driver_context()
         self._enable_result_holding()
         return get_event_loop().create_task(self._run())
 
@@ -1492,6 +1475,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     def clear_exception(self) -> None:
         if self._cancelled:
             return
+        if self._exception is not None:
+            self._driver_context = None
         self._exception = None
         if self._constructed and self._transformation_checksum is None:
             self._constructed = False
@@ -1578,14 +1563,6 @@ def transformation_from_pretransformation(
             meta_payload.update(existing_meta)
         if frozen_meta:
             meta_payload.update(frozen_meta)
-        try:
-            from .run import is_driver_context
-        except Exception:
-            driver_context = False
-        else:
-            driver_context = bool(is_driver_context())
-        if driver_context:
-            meta_payload["driver"] = True
         if meta_payload:
             dunder["__meta__"] = deepcopy(meta_payload)
         return dunder
@@ -1692,6 +1669,7 @@ def transformation_from_pretransformation(
             scratch=scratch,
             require_value=require_value,
             strict_dunder=bool(transformation_obj._strict_dunder),
+            driver_context=bool(getattr(transformation_obj, "_driver_context", False)),
         )
 
     async def evaluator_async(transformation_obj, require_value: bool) -> Checksum:
@@ -1708,6 +1686,7 @@ def transformation_from_pretransformation(
             scratch=scratch,
             require_value=require_value,
             strict_dunder=bool(transformation_obj._strict_dunder),
+            driver_context=bool(getattr(transformation_obj, "_driver_context", False)),
         )
 
     def destructor(transformation_obj):  # pylint: disable=unused-argument
