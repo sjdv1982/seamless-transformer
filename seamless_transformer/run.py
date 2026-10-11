@@ -2,13 +2,15 @@
 
 from typing import Any, Dict, List, Tuple
 from contextlib import contextmanager
+import ctypes
 import os
 import re
 import shutil
+import sys
 import threading
 import yaml
 
-from seamless import Buffer, Checksum
+from seamless import Buffer, Checksum, is_worker
 from .cached_compile import exec_code
 from .remote_job import (
     RemoteJobWritten,
@@ -710,6 +712,48 @@ def _module_definition_from_payload(language, code, header, objects, compilation
     return module_definition
 
 
+_COMPILED_OUTPUT_LOCK = threading.Lock()
+
+
+def _flush_c_stdio() -> None:
+    """Flush all C stdio streams before changing or restoring their file descriptors."""
+    fflush = ctypes.CDLL(None).fflush
+    fflush.argtypes = [ctypes.c_void_p]
+    fflush.restype = ctypes.c_int
+    fflush(None)
+
+
+@contextmanager
+def _capture_compiled_output():
+    """Capture native output in worker children and route it to this request."""
+    if not is_worker():
+        yield
+        return
+
+    from wurlitzer import pipes
+
+    with _COMPILED_OUTPUT_LOCK:
+        stdout_capture = stderr_capture = None
+        try:
+            _flush_c_stdio()
+            with pipes(encoding=None) as (stdout_capture, stderr_capture):
+                try:
+                    yield
+                finally:
+                    _flush_c_stdio()
+        finally:
+            if stdout_capture is not None:
+                stdout_text = stdout_capture.read().decode("utf-8", errors="replace")
+                if stdout_text:
+                    sys.stdout.write(stdout_text)
+                    sys.stdout.flush()
+            if stderr_capture is not None:
+                stderr_text = stderr_capture.read().decode("utf-8", errors="replace")
+                if stderr_text:
+                    sys.stderr.write(stderr_text)
+                    sys.stderr.flush()
+
+
 def call_compiled_transform(
     transformation: Dict[str, Any],
     tf_dunder: Dict[str, Any],
@@ -803,7 +847,8 @@ def call_compiled_transform(
             call_args.append(cdata)
 
     try:
-        status = lib.transform(*call_args)
+        with _capture_compiled_output():
+            status = lib.transform(*call_args)
     except (TypeError, ValueError, OverflowError) as exc:
         raise RuntimeError(f"Compiled validator/ABI contract failure for inputs {[p.name for p in sig.inputs]}: {exc}") from exc
     if status != 0:

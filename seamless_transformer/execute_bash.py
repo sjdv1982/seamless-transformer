@@ -3,11 +3,13 @@ import os
 import shlex
 import shutil
 import signal
+import selectors
 import subprocess
 import tempfile
 import threading
 import sys
 from io import BytesIO
+from typing import IO, cast
 
 import numpy as np
 
@@ -187,16 +189,17 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
             return np.load(npdata)
         except (ValueError, OSError):
             try:
-                try:
-                    sdata = data.decode()
-                except Exception:
-                    return np.frombuffer(data, dtype=np.uint8)
+                sdata = data.decode()
+            except Exception:
+                return np.frombuffer(data, dtype=np.uint8)
+            try:
                 return json.loads(sdata)
             except ValueError:
                 return sdata
 
     process = None
-    tempdir = tempfile.mkdtemp(prefix="seamless-bash-transformer")
+    tempdir = None
+    old_cwd = None
 
     def _kill_process_group():
         if process is None:
@@ -211,13 +214,16 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
 
     def sighandler(signalnum, frame):
         _kill_process_group()
-        os.chdir(old_cwd)
-        shutil.rmtree(tempdir, ignore_errors=True)
+        if old_cwd is not None:
+            os.chdir(old_cwd)
+        if tempdir is not None:
+            shutil.rmtree(tempdir, ignore_errors=True)
         raise SystemExit()
 
+    global_lock.acquire()
     try:
-        global_lock.acquire()
         old_cwd = os.getcwd()
+        tempdir = tempfile.mkdtemp(prefix="seamless-bash-transformer")
         os.chdir(tempdir)
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, sighandler)
@@ -235,25 +241,54 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
             stderr=subprocess.PIPE,
             executable="/bin/bash",
             env=env,
-            preexec_fn=os.setsid,
+            start_new_session=True,
         )
-        for line in process.stdout:
+        stdout = process.stdout
+        stderr = process.stderr
+        assert stdout is not None and stderr is not None
+        selector = selectors.DefaultSelector()
+        pipes = ((stdout, "stdout"), (stderr, "stderr"))
+        pending = {stream: bytearray() for stream, _ in pipes}
+
+        def write_output(stream_name, line):
             try:
                 text = line.decode()
             except UnicodeDecodeError:
                 text = line.decode(errors="ignore")
-            if text.strip() == "":
-                continue
-            print(text, end="")
+            if stream_name == "stdout" and text.strip() == "":
+                return
+            getattr(sys, stream_name).write(text)
+
+        try:
+            for stream, stream_name in pipes:
+                selector.register(stream, selectors.EVENT_READ, stream_name)
+            while selector.get_map():
+                for key, _ in selector.select():
+                    stream = cast(IO[bytes], key.fileobj)
+                    chunk = os.read(stream.fileno(), 65536)
+                    if not chunk:
+                        selector.unregister(stream)
+                        tail = pending[stream]
+                        if tail:
+                            write_output(key.data, bytes(tail))
+                            tail.clear()
+                        continue
+                    buffer = pending[stream]
+                    buffer.extend(chunk)
+                    while True:
+                        newline = buffer.find(b"\n")
+                        if newline < 0:
+                            break
+                        line = bytes(buffer[: newline + 1])
+                        del buffer[: newline + 1]
+                        write_output(key.data, line)
+        finally:
+            selector.close()
+            for stream, _ in pipes:
+                stream.close()
         process.wait()
 
         if process.returncode:
-            # stdout has already been consumed and printed by the loop above.
-            # sys.stdout/sys.stderr may be proxies without a .buffer, so write text.
-            if process.stderr:
-                errtext = process.stderr.read().decode(errors="ignore")
-                if errtext:
-                    sys.stderr.write(errtext)
             raise SeamlessStreamTransformationError(
                 """
 Bash transformer exception
@@ -320,10 +355,18 @@ Error: Result folder RESULT is empty
                 resultdata = f.read()
             result = read_data(resultdata)
     finally:
-        _kill_process_group()
-        os.chdir(old_cwd)
-        shutil.rmtree(tempdir, ignore_errors=True)
-        global_lock.release()
+        try:
+            _kill_process_group()
+        finally:
+            try:
+                if old_cwd is not None:
+                    os.chdir(old_cwd)
+            finally:
+                try:
+                    if tempdir is not None:
+                        shutil.rmtree(tempdir, ignore_errors=True)
+                finally:
+                    global_lock.release()
 
     return result
 

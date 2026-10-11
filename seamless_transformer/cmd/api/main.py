@@ -482,9 +482,8 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
     )
 
     parser.add_argument(
-        "--direct-print",
-        dest="direct_print",
-        help="Attempt to print out stderr messages directly in the executor log",
+        "--streaming",
+        help="Stream transformer output live (daskserver only)",
         action="store_true",
     )
 
@@ -664,10 +663,6 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
     ################################################################
 
     meta = None
-    if args.direct_print:
-        if meta is None:
-            meta = {}
-        meta["__direct_print__"] = True
     if args.write_remote_job:
         if meta is None:
             meta = {}
@@ -1324,6 +1319,7 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
                 undo=args.undo,
                 fingertip=result_fingertip,
                 scratch=args.scratch,
+                streaming=args.streaming,
             )
     except KeyboardInterrupt:
         print(f"Canceled transformation {transformation_checksum}", file=sys.stderr)

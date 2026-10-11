@@ -58,10 +58,10 @@ def _record_exception(exc):
 
 
 def _format_exception(exc: BaseException) -> str:
-    from .transformation_cache import SpawnedTransformationError
+    from .transformation_cache import FormattedTransformationError
     from seamless.error_envelope import format_exception
 
-    if isinstance(exc, SpawnedTransformationError):
+    if isinstance(exc, FormattedTransformationError):
         return str(exc)
     return format_exception(exc)
 
@@ -1472,7 +1472,22 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
     @property
     def logs(self):
-        raise NotImplementedError("transformation logs are not ported in this codebase")
+        if self._cancelled:
+            return None
+        if self._exception is not None:
+            return self.exception
+        tf_checksum = self._transformation_checksum
+        if tf_checksum is None:
+            return None
+        from .transformation_cache import (
+            format_transformation_log,
+            get_transformation_log,
+        )
+
+        entry = get_transformation_log(tf_checksum)
+        if entry is None:
+            return None
+        return format_transformation_log(entry)
 
     def clear_exception(self) -> None:
         if self._cancelled:

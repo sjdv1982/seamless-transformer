@@ -14,6 +14,10 @@ from typing import Any, Callable
 _LOGGER = logging.getLogger(__name__)
 _PATCH_LOCK = threading.RLock()
 _ACTIVE_PATCHES: list["_TqdmPatch"] = []
+_PATCH_REFCOUNT = 0
+_PATCH_FINDER: "_TqdmPatchFinder | None" = None
+_PATCHED_ORIGINALS: list[tuple[Any, str, Any, Any]] = []
+_PATCH_GENERATION = 0
 _TQDM_HIERARCHY_IMPORT_DEPTH = 0
 _TQDM_IMPORT_DEPTH = 0
 _DEVNULL = open(os.devnull, "w", encoding="utf-8")
@@ -21,8 +25,9 @@ _PATCHED_MODULES = ("tqdm", "tqdm.std", "tqdm.auto", "tqdm.asyncio")
 
 
 def _active_patch() -> "_TqdmPatch | None":
-    with _PATCH_LOCK:
-        return _ACTIVE_PATCHES[-1] if _ACTIVE_PATCHES else None
+    from .output_routing import current_tqdm_patch
+
+    return current_tqdm_patch()
 
 
 def _plain_value(value: Any, *, limit: int = 1024) -> Any:
@@ -55,24 +60,43 @@ class _PatchLoader(importlib.abc.Loader):
         is_hierarchy_module = self._fullname in {"tqdm.auto", "tqdm.asyncio"}
         is_package = self._fullname == "tqdm"
         with _PATCH_LOCK:
+            patch_generation = _PATCH_GENERATION
             # These modules derive classes from tqdm.std. Let them see the
             # original class hierarchy while they define those subclasses.
             if is_hierarchy_module:
                 _TQDM_HIERARCHY_IMPORT_DEPTH += 1
-                for patch in reversed(tuple(_ACTIVE_PATCHES)):
-                    for target, attr, wrapper, original in reversed(patch._originals):
-                        if getattr(target, attr, None) is wrapper:
-                            restored.append((target, attr, wrapper, original))
-                            setattr(target, attr, original)
+                for target, attr, wrapper, original in reversed(_PATCHED_ORIGINALS):
+                    if getattr(target, attr, None) is wrapper:
+                        restored.append((target, attr, wrapper, original))
+                        setattr(target, attr, original)
             if is_package:
                 _TQDM_IMPORT_DEPTH += 1
         try:
             self._loader.exec_module(module)
         finally:
             with _PATCH_LOCK:
-                for target, attr, wrapper, original in reversed(restored):
-                    if getattr(target, attr, None) is original:
-                        setattr(target, attr, wrapper)
+                if (
+                    _PATCH_REFCOUNT > 0
+                    and patch_generation == _PATCH_GENERATION
+                ):
+                    for target, attr, wrapper, original in reversed(restored):
+                        still_patched = any(
+                            current_target is target
+                            and current_attr == attr
+                            and current_wrapper is wrapper
+                            and current_original is original
+                            for (
+                                current_target,
+                                current_attr,
+                                current_wrapper,
+                                current_original,
+                            ) in _PATCHED_ORIGINALS
+                        )
+                        if (
+                            still_patched
+                            and getattr(target, attr, None) is original
+                        ):
+                            setattr(target, attr, wrapper)
                 if is_hierarchy_module:
                     _TQDM_HIERARCHY_IMPORT_DEPTH -= 1
                 if is_package:
@@ -81,8 +105,8 @@ class _PatchLoader(importlib.abc.Loader):
                     _TQDM_HIERARCHY_IMPORT_DEPTH == 0
                     and _TQDM_IMPORT_DEPTH == 0
                 ):
-                    for patch in tuple(_ACTIVE_PATCHES):
-                        patch._patch_loaded_modules()
+                    if _ACTIVE_PATCHES:
+                        _ACTIVE_PATCHES[0]._patch_loaded_modules()
 
 
 class _TqdmPatchFinder(importlib.abc.MetaPathFinder):
@@ -110,8 +134,6 @@ class _TqdmPatch:
         self._capture_watermark = capture_watermark
         self._bars: set[Any] = set()
         self._lock = threading.RLock()
-        self._finder = _TqdmPatchFinder()
-        self._originals: list[tuple[Any, str, Any, Any]] = []
         self._entered = False
         self._closed = False
 
@@ -123,17 +145,39 @@ class _TqdmPatch:
             return 2.0
 
     def __enter__(self) -> "_TqdmPatch":
+        global _PATCH_REFCOUNT, _PATCH_FINDER, _PATCH_GENERATION
         with _PATCH_LOCK:
             if self._entered:
                 return self
             self._entered = True
             self._closed = False
             _ACTIVE_PATCHES.append(self)
-            sys.meta_path.insert(0, self._finder)
-            self._patch_loaded_modules()
+            if _PATCH_REFCOUNT == 0:
+                _PATCH_GENERATION += 1
+                _PATCH_FINDER = _TqdmPatchFinder()
+                sys.meta_path.insert(0, _PATCH_FINDER)
+                try:
+                    self._patch_loaded_modules()
+                except BaseException:
+                    try:
+                        sys.meta_path.remove(_PATCH_FINDER)
+                    except ValueError:
+                        pass
+                    for module, attr, wrapper, original in reversed(
+                        _PATCHED_ORIGINALS
+                    ):
+                        if getattr(module, attr, None) is wrapper:
+                            setattr(module, attr, original)
+                    _PATCHED_ORIGINALS.clear()
+                    _PATCH_FINDER = None
+                    _ACTIVE_PATCHES.remove(self)
+                    self._entered = False
+                    raise
+            _PATCH_REFCOUNT += 1
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        global _PATCH_REFCOUNT, _PATCH_FINDER
         with self._lock:
             bars = tuple(self._bars)
         for bar in bars:
@@ -144,19 +188,27 @@ class _TqdmPatch:
 
         with _PATCH_LOCK:
             self._closed = True
-            try:
-                sys.meta_path.remove(self._finder)
-            except ValueError:
-                pass
-            for module, attr, wrapper, original in reversed(self._originals):
-                if getattr(module, attr, None) is wrapper:
-                    setattr(module, attr, original)
-            self._originals.clear()
+            if not self._entered:
+                return
             try:
                 _ACTIVE_PATCHES.remove(self)
             except ValueError:
                 pass
             self._entered = False
+            _PATCH_REFCOUNT -= 1
+            if _PATCH_REFCOUNT > 0:
+                return
+            _PATCH_REFCOUNT = 0
+            if _PATCH_FINDER is not None:
+                try:
+                    sys.meta_path.remove(_PATCH_FINDER)
+                except ValueError:
+                    pass
+            _PATCH_FINDER = None
+            for module, attr, wrapper, original in reversed(_PATCHED_ORIGINALS):
+                if getattr(module, attr, None) is wrapper:
+                    setattr(module, attr, original)
+            _PATCHED_ORIGINALS.clear()
 
     def _patch_loaded_modules(self) -> None:
         for module_name in _PATCHED_MODULES:
@@ -169,7 +221,7 @@ class _TqdmPatch:
             if getattr(original, "_seamless_stream_tqdm", False):
                 continue
             wrapper = self._make_subclass(original)
-            self._originals.append((module, "tqdm", wrapper, original))
+            _PATCHED_ORIGINALS.append((module, "tqdm", wrapper, original))
             setattr(module, "tqdm", wrapper)
 
     def _make_subclass(self, original):
@@ -290,9 +342,10 @@ class _TqdmPatch:
 
             def _update_stream_state(self, *, min_interval: float) -> None:
                 with self._stream_lock:
-                    self._stream_patch._min_interval = patch_type._bounded_interval(
-                        min_interval
-                    )
+                    patch = self._stream_patch
+                    if patch is None:
+                        return
+                    patch._min_interval = patch_type._bounded_interval(min_interval)
                     pending = self._stream_pending
                 if pending is not None:
                     self._queue_update()

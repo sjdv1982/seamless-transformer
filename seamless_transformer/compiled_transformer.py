@@ -518,7 +518,7 @@ class CompiledMixin:
             optional_pins=frozenset(self._optional_pins), args=pin_args,
             input_celltypes=input_celltypes,
             modules={}, globals={}, meta=meta, environment=self._environment._to_lowlevel(),
-            scratch=self.scratch, direct_print=self.direct_print, local=self.local,
+            scratch=self.scratch, local=self.local,
             call_mode="direct" if isinstance(self, DirectCallMixin) else "delayed",
             signature=self._call_signature,
             schema=self._schema_text, compilation=compilation, objects=objects, header=self.header)
@@ -620,7 +620,6 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
       ``"fortran"``, ``"rust"``, or any custom language added via
       :func:`~seamless_transformer.languages.define_compiled_language`).
     - ``scratch``: if True, the result buffer may be dropped after computation.
-    - ``direct_print``: if True, forward transformer stdout/stderr directly.
     - ``local``: if True, force local execution (ignore remote backend config).
 
     Requires ``seamless-signature``, ``cffi``, and ``numpy`` (install with
@@ -632,13 +631,11 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
         language: str,
         *,
         scratch: bool = False,
-        direct_print: bool = False,
         local: bool = False,
     ):
         self._init_core(
             language=language,
             scratch=scratch,
-            direct_print=direct_print,
             local=local,
         )
         self._celltypes = {"result": "mixed"}

@@ -25,7 +25,6 @@ def test_bound_backend_frozen_transformer_uses_shared_transformation_assembly():
                 meta={"local": False},
                 environment=None,
                 scratch=False,
-                direct_print=False,
                 local=False,
                 call_mode="delayed",
                 callable=identity,

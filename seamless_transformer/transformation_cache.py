@@ -1,10 +1,12 @@
 """Transformation cache helpers."""
 
 from typing import Any, Dict
+from collections import OrderedDict
 
 import asyncio
 import logging
 import concurrent.futures
+import io
 from copy import deepcopy
 from dataclasses import dataclass
 import os
@@ -50,6 +52,7 @@ from .record_utils import (
 )
 from .remote_job import RemoteJobWritten, parse_remote_job_written
 from .run import run_transformation_dict
+from .output_routing import process_output_route
 from seamless_config.select import (
     check_remote_redundancy,
     get_execution,
@@ -81,6 +84,7 @@ _DEBUG = os.environ.get("SEAMLESS_DEBUG_TRANSFORMATION", "").lower() in (
 )
 
 _ORIGINAL_RUN_TRANSFORMATION_DICT = run_transformation_dict
+_LOG_CACHE_SIZE = 256
 
 
 def _debug(msg: str) -> None:
@@ -107,8 +111,55 @@ class _ActiveSubmission:
     canceled: bool = False
 
 
-class SpawnedTransformationError(RuntimeError):
+class FormattedTransformationError(RuntimeError):
+    """An already-formatted transformation failure."""
+
+
+class SpawnedTransformationError(FormattedTransformationError):
     """A spawned worker's already-formatted transformation traceback."""
+
+
+def _run_process_transformation_with_capture(
+    transformation_dict,
+    tf_checksum,
+    tf_dunder,
+    scratch,
+    require_value,
+):
+    with process_output_route() as (stdout_capture, stderr_capture):
+        try:
+            result = run_transformation_dict(
+                transformation_dict,
+                tf_checksum,
+                tf_dunder,
+                scratch,
+                require_value,
+            )
+        except Exception as exc:
+            if isinstance(exc, TransformationCancelledError):
+                raise
+            from seamless.error_envelope import error_kind
+
+            if error_kind(exc) == "execution":
+                from .transformation_class import _format_exception
+
+                formatted = _format_exception(exc)
+                formatted = worker._append_output_trailers(
+                    formatted,
+                    io.BytesIO(
+                        stdout_capture.getvalue().encode("utf-8", errors="replace")
+                    ),
+                    io.BytesIO(
+                        stderr_capture.getvalue().encode("utf-8", errors="replace")
+                    ),
+                )
+                raise FormattedTransformationError(formatted) from exc
+            raise
+
+    return result, {
+        "stdout": stdout_capture.getvalue(),
+        "stderr": stderr_capture.getvalue(),
+    }
 
 
 from seamless.error_envelope import ExecutionCanceledError as TransformationCancelledError
@@ -184,12 +235,48 @@ async def _await_buffer_writer(checksum: Checksum) -> None:
 class TransformationCache:
     """Singleton wrapper for transformation cache helpers."""
 
-    def __init__(self) -> None:
+    def __init__(self, log_cache_size: int = _LOG_CACHE_SIZE) -> None:
         self._transformation_cache: dict[Checksum, Checksum] = {}
         self._rev_transformation_cache: dict[Checksum, set[Checksum]] = {}
         self._transformation_dunder_cache: dict[Checksum, Dict[str, Any]] = {}
         self._active_submissions: dict[Checksum, _ActiveSubmission] = {}
         self._active_lock = threading.RLock()
+        self._transformation_logs: OrderedDict[Checksum, dict[str, Any]] = (
+            OrderedDict()
+        )
+        self._log_cache_size = max(0, int(log_cache_size))
+        self._log_lock = threading.RLock()
+
+    def get_transformation_log(self, tf_checksum) -> dict[str, Any] | None:
+        tf_checksum = Checksum(tf_checksum)
+        with self._log_lock:
+            entry = self._transformation_logs.get(tf_checksum)
+            if entry is None:
+                return None
+            self._transformation_logs.move_to_end(tf_checksum)
+            return dict(entry)
+
+    def set_transformation_log(self, tf_checksum, log: dict[str, Any]) -> None:
+        tf_checksum = Checksum(tf_checksum)
+        if self._log_cache_size == 0:
+            return
+        stdout = log.get("stdout", "")
+        stderr = log.get("stderr", "")
+        entry = {
+            "stdout": stdout if isinstance(stdout, str) else str(stdout),
+            "stderr": stderr if isinstance(stderr, str) else str(stderr),
+            "wall_time_seconds": log.get("wall_time_seconds", 0.0),
+        }
+        with self._log_lock:
+            self._transformation_logs.pop(tf_checksum, None)
+            self._transformation_logs[tf_checksum] = entry
+            while len(self._transformation_logs) > self._log_cache_size:
+                self._transformation_logs.popitem(last=False)
+
+    def clear_transformation_log(self, tf_checksum) -> None:
+        tf_checksum = Checksum(tf_checksum)
+        with self._log_lock:
+            self._transformation_logs.pop(tf_checksum, None)
 
     def _remember_transformation_dunder(
         self, tf_checksum: Checksum, tf_dunder: Dict[str, Any] | None
@@ -739,6 +826,62 @@ class TransformationCache:
         record_mode: bool,
         active_submission: _ActiveSubmission | None = None,
     ) -> Checksum:
+        dispatch_started = [False]
+        dispatch_request_id = uuid.uuid4().hex
+
+        def mark_dispatch_started() -> None:
+            if dispatch_started[0]:
+                return
+            dispatch_started[0] = True
+            self.clear_transformation_log(tf_checksum)
+
+        worker._register_nested_dispatch_callback(
+            dispatch_request_id, mark_dispatch_started
+        )
+        try:
+            try:
+                result_checksum = await self._run_uncached_impl(
+                    transformation_dict,
+                    tf_checksum=tf_checksum,
+                    tf_dunder=tf_dunder,
+                    scratch=scratch,
+                    require_value=require_value,
+                    force_local=force_local,
+                    store_execution_record=store_execution_record,
+                    strict_dunder=strict_dunder,
+                    record_mode=record_mode,
+                    dispatch_started=dispatch_started,
+                    dispatch_request_id=dispatch_request_id,
+                    active_submission=active_submission,
+                )
+            except BaseException:
+                if dispatch_started[0]:
+                    self.clear_transformation_log(tf_checksum)
+                raise
+        finally:
+            worker._unregister_nested_dispatch_callback(
+                dispatch_request_id, mark_dispatch_started
+            )
+        return result_checksum
+
+    async def _run_uncached_impl(
+        self,
+        transformation_dict: Dict[str, Any],
+        *,
+        tf_checksum: Checksum,
+        tf_dunder,
+        scratch: bool,
+        require_value: bool,
+        force_local: bool,
+        store_execution_record: bool,
+        strict_dunder: bool,
+        record_mode: bool,
+        dispatch_started: list[bool],
+        dispatch_request_id: str,
+        active_submission: _ActiveSubmission | None = None,
+    ) -> Checksum:
+        captured_logs: dict[str, Any] | None = None
+        delegated_in_worker = False
         execution = "process" if force_local else get_execution()
         meta = (
             transformation_dict.get("__meta__")
@@ -793,6 +936,8 @@ class TransformationCache:
             buffer_writer.flush()
             ### /NOTE
 
+            dispatch_started[0] = True
+            self.clear_transformation_log(tf_checksum)
             result_checksum = await _await_with_active_cancellation(
                 jobserver_remote.run_transformation(
                     transformation_dict,
@@ -813,6 +958,7 @@ class TransformationCache:
                     compilation_context = result_checksum.get("compilation_context")
                     job_validation_payload = result_checksum.get("job_validation")
                     runtime_metadata = result_checksum.get("record_runtime")
+                    captured_logs = result_checksum.get("logs")
                     result_checksum = result_checksum.get("result_checksum")
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
@@ -824,16 +970,23 @@ class TransformationCache:
             result_checksum = Checksum(result_checksum)
         elif worker.has_spawned() and not is_worker() and not force_local:
             _debug("dispatching transformation to worker pool")
-            result_checksum = await _await_with_active_cancellation(
+            dispatch_started[0] = True
+            self.clear_transformation_log(tf_checksum)
+            dispatch_result = await _await_with_active_cancellation(
                 worker.dispatch_to_workers(
                     transformation_dict,
                     tf_checksum=tf_checksum,
                     tf_dunder=tf_dunder,
                     scratch=scratch,
                     strict_dunder=strict_dunder,
+                    with_logs=True,
                 ),
                 active_submission,
             )
+            if isinstance(dispatch_result, tuple) and len(dispatch_result) == 2:
+                result_checksum, captured_logs = dispatch_result
+            else:
+                result_checksum = dispatch_result
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
                 if remote_job_dir is not None:
@@ -843,6 +996,7 @@ class TransformationCache:
                 raise SpawnedTransformationError(result_checksum)
             result_checksum = Checksum(result_checksum)
         elif is_worker() and not force_local:
+            delegated_in_worker = True
             assert not worker.has_spawned()
             _debug("forwarding transformation request to parent")
             # Plain await, no _await_with_active_cancellation: cancellation of
@@ -859,6 +1013,7 @@ class TransformationCache:
                 tf_dunder=tf_dunder,
                 scratch=scratch,
                 strict_dunder=strict_dunder,
+                dispatch_request_id=dispatch_request_id,
             )
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
@@ -878,10 +1033,12 @@ class TransformationCache:
             loop = asyncio.get_running_loop()
             gpu_sampler = start_gpu_memory_sampler()
             try:
-                result_checksum = await _await_with_active_cancellation(
+                dispatch_started[0] = True
+                self.clear_transformation_log(tf_checksum)
+                result_checksum, captured_logs = await _await_with_active_cancellation(
                     loop.run_in_executor(
                         None,
-                        run_transformation_dict,
+                        _run_process_transformation_with_capture,
                         transformation_dict,
                         tf_checksum,
                         tf_dunder,
@@ -1052,6 +1209,11 @@ class TransformationCache:
         )
         await _await_buffer_writer(result_checksum)
 
+        if not delegated_in_worker:
+            log_entry = dict(captured_logs) if isinstance(captured_logs, dict) else {}
+            log_entry["wall_time_seconds"] = wall_time_seconds
+            self.set_transformation_log(tf_checksum, log_entry)
+
         return result_checksum
 
     def run_sync(
@@ -1147,11 +1309,55 @@ class TransformationCache:
 _transformation_cache_instance: TransformationCache | None = None
 
 
+def format_transformation_log(entry: dict[str, Any]) -> str:
+    """Format a stored successful execution log for the public logs API."""
+    separator = "*" * 49
+
+    def truncate(stream: str) -> str:
+        if len(stream) <= 10_000:
+            return stream
+        skipped = len(stream) - 4_960 - 5_000
+        return (
+            stream[:4_960]
+            + f"\n...(skipped {skipped} characters)...\n"
+            + stream[-5_000:]
+        )
+
+    sections = []
+    stdout = entry.get("stdout", "")
+    stderr = entry.get("stderr", "")
+    if stdout:
+        sections.append(
+            f"{separator}\n* Standard output\n{separator}\n{truncate(stdout)}"
+        )
+    if stderr:
+        sections.append(
+            f"{separator}\n* Standard error\n{separator}\n{truncate(stderr)}"
+        )
+    wall_time_seconds = entry.get("wall_time_seconds", 0.0)
+    sections.append(
+        f"{separator}\nExecution time: {wall_time_seconds:.1f} seconds\n{separator}"
+    )
+    return "\n".join(sections)
+
+
 def get_transformation_cache() -> TransformationCache:
     global _transformation_cache_instance
     if _transformation_cache_instance is None:
         _transformation_cache_instance = TransformationCache()
     return _transformation_cache_instance
+
+
+def get_transformation_log(tf_checksum) -> dict[str, Any] | None:
+    return get_transformation_cache().get_transformation_log(tf_checksum)
+
+
+def set_transformation_log(tf_checksum, log: dict[str, Any]) -> None:
+    get_transformation_cache().set_transformation_log(tf_checksum, log)
+
+
+def clear_transformation_log(tf_checksum) -> None:
+    get_transformation_cache().clear_transformation_log(tf_checksum)
 
 
 async def run(
@@ -1319,6 +1525,10 @@ __all__ = [
     "TransformationCache",
     "build_compilation_context_checksum",
     "get_transformation_cache",
+    "get_transformation_log",
+    "format_transformation_log",
+    "set_transformation_log",
+    "clear_transformation_log",
     "is_cached",
     "is_cached_sync",
     "run",

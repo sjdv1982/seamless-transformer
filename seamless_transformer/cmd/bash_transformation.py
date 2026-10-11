@@ -3,6 +3,8 @@
 import asyncio
 import builtins
 import os
+import sys
+from contextlib import nullcontext
 
 from seamless import Checksum
 from seamless.checksum.serialize import serialize_sync as serialize
@@ -202,7 +204,12 @@ async def _declare_irreproducible_transformation(transformation, result_checksum
 
 
 def run_transformation(
-    transformation_dict: dict, *, undo: bool, fingertip=False, scratch=False
+    transformation_dict: dict,
+    *,
+    undo: bool,
+    fingertip=False,
+    scratch=False,
+    streaming=False,
 ):
     """Run a cmd-seamless transformation dict.
     First convert it into a bash transformation."""
@@ -218,10 +225,18 @@ def run_transformation(
         scratch=scratch,
         tf_dunder=tf_dunder,
     )
-    result_checksum = compute_transformation_sync(
-        transformation,
-        require_value=bool(fingertip),
-    )
+    transformation.streaming = bool(streaming)
+    if streaming:
+        from seamless_transformer.stream_output import stream_output_to
+
+        stream_context = stream_output_to(sys.stderr)
+    else:
+        stream_context = nullcontext()
+    with stream_context:
+        result_checksum = compute_transformation_sync(
+            transformation,
+            require_value=bool(fingertip),
+        )
     if result_checksum is None:
         if transformation.exception is not None:
             raise RuntimeError(transformation.exception)
@@ -234,7 +249,12 @@ def run_transformation(
 
 
 async def run_transformation_async(
-    transformation_dict: dict, *, undo: bool, fingertip=False, scratch=False
+    transformation_dict: dict,
+    *,
+    undo: bool,
+    fingertip=False,
+    scratch=False,
+    streaming=False,
 ):
     """Run a cmd-seamless transformation dict.
     First convert it into a bash transformation."""
@@ -247,7 +267,15 @@ async def run_transformation_async(
         scratch=scratch,
         tf_dunder=tf_dunder,
     )
-    result_checksum = await transformation.computation(require_value=bool(fingertip))
+    transformation.streaming = bool(streaming)
+    if streaming:
+        from seamless_transformer.stream_output import stream_output_to
+
+        stream_context = stream_output_to(sys.stderr)
+    else:
+        stream_context = nullcontext()
+    with stream_context:
+        result_checksum = await transformation.computation(require_value=bool(fingertip))
     if result_checksum is None:
         if transformation.exception is not None:
             raise RuntimeError(transformation.exception)
