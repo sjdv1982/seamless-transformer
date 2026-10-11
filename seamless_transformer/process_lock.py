@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+import os
 import threading
 from typing import Callable, Iterator
 
@@ -13,9 +14,21 @@ from seamless.error_envelope import ExecutionCanceledError as TransformationCanc
 NOTIFY_ENV = "SEAMLESS_PROCESS_LOCK_NOTIFY"
 _ACQUIRE_INTERVAL = 0.05
 _PROCESS_LOCK = threading.Lock()
+_NOTIFY_GUARD = threading.Lock()
+_NOTIFIED_PID: int | None = None
 _CURRENT_HOLDER: ContextVar[_LockHolder | None] = ContextVar(
     "seamless_process_lock_holder", default=None
 )
+
+
+def _reset_notify_state_after_fork() -> None:
+    global _NOTIFY_GUARD, _NOTIFIED_PID
+    _NOTIFY_GUARD = threading.Lock()
+    _NOTIFIED_PID = None
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_notify_state_after_fork)
 
 
 class _LockHolder:
@@ -81,9 +94,37 @@ def scope(
 
 def drop_for_nested_work() -> None:
     """Give up the current body's process lock before it submits work."""
+    global _NOTIFIED_PID
     holder = current_holder()
     if holder is not None:
         holder.drop()
+        return
+
+    notify_path = os.environ.get(NOTIFY_ENV)
+    if not notify_path:
+        return
+
+    pid = os.getpid()
+    with _NOTIFY_GUARD:
+        if _NOTIFIED_PID == pid:
+            return
+        # Mark before I/O: signaling is best-effort and a single attempt per
+        # process is enough, even when the pipe has already disappeared.
+        _NOTIFIED_PID = pid
+
+    try:
+        notify_fd = os.open(notify_path, os.O_WRONLY | os.O_NONBLOCK)
+    except Exception:
+        return
+    try:
+        os.write(notify_fd, b"\x00")
+    except Exception:
+        pass
+    finally:
+        try:
+            os.close(notify_fd)
+        except Exception:
+            pass
 
 
 __all__ = ["NOTIFY_ENV", "scope", "current_holder", "drop_for_nested_work"]

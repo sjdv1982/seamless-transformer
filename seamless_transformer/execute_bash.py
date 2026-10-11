@@ -23,6 +23,7 @@ from .compression_utils import (
     decompress_bytes,
     strip_compression_suffix,
 )
+from .process_lock import NOTIFY_ENV, current_holder
 
 
 def _write_file(pinname, data, filemode, *, directory=None):
@@ -217,6 +218,10 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
 
     process = None
     tempdir = None
+    notify_path = None
+    notify_fd = None
+    selector = None
+    output_streams = []
 
     def _kill_process_group():
         if process is None:
@@ -250,6 +255,17 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
             FILESYSTEM,
             directory=tempdir,
         )
+        holder = current_holder()
+        notify_holder = holder if holder is not None and holder.held else None
+        if notify_holder is not None:
+            candidate_notify_path = tempdir + ".notify"
+            os.mkfifo(candidate_notify_path, 0o600)
+            notify_path = candidate_notify_path
+            notify_fd = os.open(notify_path, os.O_RDWR | os.O_NONBLOCK)
+            env[NOTIFY_ENV] = notify_path
+        else:
+            env.pop(NOTIFY_ENV, None)
+
         process = subprocess.Popen(
             bashcode2,
             shell=True,
@@ -266,6 +282,14 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
         selector = selectors.DefaultSelector()
         pipes = ((stdout, "stdout"), (stderr, "stderr"))
         pending = {stream: bytearray() for stream, _ in pipes}
+        registered_pipes = set()
+        for stream, stream_name in pipes:
+            output_streams.append(stream)
+            selector.register(stream, selectors.EVENT_READ, stream_name)
+            registered_pipes.add(stream)
+        notify_registered = notify_fd is not None
+        if notify_registered:
+            selector.register(notify_fd, selectors.EVENT_READ, "notify")
 
         def write_output(stream_name, line):
             try:
@@ -276,33 +300,52 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
                 return
             getattr(sys, stream_name).write(text)
 
-        try:
-            for stream, stream_name in pipes:
-                selector.register(stream, selectors.EVENT_READ, stream_name)
-            while selector.get_map():
-                for key, _ in selector.select():
-                    stream = cast(IO[bytes], key.fileobj)
-                    chunk = os.read(stream.fileno(), 65536)
-                    if not chunk:
-                        selector.unregister(stream)
-                        tail = pending[stream]
-                        if tail:
-                            write_output(key.data, bytes(tail))
-                            tail.clear()
-                        continue
-                    buffer = pending[stream]
-                    buffer.extend(chunk)
-                    while True:
-                        newline = buffer.find(b"\n")
-                        if newline < 0:
-                            break
-                        line = bytes(buffer[: newline + 1])
-                        del buffer[: newline + 1]
-                        write_output(key.data, line)
-        finally:
-            selector.close()
-            for stream, _ in pipes:
-                stream.close()
+        def read_notify_fifo():
+            if notify_fd is None:
+                return
+            try:
+                data = os.read(notify_fd, 65536)
+            except OSError:
+                return
+            if data and notify_holder is not None:
+                notify_holder.drop()
+
+        while process.poll() is None or registered_pipes or notify_registered:
+            if process.poll() is not None and notify_registered:
+                # Drain a signal sent just before process exit, then stop
+                # watching. Descendants cannot signal after the script exits.
+                read_notify_fifo()
+                selector.unregister(notify_fd)
+                notify_registered = False
+            if process.poll() is not None and not registered_pipes:
+                break
+            if not selector.get_map():
+                process.wait()
+                break
+            timeout = 0.1 if notify_registered else None
+            for key, _ in selector.select(timeout):
+                if key.data == "notify":
+                    read_notify_fifo()
+                    continue
+                stream = cast(IO[bytes], key.fileobj)
+                chunk = os.read(stream.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(stream)
+                    registered_pipes.discard(stream)
+                    tail = pending[stream]
+                    if tail:
+                        write_output(key.data, bytes(tail))
+                        tail.clear()
+                    continue
+                buffer = pending[stream]
+                buffer.extend(chunk)
+                while True:
+                    newline = buffer.find(b"\n")
+                    if newline < 0:
+                        break
+                    line = bytes(buffer[: newline + 1])
+                    del buffer[: newline + 1]
+                    write_output(key.data, line)
         process.wait()
 
         if process.returncode:
@@ -373,6 +416,26 @@ Error: Result folder RESULT is empty
             result = read_data(resultdata)
     finally:
         _kill_process_group()
+        if selector is not None:
+            try:
+                selector.close()
+            except Exception:
+                pass
+        for stream in output_streams:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        if notify_fd is not None:
+            try:
+                os.close(notify_fd)
+            except OSError:
+                pass
+        if notify_path is not None:
+            try:
+                os.unlink(notify_path)
+            except OSError:
+                pass
         if tempdir is not None:
             shutil.rmtree(tempdir, ignore_errors=True)
 

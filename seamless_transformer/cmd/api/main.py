@@ -1245,6 +1245,9 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         return 0
 
     elif args.qsubmit:
+        from seamless_transformer.process_lock import drop_for_nested_work
+
+        drop_for_nested_work()
         if args.auto_confirm not in ("yes", "no"):
             msg(
                 1,
