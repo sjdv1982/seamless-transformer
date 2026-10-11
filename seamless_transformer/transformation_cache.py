@@ -826,8 +826,62 @@ class TransformationCache:
         record_mode: bool,
         active_submission: _ActiveSubmission | None = None,
     ) -> Checksum:
-        self.clear_transformation_log(tf_checksum)
+        dispatch_started = [False]
+        dispatch_request_id = uuid.uuid4().hex
+
+        def mark_dispatch_started() -> None:
+            if dispatch_started[0]:
+                return
+            dispatch_started[0] = True
+            self.clear_transformation_log(tf_checksum)
+
+        worker._register_nested_dispatch_callback(
+            dispatch_request_id, mark_dispatch_started
+        )
+        try:
+            try:
+                result_checksum = await self._run_uncached_impl(
+                    transformation_dict,
+                    tf_checksum=tf_checksum,
+                    tf_dunder=tf_dunder,
+                    scratch=scratch,
+                    require_value=require_value,
+                    force_local=force_local,
+                    store_execution_record=store_execution_record,
+                    strict_dunder=strict_dunder,
+                    record_mode=record_mode,
+                    dispatch_started=dispatch_started,
+                    dispatch_request_id=dispatch_request_id,
+                    active_submission=active_submission,
+                )
+            except BaseException:
+                if dispatch_started[0]:
+                    self.clear_transformation_log(tf_checksum)
+                raise
+        finally:
+            worker._unregister_nested_dispatch_callback(
+                dispatch_request_id, mark_dispatch_started
+            )
+        return result_checksum
+
+    async def _run_uncached_impl(
+        self,
+        transformation_dict: Dict[str, Any],
+        *,
+        tf_checksum: Checksum,
+        tf_dunder,
+        scratch: bool,
+        require_value: bool,
+        force_local: bool,
+        store_execution_record: bool,
+        strict_dunder: bool,
+        record_mode: bool,
+        dispatch_started: list[bool],
+        dispatch_request_id: str,
+        active_submission: _ActiveSubmission | None = None,
+    ) -> Checksum:
         captured_logs: dict[str, Any] | None = None
+        delegated_in_worker = False
         execution = "process" if force_local else get_execution()
         meta = (
             transformation_dict.get("__meta__")
@@ -882,6 +936,8 @@ class TransformationCache:
             buffer_writer.flush()
             ### /NOTE
 
+            dispatch_started[0] = True
+            self.clear_transformation_log(tf_checksum)
             result_checksum = await _await_with_active_cancellation(
                 jobserver_remote.run_transformation(
                     transformation_dict,
@@ -914,6 +970,8 @@ class TransformationCache:
             result_checksum = Checksum(result_checksum)
         elif worker.has_spawned() and not is_worker() and not force_local:
             _debug("dispatching transformation to worker pool")
+            dispatch_started[0] = True
+            self.clear_transformation_log(tf_checksum)
             dispatch_result = await _await_with_active_cancellation(
                 worker.dispatch_to_workers(
                     transformation_dict,
@@ -938,6 +996,7 @@ class TransformationCache:
                 raise SpawnedTransformationError(result_checksum)
             result_checksum = Checksum(result_checksum)
         elif is_worker() and not force_local:
+            delegated_in_worker = True
             assert not worker.has_spawned()
             _debug("forwarding transformation request to parent")
             # Plain await, no _await_with_active_cancellation: cancellation of
@@ -954,6 +1013,7 @@ class TransformationCache:
                 tf_dunder=tf_dunder,
                 scratch=scratch,
                 strict_dunder=strict_dunder,
+                dispatch_request_id=dispatch_request_id,
             )
             if isinstance(result_checksum, str):
                 remote_job_dir = parse_remote_job_written(result_checksum)
@@ -973,6 +1033,8 @@ class TransformationCache:
             loop = asyncio.get_running_loop()
             gpu_sampler = start_gpu_memory_sampler()
             try:
+                dispatch_started[0] = True
+                self.clear_transformation_log(tf_checksum)
                 result_checksum, captured_logs = await _await_with_active_cancellation(
                     loop.run_in_executor(
                         None,
@@ -1147,9 +1209,10 @@ class TransformationCache:
         )
         await _await_buffer_writer(result_checksum)
 
-        log_entry = dict(captured_logs) if isinstance(captured_logs, dict) else {}
-        log_entry["wall_time_seconds"] = wall_time_seconds
-        self.set_transformation_log(tf_checksum, log_entry)
+        if not delegated_in_worker:
+            log_entry = dict(captured_logs) if isinstance(captured_logs, dict) else {}
+            log_entry["wall_time_seconds"] = wall_time_seconds
+            self.set_transformation_log(tf_checksum, log_entry)
 
         return result_checksum
 

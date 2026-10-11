@@ -214,8 +214,12 @@ _DELEGATE_OWNER_CANCEL_TTL = float(
 )
 _DEFAULT_DASK_BASE_PRIORITY = 10
 _DELEGATE_DEBUG_CLEANUP = bool(os.environ.get("SEAMLESS_DEBUG_DELEGATE_CLEANUP"))
+_DELEGATE_DISPATCH_STARTED_MARKER = "_seamless_dispatch_started"
 _DELEGATE_PROXY_LOCK = threading.Lock()
 _DELEGATE_PROXY_FUTURES: Dict[str, _cf.Future] = {}
+_DELEGATE_PROXY_DISPATCH_CALLBACKS: Dict[str, str] = {}
+_NESTED_DISPATCH_CALLBACK_LOCK = threading.Lock()
+_NESTED_DISPATCH_CALLBACKS: Dict[str, Any] = {}
 _DELEGATE_POLL_TASK: asyncio.Task | None = None
 _CURRENT_OWNER_DASK_KEY = threading.local()
 _CURRENT_OWNER_DASK_PRIORITY = threading.local()
@@ -349,17 +353,30 @@ async def _delegate_poll_loop() -> None:
         await asyncio.sleep(_DELEGATE_POLL_INTERVAL)
         with _DELEGATE_PROXY_LOCK:
             tokens = list(_DELEGATE_PROXY_FUTURES.keys())
+            request_ids = {
+                token: _DELEGATE_PROXY_DISPATCH_CALLBACKS.get(token)
+                for token in tokens
+            }
             cancelled = [
                 token
                 for token, fut in _DELEGATE_PROXY_FUTURES.items()
                 if fut.cancelled()
             ]
+            cancelled_request_ids = {
+                token: _DELEGATE_PROXY_DISPATCH_CALLBACKS.get(token)
+                for token in cancelled
+            }
             for token in cancelled:
                 _DELEGATE_PROXY_FUTURES.pop(token, None)
+                _DELEGATE_PROXY_DISPATCH_CALLBACKS.pop(token, None)
         if cancelled:
             try:
                 await _request_parent_async(
-                    "delegate_transformation_cancel", {"tokens": cancelled}
+                    "delegate_transformation_cancel",
+                    {
+                        "tokens": cancelled,
+                        "delegate_request_ids": cancelled_request_ids,
+                    },
                 )
             except Exception:
                 pass
@@ -367,26 +384,76 @@ async def _delegate_poll_loop() -> None:
             continue
         for idx in range(0, len(tokens), _DELEGATE_POLL_BATCH):
             batch = tokens[idx : idx + _DELEGATE_POLL_BATCH]
+            batch_request_ids = {
+                token: request_ids.get(token) for token in batch
+            }
             try:
                 response = await _request_parent_async(
-                    "delegate_transformation_poll", {"tokens": batch}
+                    "delegate_transformation_poll",
+                    {
+                        "tokens": batch,
+                        "delegate_request_ids": batch_request_ids,
+                    },
                 )
             except Exception:
                 continue
             if not isinstance(response, dict):
                 continue
             for token, payload in response.items():
-                with _DELEGATE_PROXY_LOCK:
-                    fut = _DELEGATE_PROXY_FUTURES.pop(token, None)
-                if fut is None:
+                expected_request_id = batch_request_ids.get(token)
+                if expected_request_id is not None:
+                    with _DELEGATE_PROXY_LOCK:
+                        active_future = _DELEGATE_PROXY_FUTURES.get(token)
+                        active_request_id = _DELEGATE_PROXY_DISPATCH_CALLBACKS.get(
+                            token
+                        )
+                    if (
+                        active_future is None
+                        or active_request_id != expected_request_id
+                    ):
+                        continue
+                if expected_request_id is not None and (
+                    not isinstance(payload, dict)
+                    or payload.get("delegate_request_id") != expected_request_id
+                ):
                     continue
                 status = payload.get("status") if isinstance(payload, dict) else None
+                if status == "started":
+                    with _DELEGATE_PROXY_LOCK:
+                        active_future = _DELEGATE_PROXY_FUTURES.get(token)
+                        dispatch_request_id = (
+                            _DELEGATE_PROXY_DISPATCH_CALLBACKS.get(token)
+                            if active_future is not None
+                            else None
+                        )
+                    if active_future is not None and dispatch_request_id is not None:
+                        _notify_nested_dispatch_started(dispatch_request_id)
+                    continue
+                with _DELEGATE_PROXY_LOCK:
+                    fut = _DELEGATE_PROXY_FUTURES.pop(token, None)
+                    dispatch_callback = _DELEGATE_PROXY_DISPATCH_CALLBACKS.pop(
+                        token, None
+                    )
+                if fut is None:
+                    continue
+                dispatch_started = (
+                    isinstance(payload, dict)
+                    and payload.get("dispatch_started") is True
+                )
+                if dispatch_started and dispatch_callback is not None:
+                    _notify_nested_dispatch_started(dispatch_callback)
                 if status == "done":
                     result_hex = payload.get("result")
                     try:
-                        fut.set_result(Checksum(result_hex))
+                        result = Checksum(result_hex)
                     except Exception:
                         fut.set_result(result_hex)
+                    else:
+                        logs = payload.get("logs")
+                        if isinstance(logs, dict):
+                            fut.set_result((result, logs))
+                        else:
+                            fut.set_result(result)
                 elif status == "error":
                     err = payload.get("error") if isinstance(payload, dict) else "error"
                     if not isinstance(err, str):
@@ -655,6 +722,9 @@ def _patch_worker_primitives() -> None:
 
 
 def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
+    tf_checksum = payload.get("tf_checksum")
+    if tf_checksum is not None:
+        _clear_nested_transformation_log(tf_checksum)
     stdout_buffer = io.BytesIO()
     stderr_buffer = io.BytesIO()
     stdout_wrapper = io.TextIOWrapper(
@@ -663,6 +733,7 @@ def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
     stderr_wrapper = io.TextIOWrapper(
         stderr_buffer, encoding="utf-8", write_through=True
     )
+    wall_start = time.perf_counter()
     try:
         with output_route(stdout=stdout_wrapper, stderr=stderr_wrapper):
             result = _execute_transformation_impl(
@@ -681,6 +752,18 @@ def _execute_transformation(payload: Dict[str, Any]) -> Checksum | str:
                 stderr_wrapper.detach()
             except Exception:
                 pass
+    wall_time_seconds = round(time.perf_counter() - wall_start, 6)
+    if isinstance(result, Checksum) and tf_checksum is not None:
+        stdout_text = stdout_buffer.getvalue().decode("utf-8", errors="replace")
+        stderr_text = stderr_buffer.getvalue().decode("utf-8", errors="replace")
+        _set_nested_transformation_log(
+            tf_checksum,
+            {
+                "stdout": _truncate_log_text(stdout_text),
+                "stderr": _truncate_log_text(stderr_text),
+                "wall_time_seconds": wall_time_seconds,
+            },
+        )
     return _append_output_trailers(result, stdout_buffer, stderr_buffer)
 
 
@@ -724,6 +807,52 @@ def _truncate_log_text(value: str) -> str:
         + f"\n...(skipped {skipped} characters)...\n"
         + value[-5_000:]
     )
+
+
+def _get_nested_transformation_log(tf_checksum) -> dict[str, Any] | None:
+    from .transformation_cache import get_transformation_log
+
+    return get_transformation_log(tf_checksum)
+
+
+def _set_nested_transformation_log(tf_checksum, logs: Any) -> None:
+    if not isinstance(logs, dict):
+        return
+    from .transformation_cache import set_transformation_log
+
+    set_transformation_log(tf_checksum, logs)
+
+
+def _clear_nested_transformation_log(tf_checksum) -> None:
+    from .transformation_cache import clear_transformation_log
+
+    try:
+        clear_transformation_log(tf_checksum)
+    except Exception:
+        # Preserve the transformation's own error formatting for an invalid
+        # checksum payload; log cleanup is best-effort.
+        pass
+
+
+def _register_nested_dispatch_callback(request_id: str, callback) -> None:
+    with _NESTED_DISPATCH_CALLBACK_LOCK:
+        _NESTED_DISPATCH_CALLBACKS[request_id] = callback
+
+
+def _unregister_nested_dispatch_callback(request_id: str, callback) -> None:
+    with _NESTED_DISPATCH_CALLBACK_LOCK:
+        if _NESTED_DISPATCH_CALLBACKS.get(request_id) is callback:
+            _NESTED_DISPATCH_CALLBACKS.pop(request_id, None)
+
+
+def _notify_nested_dispatch_started(request_id: str) -> None:
+    with _NESTED_DISPATCH_CALLBACK_LOCK:
+        callback = _NESTED_DISPATCH_CALLBACKS.pop(request_id, None)
+    if callback is not None:
+        try:
+            callback()
+        except Exception:
+            pass
 
 
 def _execute_transformation_request(
@@ -985,9 +1114,18 @@ async def _child_initializer(channel: ChildChannel) -> None:
                 "Failed to apply stream throttle update in child", exc_info=True
             )
 
+    def handle_delegate_transformation_started(payload: Any) -> None:
+        if isinstance(payload, dict):
+            request_id = payload.get("delegate_request_id")
+            if isinstance(request_id, str):
+                _notify_nested_dispatch_started(request_id)
+
     channel.add_request_handler("execute_transformation", handle_execute)
     channel.add_request_handler("quiet", handle_quiet)
     channel.add_event_handler("stream_throttle", handle_stream_throttle)
+    channel.add_event_handler(
+        "delegate_transformation_started", handle_delegate_transformation_started
+    )
     if not channel.ready_notified:
         try:
             await channel.notify_ready({"role": "worker"})
@@ -1791,24 +1929,80 @@ class _WorkerManager:
             self._delegate_registry[token] = entry
 
     def _delegate_payload_from_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        request_id = entry.get("delegate_request_id")
         futures = entry.get("futures")
         thin = getattr(futures, "thin", None) if futures is not None else None
+        dispatch_started = bool(
+            entry.get("dispatch_started_notified")
+            or getattr(futures, "_seamless_dispatch_started", False)
+        )
         if thin is None:
-            return {"status": "error", "error": "missing thin future"}
+            return {
+                "status": "error",
+                "error": "missing thin future",
+                "dispatch_started": dispatch_started,
+                "delegate_request_id": request_id,
+            }
         try:
             if thin.cancelled():
-                return {"status": "cancelled"}
+                return {
+                    "status": "cancelled",
+                    "dispatch_started": dispatch_started,
+                    "delegate_request_id": request_id,
+                }
             if not thin.done():
-                return {"status": "cancelled"}
+                return {
+                    "status": "cancelled",
+                    "dispatch_started": dispatch_started,
+                    "delegate_request_id": request_id,
+                }
             tf_checksum_hex, result_checksum_hex, exc, _logs = thin.result()
         except Exception as exc:
-            return {"status": "error", "error": repr(exc)}
+            return {
+                "status": "error",
+                "error": repr(exc),
+                "dispatch_started": dispatch_started,
+                "delegate_request_id": request_id,
+            }
         if exc:
             err = exc if isinstance(exc, str) else repr(exc)
-            return {"status": "error", "error": err}
+            return {
+                "status": "error",
+                "error": err,
+                "dispatch_started": dispatch_started
+                or (
+                    isinstance(_logs, dict)
+                    and _logs.get(_DELEGATE_DISPATCH_STARTED_MARKER) is True
+                ),
+                "delegate_request_id": request_id,
+            }
+        if isinstance(_logs, dict) and _logs.get(
+            _DELEGATE_DISPATCH_STARTED_MARKER
+        ) is True:
+            dispatch_started = True
         if result_checksum_hex is None:
-            return {"status": "error", "error": "Result checksum unavailable"}
-        return {"status": "done", "result": result_checksum_hex}
+            return {
+                "status": "error",
+                "error": "Result checksum unavailable",
+                "dispatch_started": dispatch_started
+                or (
+                    isinstance(_logs, dict)
+                    and _logs.get(_DELEGATE_DISPATCH_STARTED_MARKER) is True
+                ),
+                "delegate_request_id": request_id,
+            }
+        payload = {
+            "status": "done",
+            "result": result_checksum_hex,
+            "dispatch_started": dispatch_started,
+            "delegate_request_id": request_id,
+        }
+        if isinstance(_logs, dict):
+            logs = dict(_logs)
+            logs.pop(_DELEGATE_DISPATCH_STARTED_MARKER, None)
+            if logs:
+                payload["logs"] = logs
+        return payload
 
     async def _get_delegate_completed(self, token: str) -> Dict[str, Any] | None:
         if self._delegate_lock is None:
@@ -2027,7 +2221,18 @@ class _WorkerManager:
                 owner_cancelled,
             ) in stale:
                 if owner_cancelled or owner_closed:
-                    payload = {"status": "cancelled"}
+                    payload = {
+                        "status": "cancelled",
+                        "dispatch_started": bool(
+                            entry.get("dispatch_started_notified")
+                            or getattr(
+                                entry.get("futures"),
+                                "_seamless_dispatch_started",
+                                False,
+                            )
+                        ),
+                        "delegate_request_id": entry.get("delegate_request_id"),
+                    }
                 else:
                     payload = self._delegate_payload_from_entry(entry)
                 if payload:
@@ -2060,10 +2265,25 @@ class _WorkerManager:
         async with self._delegate_lock:
             return self._delegate_registry.get(token)
 
-    async def _pop_delegate_entry(self, token: str) -> Dict[str, Any] | None:
+    async def _pop_delegate_entry(
+        self,
+        token: str,
+        *,
+        expected_entry: Dict[str, Any] | None = None,
+        expected_request_id: str | None = None,
+    ) -> Dict[str, Any] | None:
         if self._delegate_lock is None:
             return None
         async with self._delegate_lock:
+            current = self._delegate_registry.get(token)
+            if expected_entry is not None and current is not expected_entry:
+                return None
+            if (
+                expected_request_id is not None
+                and current is not None
+                and current.get("delegate_request_id") != expected_request_id
+            ):
+                return None
             return self._delegate_registry.pop(token, None)
 
     def _release_delegate_entry(self, entry: Dict[str, Any], *, cancel: bool) -> None:
@@ -2108,6 +2328,7 @@ class _WorkerManager:
     ) -> Dict[str, Any]:
         permission_granted = False
         release_permission = None
+        dispatch_started = False
         try:
             transformation_dict = payload.get("transformation_dict")
             tf_checksum = Checksum(payload["tf_checksum"])
@@ -2128,7 +2349,15 @@ class _WorkerManager:
                 )
             cached_result = await self._get_cached_transformation_result(tf_checksum)
             if cached_result is not None:
-                return {"status": "done", "result": cached_result.hex()}
+                response = {
+                    "status": "done",
+                    "result": cached_result.hex(),
+                    "dispatch_started": False,
+                }
+                logs = _get_nested_transformation_log(tf_checksum)
+                if logs is not None:
+                    response["logs"] = logs
+                return response
             await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
             if transformation_dict is None:
                 try:
@@ -2259,6 +2488,22 @@ class _WorkerManager:
                         break
                 if not has_capacity:
                     return {"status": "refused"}
+                dispatch_started = True
+                endpoint = getattr(_handle, "endpoint", None)
+                if endpoint is not None:
+                    try:
+                        await endpoint.notify(
+                            "delegate_transformation_started",
+                            {
+                                "tf_checksum": tf_checksum.hex(),
+                                "delegate_request_id": payload.get(
+                                    "delegate_request_id"
+                                ),
+                            },
+                        )
+                    except Exception:
+                        pass
+                dispatch_start = time.perf_counter()
                 result = await self._dispatch(
                     transformation_dict,
                     tf_checksum,
@@ -2267,7 +2512,15 @@ class _WorkerManager:
                     enforce_limit=True,
                     owner_dask_key=owner_dask_key,
                     nparallel=nparallel,
+                    want_logs=True,
                 )
+                dispatch_wall_time = round(time.perf_counter() - dispatch_start, 6)
+                logs = None
+                if isinstance(result, tuple) and len(result) == 2:
+                    result, logs = result
+                if isinstance(logs, dict):
+                    logs = dict(logs)
+                    logs["wall_time_seconds"] = dispatch_wall_time
                 if isinstance(result, Checksum):
                     try:
                         result.tempref()
@@ -2275,8 +2528,19 @@ class _WorkerManager:
                             result.transfer_write()
                     except Exception:
                         pass
-                    return {"status": "done", "result": result.hex()}
-                return {"status": "error", "error": result}
+                    response = {
+                        "status": "done",
+                        "result": result.hex(),
+                        "dispatch_started": dispatch_started,
+                    }
+                    if isinstance(logs, dict):
+                        response["logs"] = logs
+                    return response
+                return {
+                    "status": "error",
+                    "error": result,
+                    "dispatch_started": dispatch_started,
+                }
 
             if (
                 owner_dask_key is not None
@@ -2333,6 +2597,7 @@ class _WorkerManager:
                     "release_permission": release_permission,
                     "owner": getattr(_handle, "name", None),
                     "owner_dask_key": owner_dask_key,
+                    "delegate_request_id": payload.get("delegate_request_id"),
                     "last_seen": time.monotonic(),
                 },
             )
@@ -2343,84 +2608,204 @@ class _WorkerManager:
                     release_permission()
                 except Exception:
                     pass
-            return {"status": "error", "error": traceback.format_exc()}
+            return {
+                "status": "error",
+                "error": traceback.format_exc(),
+                "dispatch_started": dispatch_started,
+            }
 
     async def _handle_delegate_transformation_poll(
         self, _handle, payload: Dict[str, Any]
     ) -> Dict[str, Any]:
         tokens = []
+        request_ids: Dict[str, str] = {}
         if isinstance(payload, dict):
             tokens = payload.get("tokens", []) or []
+            raw_request_ids = payload.get("delegate_request_ids")
+            if isinstance(raw_request_ids, dict):
+                request_ids = raw_request_ids
         results: Dict[str, Any] = {}
+
+        def _reply(token, result, request_id=None):
+            result = dict(result)
+            if request_id is not None:
+                result["delegate_request_id"] = request_id
+            results[str(token)] = result
+
         now = time.monotonic()
         for token in tokens:
+            request_id = request_ids.get(str(token))
             entry = await self._get_delegate_entry(token)
             if entry is None:
                 completed = await self._get_delegate_completed(str(token))
                 if completed is not None:
-                    results[str(token)] = completed
+                    entry_request_id = completed.get("delegate_request_id")
+                    if (
+                        request_id is not None
+                        and entry_request_id != request_id
+                    ):
+                        _reply(token, {"status": "unknown"}, request_id)
+                    else:
+                        _reply(
+                            token,
+                            completed,
+                            request_id or entry_request_id,
+                        )
                 else:
-                    results[str(token)] = {"status": "unknown"}
+                    _reply(token, {"status": "unknown"}, request_id)
                 continue
+            entry_request_id = entry.get("delegate_request_id")
+            if request_id is not None and entry_request_id != request_id:
+                _reply(token, {"status": "unknown"}, request_id)
+                continue
+            response_request_id = request_id or entry_request_id
             entry["last_seen"] = now
             futures = entry.get("futures")
             thin = getattr(futures, "thin", None) if futures is not None else None
             if thin is None:
-                entry = await self._pop_delegate_entry(token)
+                dispatch_started = bool(
+                    entry.get("dispatch_started_notified")
+                    or getattr(futures, "_seamless_dispatch_started", False)
+                )
+                entry = await self._pop_delegate_entry(token, expected_entry=entry)
                 if entry is not None:
                     self._release_delegate_entry(entry, cancel=True)
-                results[str(token)] = {
-                    "status": "error",
-                    "error": "missing thin future",
-                }
+                _reply(
+                    token,
+                    {
+                        "status": "error",
+                        "error": "missing thin future",
+                        "dispatch_started": dispatch_started,
+                    },
+                    response_request_id,
+                )
                 continue
+            if getattr(futures, "_seamless_dispatch_started", False):
+                entry["dispatch_started_notified"] = True
             if thin.cancelled():
-                entry = await self._pop_delegate_entry(token)
+                entry = await self._pop_delegate_entry(token, expected_entry=entry)
                 if entry is not None:
                     self._release_delegate_entry(entry, cancel=True)
-                results[str(token)] = {"status": "cancelled"}
+                _reply(
+                    token,
+                    {
+                        "status": "cancelled",
+                        "dispatch_started": bool(
+                            entry and entry.get("dispatch_started_notified")
+                        ),
+                    },
+                    response_request_id,
+                )
                 continue
             if not thin.done():
+                if entry.get("dispatch_started_notified"):
+                    _reply(token, {"status": "started"}, response_request_id)
                 continue
             try:
-                _tf_checksum_hex, result_checksum_hex, exc, _logs = thin.result()
+                _tf_checksum_hex, result_checksum_hex, exc, logs = thin.result()
             except Exception as exc:
-                entry = await self._pop_delegate_entry(token)
+                dispatch_started = bool(
+                    entry.get("dispatch_started_notified")
+                    or getattr(futures, "_seamless_dispatch_started", False)
+                )
+                entry = await self._pop_delegate_entry(token, expected_entry=entry)
                 if entry is not None:
                     self._release_delegate_entry(entry, cancel=True)
-                results[str(token)] = {"status": "error", "error": repr(exc)}
+                _reply(
+                    token,
+                    {
+                        "status": "error",
+                        "error": repr(exc),
+                        "dispatch_started": dispatch_started,
+                    },
+                    response_request_id,
+                )
                 continue
+            log_dispatch_started = bool(
+                isinstance(logs, dict)
+                and logs.get(_DELEGATE_DISPATCH_STARTED_MARKER) is True
+            )
+            public_logs = logs
+            if isinstance(logs, dict) and _DELEGATE_DISPATCH_STARTED_MARKER in logs:
+                public_logs = dict(logs)
+                public_logs.pop(_DELEGATE_DISPATCH_STARTED_MARKER, None)
             if exc:
                 err = exc
                 if not isinstance(err, str):
                     err = repr(err)
-                status_payload = {"status": "error", "error": err}
+                status_payload = {
+                    "status": "error",
+                    "error": err,
+                    "dispatch_started": bool(
+                        entry.get("dispatch_started_notified")
+                        or getattr(futures, "_seamless_dispatch_started", False)
+                        or log_dispatch_started
+                    ),
+                }
             elif result_checksum_hex is None:
                 status_payload = {
                     "status": "error",
                     "error": "Result checksum unavailable",
+                    "dispatch_started": bool(
+                        entry.get("dispatch_started_notified")
+                        or getattr(futures, "_seamless_dispatch_started", False)
+                        or log_dispatch_started
+                    ),
                 }
             else:
-                status_payload = {"status": "done", "result": result_checksum_hex}
-            entry = await self._pop_delegate_entry(token)
+                dispatch_started = bool(
+                    entry.get("dispatch_started_notified")
+                    or getattr(futures, "_seamless_dispatch_started", False)
+                    or log_dispatch_started
+                )
+                status_payload = {
+                    "status": "done",
+                    "result": result_checksum_hex,
+                    "dispatch_started": dispatch_started,
+                }
+                if isinstance(public_logs, dict) and public_logs:
+                    status_payload["logs"] = public_logs
+            entry = await self._pop_delegate_entry(token, expected_entry=entry)
             if entry is not None:
                 self._release_delegate_entry(entry, cancel=True)
-            results[str(token)] = status_payload
+            _reply(token, status_payload, response_request_id)
         return results
 
     async def _handle_delegate_transformation_cancel(
         self, _handle, payload: Dict[str, Any]
     ) -> Dict[str, Any]:
         tokens = []
+        request_ids: Dict[str, str] = {}
         if isinstance(payload, dict):
             tokens = payload.get("tokens", []) or []
+            raw_request_ids = payload.get("delegate_request_ids")
+            if isinstance(raw_request_ids, dict):
+                request_ids = raw_request_ids
         cancelled: list[str] = []
         for token in tokens:
-            entry = await self._pop_delegate_entry(token)
+            request_id = request_ids.get(str(token))
+            if self._delegate_lock is None:
+                continue
+            async with self._delegate_lock:
+                entry = self._delegate_registry.get(str(token))
+                if entry is not None:
+                    if (
+                        request_id is not None
+                        and entry.get("delegate_request_id") != request_id
+                    ):
+                        continue
+                    self._delegate_registry.pop(str(token), None)
+                else:
+                    completed = self._delegate_completed.get(str(token))
+                    if completed is not None and request_id is not None:
+                        completed_payload = completed[0]
+                        if (
+                            completed_payload.get("delegate_request_id")
+                            != request_id
+                        ):
+                            continue
+                    self._delegate_completed.pop(str(token), None)
             if entry is None:
-                if self._delegate_lock is not None:
-                    async with self._delegate_lock:
-                        self._delegate_completed.pop(str(token), None)
                 continue
             self._release_delegate_entry(entry, cancel=True)
             cancelled.append(str(token))
@@ -3200,13 +3585,17 @@ async def forward_to_parent(
     tf_dunder: Dict[str, Any],
     scratch: bool,
     strict_dunder: bool = False,
+    dispatch_request_id: str | None = None,
 ) -> Checksum | str:
+    if dispatch_request_id is None:
+        dispatch_request_id = uuid.uuid4().hex
     payload = {
         "transformation_dict": transformation_dict,
         "tf_checksum": Checksum(tf_checksum),
         "tf_dunder": tf_dunder,
         "scratch": scratch,
         "strict_dunder": bool(strict_dunder),
+        "delegate_request_id": dispatch_request_id,
     }
     owner_dask_key = _get_current_owner_dask_key()
     if owner_dask_key is not None:
@@ -3224,13 +3613,23 @@ async def forward_to_parent(
             token = response.get("token")
             if not token:
                 raise RuntimeError("Missing delegation token")
+            with _DELEGATE_PROXY_LOCK:
+                _DELEGATE_PROXY_DISPATCH_CALLBACKS[str(token)] = dispatch_request_id
             proxy_future = _register_delegate_token(str(token))
             result = await asyncio.wrap_future(proxy_future)
             if isinstance(result, dict) and "error" in result:
                 from seamless.error_envelope import decode_error
                 raise decode_error(result)
+            delegated_logs = None
+            if (
+                isinstance(result, tuple)
+                and len(result) == 2
+                and isinstance(result[0], Checksum)
+            ):
+                result, delegated_logs = result
             if isinstance(result, str):
                 if result == _DELEGATION_REFUSED:
+                    _notify_nested_dispatch_started(dispatch_request_id)
                     loop = asyncio.get_running_loop()
                     return await loop.run_in_executor(
                         None, _execute_transformation, payload
@@ -3246,8 +3645,10 @@ async def forward_to_parent(
                 raise RuntimeError(
                     f"Delegated transformation returned non-checksum result: {result!r}"
                 )
+            _set_nested_transformation_log(tf_checksum, delegated_logs)
             return result
         if status == "refused":
+            _notify_nested_dispatch_started(dispatch_request_id)
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, _execute_transformation, payload)
         if status == "done":
@@ -3257,18 +3658,30 @@ async def forward_to_parent(
             if parse_remote_job_written(result_hex) is not None:
                 return result_hex
             try:
-                return Checksum(result_hex)
+                result = Checksum(result_hex)
             except Exception as exc:
                 raise RuntimeError(
                     f"Invalid delegated checksum: {result_hex!r}"
                 ) from exc
+            logs = response.get("logs")
+            if response.get("dispatch_started") is True:
+                _notify_nested_dispatch_started(dispatch_request_id)
+            _set_nested_transformation_log(tf_checksum, logs)
+            return result
+        if status == "cancelled":
+            if response.get("dispatch_started") is True:
+                _notify_nested_dispatch_started(dispatch_request_id)
+            raise RuntimeError("Delegated transformation cancelled")
         if status == "error":
+            if response.get("dispatch_started") is True:
+                _notify_nested_dispatch_started(dispatch_request_id)
             raise RuntimeError(
                 response.get("error") or "Delegated transformation error"
             )
     result = response
     if isinstance(result, str):
         if result == _DELEGATION_REFUSED:
+            _notify_nested_dispatch_started(dispatch_request_id)
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, _execute_transformation, payload)
         if parse_remote_job_written(result) is not None:
