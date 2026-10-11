@@ -30,12 +30,13 @@ def _close_seamless_session():
 def test_transformation_async(spawned_workers):
     @delayed
     def func(a, b, delay):
-        from seamless_transformer import global_lock
         import time
 
-        with global_lock:
-            time.sleep(delay)
+        time.sleep(delay)
         return 10000 * a + 2 * b
+
+    func.process_lock = True
+    assert func.meta["process_lock"] is True
 
     async def main():
         tasks = [func(n, -1, DELAY).task() for n in range(N)]

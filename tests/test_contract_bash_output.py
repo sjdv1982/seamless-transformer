@@ -12,7 +12,7 @@ import pytest
 
 @pytest.mark.parametrize("returncode", [0, 7])
 def test_bash_drains_one_mib_stderr_before_stdout_eof(returncode):
-    # Isolate the timeout so a regression cannot leave pytest holding global_lock.
+    # Isolate the timeout so a stream-draining regression cannot hang pytest.
     script = textwrap.dedent(
         f"""
         import contextlib
@@ -44,11 +44,9 @@ def test_bash_drains_one_mib_stderr_before_stdout_eof(returncode):
 
 
 def test_bash_cleanup_failure_releases_lock_and_uses_safe_session(monkeypatch, tmp_path):
-    import seamless_transformer
+    from seamless_transformer import process_lock
 
     module = importlib.import_module("seamless_transformer.execute_bash")
-    lock = threading.Lock()
-    monkeypatch.setattr(seamless_transformer, "global_lock", lock)
     monkeypatch.setattr(module, "write_bash_job", lambda code, *args, **kwargs: (os.environ.copy(), code))
     monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **kwargs: str(tmp_path))
     # Avoid installing the production SIGTERM handler in the pytest process.
@@ -71,9 +69,12 @@ def test_bash_cleanup_failure_releases_lock_and_uses_safe_session(monkeypatch, t
     monkeypatch.setattr(module.shutil, "rmtree", rmtree)
     monkeypatch.setattr(module.subprocess, "Popen", popen)
     with pytest.raises(OSError, match="injected cleanup failure"):
-        module.execute_bash("printf 42 > RESULT", [], None, {}, {}, "mixed")
+        with process_lock.scope(True):
+            module.execute_bash("printf 42 > RESULT", [], None, {}, {}, "mixed")
     assert os.getcwd() == old_cwd
-    assert lock.acquire(blocking=False), "bash leaked global_lock when directory cleanup failed"
-    lock.release()
+    import time
+    deadline = time.monotonic() + 1
+    with process_lock.scope(True, should_abort=lambda: time.monotonic() > deadline):
+        assert process_lock.current_holder() is not None
     assert options[0].get("start_new_session") is True
     assert "preexec_fn" not in options[0]

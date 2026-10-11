@@ -18,11 +18,11 @@ def test_dependencies():
     @delayed
     def slow_add_delayed(a, b, c=None, d=None, e=None) -> float:
         import time
-        from seamless.transformer import global_lock
-
-        with global_lock:
-            time.sleep(1)
+        time.sleep(1)
         return sum([x for x in (a, b, c, d, e) if x is not None])
+
+    slow_add_delayed.process_lock = True
+    assert slow_add_delayed.meta["process_lock"] is True
 
     slow_add = direct(slow_add_delayed)
 

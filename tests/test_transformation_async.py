@@ -11,11 +11,12 @@ def test_transformation_async():
     @delayed
     def func(a, b, delay):
         import time
-        from seamless.transformer import global_lock
 
-        with global_lock:
-            time.sleep(delay)
+        time.sleep(delay)
         return 2 * b + 10 * a
+
+    func.process_lock = True
+    assert func.meta["process_lock"] is True
 
     async def main():
         tasks = [func(n, -1, DELAY).task() for n in range(N)]

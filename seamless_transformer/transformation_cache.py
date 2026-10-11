@@ -20,6 +20,7 @@ from seamless import Buffer, CacheMissError, Checksum, is_worker
 from . import observation
 from . import record_utils as _record_utils
 from . import worker
+from .process_lock import drop_for_nested_work
 from .probe_index import ensure_record_bucket_preconditions, is_record_probe
 from .record_assembly import (
     _COMPILED_VALIDATION_CACHE,
@@ -125,6 +126,7 @@ def _run_process_transformation_with_capture(
     tf_dunder,
     scratch,
     require_value,
+    should_abort=None,
 ):
     with process_output_route() as (stdout_capture, stderr_capture):
         try:
@@ -134,6 +136,7 @@ def _run_process_transformation_with_capture(
                 tf_dunder,
                 scratch,
                 require_value,
+                should_abort=should_abort,
             )
         except Exception as exc:
             if isinstance(exc, TransformationCancelledError):
@@ -1054,6 +1057,11 @@ class TransformationCache:
                         tf_dunder,
                         scratch,
                         require_value,
+                        (
+                            (lambda: active_submission.canceled)
+                            if active_submission is not None
+                            else None
+                        ),
                     ),
                     active_submission,
                 )
@@ -1478,6 +1486,7 @@ async def recompute_from_transformation_checksum(
     scratch: bool = True,
     require_value: bool = True,
 ) -> Checksum | None:
+    drop_for_nested_work()
     try:
         tf_checksum_obj = Checksum(tf_checksum)
         transformation_dict = await tf_checksum_obj.resolution(celltype="plain")
@@ -1504,6 +1513,7 @@ def recompute_from_transformation_checksum_sync(
     scratch: bool = True,
     require_value: bool = True,
 ) -> Checksum | None:
+    drop_for_nested_work()
     try:
         tf_checksum_obj = Checksum(tf_checksum)
         transformation_dict = tf_checksum_obj.resolve(celltype="plain")

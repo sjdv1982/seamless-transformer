@@ -6,15 +6,11 @@ and eager public-API imports add noticeable startup time to short commands.
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 
 class SeamlessStreamTransformationError(RuntimeError):
     pass
-
-
-global_lock = threading.Lock()
 
 
 _LAZY_EXPORTS = {
@@ -40,6 +36,10 @@ _LAZY_EXPORTS = {
 
 
 def __getattr__(name: str) -> Any:
+    if name == "global_lock":
+        raise AttributeError(
+            "global_lock has been retired; set process_lock in transformation metadata"
+        )
     try:
         module_name, attr_name = _LAZY_EXPORTS[name]
     except KeyError as exc:
@@ -70,6 +70,5 @@ __all__ = [
     "TransformationList",
     "spawn",
     "has_spawned",
-    "global_lock",
     "SeamlessStreamTransformationError",
 ]

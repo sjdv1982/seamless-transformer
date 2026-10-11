@@ -197,8 +197,6 @@ conda activate {conda_environment_}
 def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN):
     from . import SeamlessStreamTransformationError
 
-    from . import global_lock
-
     env = os.environ.copy()
 
     def read_data(data):
@@ -237,7 +235,6 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
             shutil.rmtree(tempdir, ignore_errors=True)
         raise SystemExit()
 
-    global_lock.acquire()
     try:
         tempdir = os.path.abspath(
             tempfile.mkdtemp(prefix="seamless-bash-transformer")
@@ -375,14 +372,9 @@ Error: Result folder RESULT is empty
                 resultdata = f.read()
             result = read_data(resultdata)
     finally:
-        try:
-            _kill_process_group()
-        finally:
-            try:
-                if tempdir is not None:
-                    shutil.rmtree(tempdir, ignore_errors=True)
-            finally:
-                global_lock.release()
+        _kill_process_group()
+        if tempdir is not None:
+            shutil.rmtree(tempdir, ignore_errors=True)
 
     return result
 

@@ -105,18 +105,29 @@ def test_nested_multi_in_running_loop():
             def leaf(label: str):
                 import os
                 import time
-                from seamless.transformer import global_lock
 
-                with global_lock:
-                    time.sleep(0.5)
+                time.sleep(0.5)
                 return label, os.getpid()
 
             leaf = delayed(leaf)
-            left = leaf(f"{label}-a").start()
+            leaf.meta = {"process_lock": True}
+            left_handle = leaf(f"{label}-a")
+
+            assert left_handle.meta["process_lock"] is True
+            left = left_handle.start()
             right = leaf(f"{label}-b").start()
             return left.run(), right.run()
 
+        # The legacy lock enclosed only leaf bodies; keep the direct middle
+        # body concurrent while its leaf bodies retain their explicit lock.
+        middle.process_lock = False
+        assert middle.meta["process_lock"] is False
+
         return middle(f"{label}-1"), middle(f"{label}-2")
+
+    # The legacy lock enclosed only the leaf body; outer work stays concurrent.
+    outer.process_lock = False
+    assert outer.meta["process_lock"] is False
 
     def body():
         tasks = [outer(f"job-{idx}").start() for idx in range(job_count)]

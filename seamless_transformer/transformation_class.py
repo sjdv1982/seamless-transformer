@@ -20,6 +20,7 @@ from .transformation_utils import (
     resolve_lock_meta,
     tf_get_buffer,
 )
+from .process_lock import drop_for_nested_work
 from . import worker
 
 _SCRATCH_REQUEST: ContextVar[tuple[int, bool] | None] = ContextVar(
@@ -213,6 +214,11 @@ def loop_is_nested(loop: asyncio.AbstractEventLoop) -> bool:
 
 
 _LOOP_THREADS: dict[asyncio.AbstractEventLoop, threading.Thread] = {}
+_LOOP_THREAD_READY: dict[asyncio.AbstractEventLoop, threading.Event] = {}
+_LOOP_THREAD_START_ERRORS: dict[
+    asyncio.AbstractEventLoop, list[BaseException]
+] = {}
+_LOOP_THREADS_LOCK = threading.Lock()
 
 
 def _compute_executor_max_workers() -> int:
@@ -236,17 +242,80 @@ def _ensure_loop_running(loop: asyncio.AbstractEventLoop) -> None:
 
     if loop.is_running():
         return
-    thread = _LOOP_THREADS.get(loop)
-    if thread and thread.is_alive():
-        return
+    with _LOOP_THREADS_LOCK:
+        if loop.is_running():
+            return
+        thread = _LOOP_THREADS.get(loop)
+        ready = _LOOP_THREAD_READY.get(loop)
+        startup_errors = _LOOP_THREAD_START_ERRORS.get(loop)
+        if thread is None or not thread.is_alive():
+            ready = threading.Event()
+            startup_errors = []
 
-    def _runner():
-        asyncio.set_event_loop(loop)
-        loop.run_forever()
+            def _runner():
+                try:
+                    asyncio.set_event_loop(loop)
+                    # The callback fires only after run_forever has marked the
+                    # loop running, closing the create_task startup race.
+                    loop.call_soon(ready.set)
+                    loop.run_forever()
+                except BaseException as exc:
+                    startup_errors.append(exc)
+                    ready.set()
+                    raise
 
-    thread = threading.Thread(target=_runner, daemon=True, name="seamless-loop")
-    _LOOP_THREADS[loop] = thread
-    thread.start()
+            thread = threading.Thread(target=_runner, daemon=True, name="seamless-loop")
+            _LOOP_THREADS[loop] = thread
+            _LOOP_THREAD_READY[loop] = ready
+            _LOOP_THREAD_START_ERRORS[loop] = startup_errors
+            thread.start()
+
+    assert ready is not None
+    assert startup_errors is not None
+    ready.wait()
+    if startup_errors:
+        raise RuntimeError("Could not start the transformation event loop") from startup_errors[0]
+    if not loop.is_running():
+        raise RuntimeError("Transformation event loop stopped during startup")
+
+
+def _create_task_on_loop(
+    loop: asyncio.AbstractEventLoop,
+    coroutine,
+    done_callback=None,
+) -> asyncio.Task:
+    """Create a task on its loop thread, waking a loop owned by another thread."""
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if not loop.is_running() or running_loop is loop:
+        task = loop.create_task(coroutine)
+        if done_callback is not None:
+            task.add_done_callback(done_callback)
+        return task
+
+    created = threading.Event()
+    result = []
+    error = []
+
+    def _create():
+        try:
+            task = loop.create_task(coroutine)
+            if done_callback is not None:
+                task.add_done_callback(done_callback)
+            result.append(task)
+        except BaseException as exc:
+            error.append(exc)
+        finally:
+            created.set()
+
+    loop.call_soon_threadsafe(_create)
+    created.wait()
+    if error:
+        raise error[0]
+    return result[0]
 
 
 _DRIVER_LOOP: asyncio.AbstractEventLoop | None = None
@@ -1180,6 +1249,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
         if api_origin == "dependency":
             return self._compute_dependency()
+        drop_for_nested_work()
         self._record_driver_context()
         self._enable_result_holding()
         return self._compute_sync(api_origin)
@@ -1228,6 +1298,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         If require_value is True, it is made sure that the value will be available too.
         (If only the checksum is available, the transformation will be recomputed.)
         """
+        drop_for_nested_work()
         ensure_open("transformation computation")
         self._record_driver_context()
         self._enable_result_holding()
@@ -1285,6 +1356,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         _internal: bool = False,
     ) -> "Transformation[T]":
         """Ensure the computation task is scheduled; return self for chaining."""
+        drop_for_nested_work()
         ensure_open("transformation start")
         self._record_driver_context()
         if not _internal:
@@ -1296,10 +1368,11 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         if _dask_available() and not self._prefer_local_execution():
             if self._computation_task is None:
                 loop = loop or _sync_task_loop()
-                self._computation_task = loop.create_task(
-                    self._compute_with_dask_async(require_value=False)
+                self._computation_task = _create_task_on_loop(
+                    loop,
+                    self._compute_with_dask_async(require_value=False),
+                    self._future_cleanup,
                 )
-                self._computation_task.add_done_callback(self._future_cleanup)
             return self
         if self._computation_task is not None or self._computation_future is not None:
             return self
@@ -1312,10 +1385,11 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             if not local_only:
                 loop = loop or get_event_loop()
                 _ensure_loop_running(loop)
-                self._computation_task = loop.create_task(
-                    self._computation(require_value=False)
+                self._computation_task = _create_task_on_loop(
+                    loop,
+                    self._computation(require_value=False),
+                    self._future_cleanup,
                 )
-                self._computation_task.add_done_callback(self._future_cleanup)
                 return self
         if is_worker() or worker.has_spawned():
             # Offload to a thread with its own event loop for concurrency.
@@ -1325,10 +1399,11 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             return self
         loop = loop or _sync_task_loop()
         _ensure_loop_running(loop)
-        self._computation_task = loop.create_task(
-            self._computation(require_value=False)
+        self._computation_task = _create_task_on_loop(
+            loop,
+            self._computation(require_value=False),
+            self._future_cleanup,
         )
-        self._computation_task.add_done_callback(self._future_cleanup)
         return self
 
     @property
@@ -1422,6 +1497,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
         First runs .compute, then resolve the result checksum into a value.
         Raise RuntimeError in case of an exception."""
+        drop_for_nested_work()
         ensure_open("transformation task")
         self._record_driver_context()
         self._enable_result_holding()

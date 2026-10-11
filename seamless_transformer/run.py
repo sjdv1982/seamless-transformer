@@ -26,10 +26,12 @@ from .transformation_utils import (
     merge_transformation_meta,
     pack_deep_structure,
     resolve_env_checksum,
+    resolve_lock_meta,
 )
 from .probe_index import ensure_record_bucket_preconditions_sync, is_record_probe
 from .record_runtime import get_record_mode
 from .execute_bash import execute_bash, write_bash_job
+from .process_lock import scope as process_lock_scope
 
 PACK_DEEP_RESULTS = True
 
@@ -88,6 +90,7 @@ def run_transformation_dict(
     tf_dunder: Dict[str, Any] | None = None,
     scratch: bool = False,
     require_value: bool = False,
+    should_abort=None,
 ) -> Checksum | str:
     """Execute a transformation dict.
 
@@ -128,7 +131,12 @@ def run_transformation_dict(
     meta = merge_transformation_meta(transformation, tf_dunder)
     if meta:
         transformation["__meta__"] = meta
-    driver_active = bool(meta.get("driver")) if isinstance(meta, dict) else False
+    try:
+        process_lock_active, driver_active = resolve_lock_meta(meta)
+    except (TypeError, ValueError) as exc:
+        raise type(exc)(
+            f"Invalid transformation metadata for 'driver' and 'process_lock': {exc}"
+        ) from exc
 
     env_checksum0 = resolve_env_checksum(transformation, tf_dunder)
     env_dict = {}
@@ -218,14 +226,15 @@ def run_transformation_dict(
         inputs = []
 
     if _is_compiled_transformation(transformation, tf_dunder):
-        result = call_compiled_transform(
-            transformation,
-            tf_dunder or {},
-            code,
-            namespace,
-            output_celltype,
-            meta,
-        )
+        with process_lock_scope(process_lock_active, should_abort=should_abort):
+            result = call_compiled_transform(
+                transformation,
+                tf_dunder or {},
+                code,
+                namespace,
+                output_celltype,
+                meta,
+            )
         if result is None and output_celltype not in ("plain", "mixed", "bytes"):
             raise RuntimeError(f"Null result is not allowed for celltype {output_celltype!r}")
         if is_deep_celltype(output_celltype):
@@ -245,15 +254,16 @@ def run_transformation_dict(
                 result_buffer.mark_scratch()
         return result_checksum
 
-    result = _execute(
-        module_workspace,
-        code,
-        identifier,
-        namespace,
-        inputs,
-        output_name,
-        driver_active,
-    )
+    with process_lock_scope(process_lock_active, should_abort=should_abort):
+        result = _execute(
+            module_workspace,
+            code,
+            identifier,
+            namespace,
+            inputs,
+            output_name,
+            driver_active,
+        )
 
     if result is None and output_celltype not in ("plain", "mixed", "bytes"):
         raise RuntimeError(f"Null result is not allowed for celltype {output_celltype!r}")

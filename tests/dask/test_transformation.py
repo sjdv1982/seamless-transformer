@@ -15,23 +15,24 @@ def test_transformation():
     @direct
     def func(a, b, delay) -> float:
         import time
-        from seamless.transformer import global_lock
 
-        with global_lock:
-            print("RUN", a, b)
-            time.sleep(delay)
+        print("RUN", a, b)
+        time.sleep(delay)
         return float(10 * a + 2 * b)
 
+    func.meta = {"process_lock": True}
     assert func(30, 12, 0) == 324
     assert func(40, 2, 0) == 404
     x = func(1, 2, 3)
     assert x == 14
 
     func2 = delayed(func)
+    func2.meta = {"process_lock": True}
 
     start = time.perf_counter()
     tf1 = func2(3, 12, DELAY)
     tf1.construct()
+    assert tf1.meta["process_lock"] is True
     result1 = tf1.run()
     first_duration = time.perf_counter() - start
 
