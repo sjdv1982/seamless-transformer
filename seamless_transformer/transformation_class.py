@@ -17,6 +17,7 @@ from seamless.util.get_event_loop import get_event_loop
 from .transformation_utils import (
     extract_tf_dunder,
     normalize_optional_pins_for_construction,
+    resolve_lock_meta,
     tf_get_buffer,
 )
 from . import worker
@@ -1563,9 +1564,18 @@ def transformation_from_pretransformation(
             meta_payload.update(existing_meta)
         if frozen_meta:
             meta_payload.update(frozen_meta)
-        if meta_payload:
-            dunder["__meta__"] = deepcopy(meta_payload)
+        process_lock, driver = resolve_lock_meta(meta_payload)
+        meta_payload["process_lock"] = process_lock
+        meta_payload["driver"] = driver
+        dunder["__meta__"] = deepcopy(meta_payload)
         return dunder
+
+    def _sync_transformation_lock_meta(transformation_obj: "Transformation") -> None:
+        meta_payload = prepared_tf_dunder.get("__meta__", {})
+        process_lock, driver = resolve_lock_meta(meta_payload)
+        transformation_obj._meta["process_lock"] = process_lock
+        transformation_obj._meta["driver"] = driver
+        transformation_obj._meta_view = _readonly_recursive(transformation_obj._meta)
 
     def _prepared_dict_with_dependencies(
         transformation_obj: "Transformation",
@@ -1631,6 +1641,7 @@ def transformation_from_pretransformation(
         if post_prepare_sync is not None:
             post_prepare_sync(prepared_execution_dict)
         prepared_tf_dunder = _collect_tf_dunder(prepared_execution_dict)
+        _sync_transformation_lock_meta(transformation_obj)
         tf_buffer = tf_get_buffer(prepared_execution_dict)
         tf_checksum = tf_buffer.get_checksum()
         tf_buffer.tempref()
@@ -1648,6 +1659,7 @@ def transformation_from_pretransformation(
         elif post_prepare_sync is not None:
             post_prepare_sync(prepared_execution_dict)
         prepared_tf_dunder = _collect_tf_dunder(prepared_execution_dict)
+        _sync_transformation_lock_meta(transformation_obj)
         tf_buffer = tf_get_buffer(prepared_execution_dict)
         tf_checksum = tf_buffer.get_checksum()
         tf_buffer.tempref()
@@ -1692,6 +1704,12 @@ def transformation_from_pretransformation(
     def destructor(transformation_obj):  # pylint: disable=unused-argument
         pre_transformation.release()
 
+    initial_meta = _collect_tf_dunder(frozen_payload_template).get("__meta__", {})
+    initial_process_lock, initial_driver = resolve_lock_meta(initial_meta)
+    transformation_meta = deepcopy(frozen_meta)
+    transformation_meta["process_lock"] = initial_process_lock
+    transformation_meta["driver"] = initial_driver
+
     tf = Transformation(
         pre_transformation.result_celltype,
         constructor_sync,
@@ -1699,7 +1717,7 @@ def transformation_from_pretransformation(
         evaluator_sync,
         evaluator_async,
         upstream_dependencies=frozen_dependencies,
-        meta=frozen_meta,
+        meta=transformation_meta,
         destructor=destructor,
         pretransformation=pre_transformation,
         tf_dunder=explicit_tf_dunder,

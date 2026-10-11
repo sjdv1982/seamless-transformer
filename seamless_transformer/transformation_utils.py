@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Dict, Any
 
@@ -195,6 +196,80 @@ def merge_transformation_meta(
     return meta
 
 
+def resolve_lock_meta(meta) -> tuple[bool, bool]:
+    """Return ``(process_lock, driver)`` using legacy-compatible defaults."""
+
+    if meta is None:
+        meta = {}
+    if not isinstance(meta, Mapping):
+        raise TypeError("meta must be a mapping")
+
+    driver = meta.get("driver", False)
+    if not isinstance(driver, bool):
+        raise TypeError("meta['driver'] must be a bool")
+    if "process_lock" in meta:
+        process_lock = meta["process_lock"]
+        if not isinstance(process_lock, bool):
+            raise TypeError("meta['process_lock'] must be a bool")
+    else:
+        process_lock = not driver
+
+    if process_lock and driver:
+        raise ValueError("meta cannot set both 'process_lock' and 'driver' to true")
+    return process_lock, driver
+
+
+def apply_lock_meta_update(meta: dict, update: dict) -> None:
+    """Apply a metadata update while keeping ``driver`` and ``process_lock`` coupled."""
+
+    if not isinstance(meta, dict):
+        raise TypeError("meta must be a dict")
+    if not isinstance(update, Mapping):
+        raise TypeError("update must be a mapping")
+
+    current_process_lock, current_driver = resolve_lock_meta(meta)
+    next_driver = current_driver
+    if "driver" in update:
+        driver_value = update["driver"]
+        if driver_value is None or driver_value is False:
+            next_driver = False
+        elif driver_value is True:
+            next_driver = True
+        else:
+            raise TypeError("update['driver'] must be a bool or None")
+
+    has_process_lock = "process_lock" in update
+    next_process_lock = current_process_lock
+    if has_process_lock:
+        process_lock_value = update["process_lock"]
+        if not isinstance(process_lock_value, bool):
+            raise TypeError("update['process_lock'] must be a bool")
+        next_process_lock = process_lock_value
+
+    if next_driver:
+        if has_process_lock and next_process_lock:
+            raise ValueError("meta cannot set both 'process_lock' and 'driver' to true")
+        next_process_lock = False
+    elif next_process_lock and next_driver:
+        raise ValueError("meta cannot set both 'process_lock' and 'driver' to true")
+
+    for key, value in update.items():
+        if key not in ("driver", "process_lock"):
+            meta[key] = value
+
+    if "driver" in update:
+        if next_driver:
+            meta["driver"] = True
+        else:
+            meta.pop("driver", None)
+
+    if has_process_lock or ("driver" in update and next_driver):
+        meta["process_lock"] = next_process_lock
+    elif "driver" in update and current_driver and "process_lock" not in meta:
+        # Preserve the implied false value when clearing a legacy driver-only meta.
+        meta["process_lock"] = current_process_lock
+
+
 def resolve_env_checksum(
     transformation: Dict[str, Any], tf_dunder: Dict[str, Any] | None = None
 ):
@@ -261,6 +336,8 @@ __all__ = [
     "extract_tf_dunder",
     "extract_job_dunder",
     "merge_transformation_meta",
+    "resolve_lock_meta",
+    "apply_lock_meta_update",
     "resolve_env_checksum",
     "is_deep_celltype",
     "unpack_deep_structure",
