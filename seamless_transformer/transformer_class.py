@@ -749,9 +749,8 @@ class TransformerCore(Generic[P, R]):
         if not isinstance(value, bool):
             raise TypeError(type(value))
         if self._workflow_backend is not None:
-            raise AttributeError(
-                "process_lock updates are not supported for workflow-bound transformers"
-            )
+            self._workflow_backend.process_lock = value
+            return
         self.meta = {"process_lock": value}
 
     @property
