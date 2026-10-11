@@ -290,7 +290,6 @@ def _write_remote_bash_job(
     """Materialize a bash transformation job and stop before execution."""
 
     job_directory = os.path.abspath(os.path.expanduser(remote_job_dir))
-    old_cwd = os.getcwd()
     try:
         os.makedirs(job_directory)
     except PermissionError as exc:
@@ -303,23 +302,17 @@ def _write_remote_bash_job(
             "cluster scratch directory."
         ) from exc
     try:
-        os.chdir(job_directory)
         write_bash_job(
             bashcode,
             pins_,
             conda_environment,
             pins,
             filesystem,
+            directory=job_directory,
         )
     except Exception:
-        os.chdir(old_cwd)
         shutil.rmtree(job_directory, ignore_errors=True)
         raise
-    finally:
-        try:
-            os.chdir(old_cwd)
-        except Exception:
-            pass
     return job_directory
 
 
