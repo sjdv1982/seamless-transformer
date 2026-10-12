@@ -1,27 +1,20 @@
-"""Registry of compiled language definitions for seamless-transformer.
+"""Registries and helpers for languages accepted by Seamless transformers.
 
-Built-in languages (``c``, ``cpp``, ``fortran``, ``rust``) are registered
-automatically on import. Additional languages can be registered at runtime
-with :func:`define_compiled_language`.
+``python`` and ``bash`` are the built-in native languages. Register compiled
+languages with ``define_compiled_language`` and languages executed by Python
+handlers with ``register_language_handler``. ``available_languages()`` returns
+each language accepted by the ``Transformer`` factory and its kind
+(``"native"``, ``"compiled"`` or ``"handler"``). A language name belongs to
+one kind.
 
-Example — register a custom language::
+Built-in compiled languages and the ``r`` and ``julia`` handlers register
+when this module is imported. Registration does not import or start R or Julia,
+or load ``ryp`` or ``juliacall``.
 
-    from seamless_transformer.languages import define_compiled_language
-
-    define_compiled_language(
-        name="mylang",
-        compilation={
-            "compiler": "mycc",
-            "mode": "object",
-            "options": ["-O2", "-fPIC"],
-            "debug_options": ["-g", "-fPIC"],
-            "profile_options": [],
-            "release_options": [],
-            "compile_flag": "-c",
-            "output_flag": "-o",
-            "language_flag": "",
-        },
-    )
+``run_in_interpreter_thread()`` runs a callable on one process-wide thread
+associated with its name, for embedded interpreters that need a stable calling
+thread. Calls from that thread run inline. Set
+``SEAMLESS_INTERPRETER_THREAD=0`` to run on the calling thread.
 """
 
 from __future__ import annotations
@@ -77,7 +70,8 @@ def define_compiled_language(name: str, compilation: dict) -> None:
     - ``language_flag`` (str): flag to tell the compiler which language to use
       (e.g. ``"-x c"`` for gcc); empty string if not needed.
 
-    Raises ``ValueError`` if ``mode`` is not ``"object"`` or ``"archive"``.
+    Raises ``ValueError`` if ``mode`` is not ``"object"``, ``"archive"`` or
+    ``"package"``.
     """
 
     if name in _NATIVE_LANGUAGES or name in _handler_registry:
@@ -132,7 +126,13 @@ _HANDLER_ARGUMENTS = frozenset(
     }
 )
 def register_language_handler(name, handler, *, metavars=None) -> None:
-    """Register a Python function that executes one transformation language."""
+    """Register a Python function as the executor for a transformer language.
+
+    The name must not be native or compiled. ``handler`` must be one named,
+    source-retrievable function without a closure. Its supported parameters
+    are passed by keyword. ``metavars`` maps setting names to their defaults.
+    Registering the same handler language again replaces its registration.
+    """
 
     import ast
     import inspect
@@ -209,7 +209,10 @@ def register_language_handler(name, handler, *, metavars=None) -> None:
 
 
 def get_language_handler(name: str) -> LanguageHandlerDefinition:
-    """Return the registered handler definition for the given language."""
+    """Return the registered handler definition for ``name``.
+
+    Raises ``KeyError`` when no handler is registered for that name.
+    """
 
     try:
         return _handler_registry[name]
@@ -224,7 +227,10 @@ def is_handler_language(name: str) -> bool:
 
 
 def available_languages() -> dict[str, str]:
-    """Return each constructible language and its transformer kind."""
+    """Return Transformer-constructible languages mapped to their kind.
+
+    Each value is ``"native"``, ``"compiled"`` or ``"handler"``.
+    """
 
     result = {name: "native" for name in _NATIVE_LANGUAGES}
     result.update({name: "compiled" for name in _registry})
