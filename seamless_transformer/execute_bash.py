@@ -51,6 +51,53 @@ def _is_shell_env_name(name: str) -> bool:
     return True
 
 
+def _conda_run_command(conda_environment):
+    """Build the conda-run argv for a named environment or prefix."""
+    executable = os.environ.get("SEAMLESS_CONDA_EXE") or os.environ.get("CONDA_EXE")
+    if executable is None:
+        conda_root = os.environ.get("CONDA_ROOT")
+        executable = (
+            os.path.join(conda_root, "bin", "conda") if conda_root else "conda"
+        )
+    executable = os.path.expanduser(executable)
+    resolved_executable = shutil.which(executable)
+    if resolved_executable is None:
+        raise RuntimeError(
+            "Cannot find conda launcher {!r}; set SEAMLESS_CONDA_EXE or ensure "
+            "conda is on PATH".format(executable)
+        )
+    resolved_executable = os.path.abspath(resolved_executable)
+
+    environment_flag = "-p" if "/" in conda_environment else "-n"
+    command = [resolved_executable, "run", environment_flag, conda_environment]
+    if os.path.basename(resolved_executable) not in ("mamba", "micromamba"):
+        command.append("--no-capture-output")
+    command.extend(["bash", "transform-inner.sh"])
+    return command
+
+
+def _which_check_lines(which_):
+    if not which_:
+        return []
+    lines = ["if ! (\n", "  missing_binaries=0\n", "  for binary in"]
+    lines.extend(" " + shlex.quote(str(binary)) for binary in which_)
+    lines.extend(
+        [
+            "; do\n",
+            '    if ! command -v "$binary" >/dev/null 2>&1; then\n',
+            '      printf \'%s\\n\' "$binary" >> .seamless-missing\n',
+            "      missing_binaries=1\n",
+            "    fi\n",
+            "  done\n",
+            '  [ "$missing_binaries" -eq 0 ]\n',
+            "); then\n",
+            "  exit 1\n",
+            "fi\n",
+        ]
+    )
+    return lines
+
+
 def write_bash_job(
     bashcode,
     pins_,
@@ -60,6 +107,8 @@ def write_bash_job(
     *,
     script_name="transform.sh",
     directory=None,
+    which_=(),
+    conda_command_=None,
 ):
     """Materialize a bash transformation job in the supplied directory."""
 
@@ -67,6 +116,9 @@ def write_bash_job(
         if directory is None:
             return path
         return os.path.join(directory, path)
+
+    if conda_environment_ and conda_command_ is None:
+        conda_command_ = _conda_run_command(conda_environment_)
 
     META_FILE_PREFIX = "META__FILE__"
 
@@ -151,50 +203,50 @@ def write_bash_job(
     bash_header = """set -u -e
 trap 'jobs -p | xargs -r kill' EXIT
 """
-    if conda_environment_:
-        conda_root = os.environ.get("CONDA_ROOT")
-        if not conda_root:
-            try:
-                conda_root = (
-                    subprocess.check_output(
-                        ["conda", "info", "--base"],
-                        stderr=subprocess.DEVNULL,
-                        cwd=directory,
-                    )
-                    .decode()
-                    .strip()
-                )
-            except Exception:
-                pass
-        if not conda_root:
-            raise RuntimeError(
-                "Cannot activate conda environment: "
-                "could not determine conda root directory"
-            )
-        bash_header += f"""
-source {conda_root}/etc/profile.d/conda.sh
-conda activate {conda_environment_}
-"""
-
     bashcode2 = bash_header + bashcode
 
-    script_lines = ["#!/bin/bash\n", ": > .seamless-started\n"]
+    script_lines = ["#!/bin/bash\n"]
     for key in sorted(set(pins_)):
         if key in ("pins_", "bashcode") or key.startswith(META_FILE_PREFIX):
             continue
         if key not in env or not _is_shell_env_name(key):
             continue
         script_lines.append(f"export {key}={shlex.quote(str(env[key]))}\n")
+    script_lines.append(": > .seamless-started\n")
+    script_lines.extend(_which_check_lines(which_))
     script_lines.append(bashcode2)
+
+    if conda_command_ is not None:
+        inner_script_path = job_path("transform-inner.sh")
+        with open(inner_script_path, "w", encoding="utf-8") as script_file:
+            script_file.writelines(script_lines)
+        os.chmod(inner_script_path, 0o755)
+
+        launcher_lines = [
+            "#!/bin/bash\n",
+            "exec " + shlex.join(conda_command_) + "\n",
+        ]
+    else:
+        launcher_lines = script_lines
+
     script_path = job_path(script_name)
     with open(script_path, "w", encoding="utf-8") as script_file:
-        script_file.writelines(script_lines)
+        script_file.writelines(launcher_lines)
     os.chmod(script_path, 0o755)
 
     return env, bashcode2
 
 
-def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN):
+def execute_bash(
+    bashcode,
+    pins_,
+    conda_environment_,
+    PINS,
+    FILESYSTEM,
+    OUTPUTPIN,
+    *,
+    which_=(),
+):
     from . import SeamlessStreamTransformationError
 
     env = os.environ.copy()
@@ -246,6 +298,9 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
         resultfile = os.path.join(tempdir, "RESULT")
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, sighandler)
+        conda_command = (
+            _conda_run_command(conda_environment_) if conda_environment_ else None
+        )
         write_bash_job(
             bashcode,
             pins_,
@@ -253,6 +308,8 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
             PINS,
             FILESYSTEM,
             directory=tempdir,
+            which_=which_,
+            conda_command_=conda_command,
         )
         child_env = os.environ.copy()
         holder = current_holder()
@@ -347,25 +404,54 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
         process.wait()
 
         if not os.path.exists(os.path.join(tempdir, ".seamless-started")):
+            if conda_command is not None:
+                environment_description = "Conda environment {!r}".format(
+                    conda_environment_
+                )
+                launcher_line = "exec " + shlex.join(conda_command)
+            else:
+                environment_description = "Environment"
+                launcher_line = "bash transform.sh"
             raise SeamlessStreamTransformationError(
                 "\nBash transformer exception\n"
                 "==========================\n\n"
-                "Error: Environment was not entered; transform.sh could not be started\n"
-                f"Return code: {process.returncode}\n\n"
+                f"Error: {environment_description} was not entered; transform.sh could not be started\n"
+                f"Return code: {process.returncode}\n"
+                f"Launcher: {launcher_line}\n\n"
                 "*************************************************\n"
                 "* Command\n"
                 "*************************************************\n"
-                "bash transform.sh\n"
+                f"{launcher_line}\n"
                 "*************************************************\n"
             )
 
+        missing_marker = os.path.join(tempdir, ".seamless-missing")
+        if os.path.exists(missing_marker):
+            with open(missing_marker, encoding="utf-8") as missing_file:
+                missing_binaries = [line.rstrip("\n") for line in missing_file]
+            checked_where = (
+                "inside conda environment {!r}".format(conda_environment_)
+                if conda_environment_
+                else "in the bash script environment"
+            )
+            raise SeamlessStreamTransformationError(
+                "Required environment binaries are unavailable: {}\n"
+                "Checked {}".format(", ".join(missing_binaries), checked_where)
+            )
+
         if process.returncode:
+            environment_line = (
+                "Environment: conda environment {!r}".format(conda_environment_)
+                if conda_environment_
+                else ""
+            )
             raise SeamlessStreamTransformationError(
                 """
 Bash transformer exception
 ==========================
 
 Error: Return code {}
+{}
 
 *************************************************
 * Command
@@ -373,7 +459,7 @@ Error: Return code {}
 {}
 *************************************************
 """.format(
-                    process.returncode, bashcode
+                    process.returncode, environment_line, bashcode
                 )
             )
         if not os.path.exists(resultfile):

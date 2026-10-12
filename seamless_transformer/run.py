@@ -155,23 +155,30 @@ def run_transformation_dict(
             raise RuntimeError(
                 "docker and conda_environment apply to bash transformers only"
             )
+        if {"docker", "conda_environment"}.issubset(environment_keys):
+            raise RuntimeError(
+                "docker and conda_environment cannot be used together; pick one"
+            )
         if "docker" in environment_keys:
             raise RuntimeError(
                 "container execution is not implemented yet; refusing to run on the host"
             )
 
     skip_environment_which = is_probe and bool(environment_keys)
+    check_environment_which_on_host = (
+        language != "bash" and not skip_environment_which
+    )
     if env_checksum0 is not None:
         import shutil
-        missing = (
-            []
-            if skip_environment_which
-            else [
+        if check_environment_which_on_host:
+            missing = [
                 binary
                 for binary in env_dict.get("which", ())
                 if shutil.which(binary) is None
             ]
-        )
+        else:
+            # Bash checks these names after entering its execution environment.
+            missing = []
         if missing:
             raise RuntimeError("Required environment binaries are unavailable: " + ", ".join(missing))
 
@@ -235,6 +242,7 @@ def run_transformation_dict(
                 env_dict.get("conda_environment", ""),
                 namespace.get("PINS", {}),
                 namespace.get("FILESYSTEM", {}),
+                which_=env_dict.get("which", ()),
             )
             return encode_remote_job_written(job_directory)
         namespace["execute_bash"] = execute_bash
@@ -242,9 +250,11 @@ def run_transformation_dict(
         pins = namespace.get("PINS", {})
         namespace["pins_"] = sorted(pins.keys())
         namespace["conda_environment_"] = env_dict.get("conda_environment", "")
+        namespace["which_"] = env_dict.get("which", ())
         code = (
             f"{output_name} = execute_bash("
-            "bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN)"
+            "bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN, "
+            "which_=which_)"
         )
         inputs = []
 
@@ -319,6 +329,8 @@ def _write_remote_bash_job(
     conda_environment: str,
     pins: Dict[str, Any],
     filesystem: Dict[str, Any],
+    *,
+    which_=(),
 ) -> str:
     """Materialize a bash transformation job and stop before execution."""
 
@@ -342,6 +354,7 @@ def _write_remote_bash_job(
             pins,
             filesystem,
             directory=job_directory,
+            which_=which_,
         )
     except Exception:
         shutil.rmtree(job_directory, ignore_errors=True)
