@@ -180,6 +180,36 @@ def run_transformation_dict(
             except Exception:
                 pass
 
+    handler_checksum_value = _get_execution_dunder(
+        transformation, tf_dunder, "__handler__"
+    )
+    from .languages import get_language_handler, is_handler_language
+
+    handler_definition = None
+    handler_code = None
+    handler_checksum = None
+    handler_language = (
+        handler_checksum_value is not None or is_handler_language(language)
+    )
+    if handler_language:
+        if handler_checksum_value is None:
+            handler_definition = get_language_handler(language)
+            handler_code = handler_definition.source
+            handler_checksum = Buffer(handler_code, "text").get_checksum().hex()
+        else:
+            try:
+                handler_checksum = Checksum(handler_checksum_value).hex()
+                handler_buffer = Checksum(handler_checksum).resolve()
+            except Exception as exc:
+                raise RuntimeError("Invalid language handler checksum") from exc
+            if handler_buffer is None:
+                raise RuntimeError(
+                    f"Cannot resolve language handler: {handler_checksum}"
+                )
+            handler_code = handler_buffer.get_value("text")
+            if not isinstance(handler_code, str):
+                raise RuntimeError("Language handler source is not text")
+
     module_workspace = {}
     if modules_to_build:
         build_all_modules(
@@ -198,6 +228,8 @@ def run_transformation_dict(
     checksum_hex = Checksum(code_checksum).hex() if code_checksum is not None else None
     if checksum_hex:
         identifier = f"{identifier}-{checksum_hex}"
+    if handler_checksum:
+        identifier = f"{identifier}-handler-{handler_checksum}"
 
     if is_deep_celltype(output_celltype):
         namespace["OUTPUTPIN"] = output_celltype
@@ -224,6 +256,89 @@ def run_transformation_dict(
             "bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN)"
         )
         inputs = []
+
+    if handler_language:
+        import ast
+        from collections.abc import Mapping
+
+        handler_tree = ast.parse(handler_code)
+        if len(handler_tree.body) != 1 or not isinstance(
+            handler_tree.body[0], ast.FunctionDef
+        ):
+            raise RuntimeError("Language handler source must be one Python function")
+        handler_function = handler_tree.body[0]
+        handler_function_name = handler_function.name
+        handler_parameters = tuple(
+            arg.arg
+            for arg in (
+                handler_function.args.args
+                + handler_function.args.kwonlyargs
+            )
+        )
+        used_names = {
+            node.id for node in ast.walk(handler_tree) if isinstance(node, ast.Name)
+        }
+        used_names.update(
+            node.name
+            for node in ast.walk(handler_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        )
+        used_names.update(handler_parameters)
+        handler_entry_name = "__seamless_language_handler_entry__"
+        while handler_entry_name in used_names:
+            handler_entry_name += "_"
+        handler_function.name = handler_entry_name
+        if handler_function_name not in handler_parameters:
+            alias_decorator = ast.parse(
+                "(lambda _name: lambda _function: "
+                "(globals().__setitem__(_name, _function) or _function))"
+                f"({handler_function_name!r})",
+                mode="eval",
+            ).body
+            handler_function.decorator_list.insert(0, alias_decorator)
+        ast.fix_missing_locations(handler_tree)
+        handler_code = ast.unparse(handler_tree)
+        handler_filesystem = {
+            transformation.get("__as__", {}).get(name, name): entry
+            for name, entry in namespace.get("FILESYSTEM", {}).items()
+        }
+        handler_pins = namespace.get("PINS", {})
+        if handler_pins:
+            handler_pins = dict(handler_pins)
+            for pinname, value in handler_pins.items():
+                fs_entry = handler_filesystem.get(pinname, {})
+                if (
+                    fs_entry.get("celltype") == "bytes"
+                    and not fs_entry.get("filesystem", False)
+                    and isinstance(value, Buffer)
+                ):
+                    handler_pins[pinname] = value.content
+        handler_metavars = {}
+        if handler_definition is not None:
+            handler_metavars.update(handler_definition.metavars)
+        stored_metavars = meta.get("metavars", {})
+        if stored_metavars is not None:
+            if not isinstance(stored_metavars, Mapping):
+                raise TypeError("transformation meta['metavars'] must be a mapping")
+            handler_metavars.update(stored_metavars)
+        offered_arguments = {
+            "code": code,
+            "pins": handler_pins,
+            "filesystem": handler_filesystem,
+            "output_name": output_name,
+            "output_celltype": output_celltype,
+            "metavars": handler_metavars,
+            "environment": env_dict,
+            "process_lock": process_lock_active,
+        }
+        namespace = {
+            name: offered_arguments[name]
+            for name in handler_parameters
+        }
+        module_workspace = {}
+        code = handler_code
+        inputs = handler_parameters
+
 
     if _is_compiled_transformation(transformation, tf_dunder):
         with process_lock_scope(process_lock_active, should_abort=should_abort):

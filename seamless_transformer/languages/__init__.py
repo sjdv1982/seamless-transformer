@@ -51,6 +51,8 @@ class LanguageDefinition:
 
 
 _registry: dict[str, LanguageDefinition] = {}
+_handler_registry: dict[str, LanguageHandlerDefinition] = {}
+_NATIVE_LANGUAGES = frozenset({"python", "bash"})
 
 
 def define_compiled_language(name: str, compilation: dict) -> None:
@@ -78,6 +80,8 @@ def define_compiled_language(name: str, compilation: dict) -> None:
     Raises ``ValueError`` if ``mode`` is not ``"object"`` or ``"archive"``.
     """
 
+    if name in _NATIVE_LANGUAGES or name in _handler_registry:
+        raise ValueError(f"Language {name!r} is already registered by another kind")
     config = CompilationConfig(**compilation)
     if config.mode not in ("object", "archive", "package"):
         raise ValueError(f"Unsupported compile mode: {config.mode!r}")
@@ -103,11 +107,127 @@ def is_compiled_language(name: str) -> bool:
 from . import native  # noqa: E402,F401
 
 
+
+@dataclass(frozen=True)
+class LanguageHandlerDefinition:
+    """Registered source and defaults for a non-native transformer language."""
+
+    name: str
+    handler: object
+    source: str
+    parameters: tuple[str, ...]
+    metavars: dict
+
+
+_HANDLER_ARGUMENTS = frozenset(
+    {
+        "code",
+        "pins",
+        "filesystem",
+        "output_name",
+        "output_celltype",
+        "metavars",
+        "environment",
+        "process_lock",
+    }
+)
+def register_language_handler(name, handler, *, metavars=None) -> None:
+    """Register a Python function that executes one transformation language."""
+
+    import ast
+    import inspect
+    from collections.abc import Mapping
+
+    from ..cached_compile import analyze_code
+    from ..getsource import getsource
+
+    if not isinstance(name, str) or not name:
+        raise ValueError("language handler name must be a non-empty string")
+    if name in _NATIVE_LANGUAGES or name in _registry:
+        raise ValueError(f"Language {name!r} is already registered by another kind")
+    if not inspect.isfunction(handler):
+        raise TypeError("language handler must be a Python function")
+    if handler.__closure__:
+        raise ValueError("language handler must not close over external variables")
+
+    source = getsource(handler)
+    if not isinstance(source, str):
+        raise ValueError("could not retrieve source for language handler")
+    mode, function_name = analyze_code(source, f"language-handler-{name}")
+    if mode != "function" or function_name is None:
+        raise ValueError("language handler source must be exactly one Python function")
+
+    tree = ast.parse(source)
+    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):
+        raise ValueError("language handler source must be exactly one Python function")
+    function = tree.body[0]
+    if function.args.posonlyargs or function.args.vararg or function.args.kwarg:
+        raise ValueError("language handler parameters must be passed by keyword")
+    parameter_nodes = function.args.args + function.args.kwonlyargs
+    parameters = tuple(parameter.arg for parameter in parameter_nodes)
+    unsupported = sorted(set(parameters) - _HANDLER_ARGUMENTS)
+    if unsupported:
+        raise ValueError(
+            "unsupported language handler parameter(s): " + ", ".join(unsupported)
+        )
+
+    if metavars is None:
+        metavars = {}
+    if not isinstance(metavars, Mapping):
+        raise TypeError("metavars must be a mapping")
+    defaults = dict(metavars)
+    if any(not isinstance(key, str) for key in defaults):
+        raise TypeError("metavar names must be strings")
+
+    _handler_registry[name] = LanguageHandlerDefinition(
+        name=name,
+        handler=handler,
+        source=source,
+        parameters=parameters,
+        metavars=defaults,
+    )
+
+
+def get_language_handler(name: str) -> LanguageHandlerDefinition:
+    """Return the registered handler definition for the given language."""
+
+    try:
+        return _handler_registry[name]
+    except KeyError:
+        raise KeyError(f"Unknown handler language: {name!r}") from None
+
+
+def is_handler_language(name: str) -> bool:
+    """Return whether name has a registered language handler."""
+
+    return name in _handler_registry
+
+
+def available_languages() -> dict[str, str]:
+    """Return each constructible language and its transformer kind."""
+
+    result = {name: "native" for name in _NATIVE_LANGUAGES}
+    result.update({name: "compiled" for name in _registry})
+    result.update({name: "handler" for name in _handler_registry})
+    return result
+
+
+from . import handlers  # noqa: E402,F401
+from .interpreter_thread import run_in_interpreter_thread
+
+
 __all__ = [
     "CompilationConfig",
     "LanguageDefinition",
+    "LanguageHandlerDefinition",
     "define_compiled_language",
     "get_language",
+    "get_language_handler",
     "is_compiled_language",
+    "is_handler_language",
+    "available_languages",
+    "register_language_handler",
+    "run_in_interpreter_thread",
     "_registry",
+    "_handler_registry",
 ]

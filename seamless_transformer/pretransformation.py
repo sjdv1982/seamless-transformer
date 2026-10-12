@@ -380,6 +380,14 @@ def direct_transformer_to_pretransformation(
         "__output__": outputpin,
         "__language__": language,
     }
+    from .languages import get_language_handler, is_handler_language
+
+    handler_language = is_handler_language(language)
+    if handler_language:
+        handler_source = get_language_handler(language).source
+        pretransformation_dict["__handler__"] = _buffer_checksum_hex(
+            handler_source, "text"
+        )
 
     if env is not None:
         envbuf = Buffer(env, "plain")
@@ -422,6 +430,13 @@ def direct_transformer_to_pretransformation(
             }
         else:
             pin = {"celltype": celltype}
+        if handler_language and pinname != "result" and celltype in (
+            "mixed", "plain", "text", "bytes", "binary"
+        ):
+            pin = {
+                "celltype": celltype,
+                "filesystem": {"mode": "file", "optional": True},
+            }
         tf_pins[pinname] = pin
 
     code_celltype = "python" if language == "python" else "text"
