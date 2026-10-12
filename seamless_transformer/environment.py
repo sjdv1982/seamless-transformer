@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from .container import validate_container_spec
+
 
 class Environment:
     """Execution environment for an individual transformer.
@@ -72,7 +74,13 @@ class Environment:
         if self._powers is not None:
             result["powers"] = deepcopy(self._powers)
         if self._docker is not None:
-            result["docker"] = deepcopy(self._docker)
+            docker = validate_container_spec(self._docker)
+            if self._conda_env_name is not None:
+                raise ValueError(
+                    "docker and conda_environment cannot be used together; pick one, "
+                    "or activate the conda environment in the script itself"
+                )
+            result["docker"] = docker
         return result or None
 
     def set_conda(self, conda):
@@ -156,19 +164,14 @@ class Environment:
         return deepcopy(self._powers)
 
     def set_docker(self, docker: dict):
-        """Set the Docker image to run the transformation in.
+        """Set the Docker image and optional runtime settings for this transformer.
 
-        Argument must be a dict with at least a ``"name"`` key (the image name).
-        Pass ``None`` to clear.
+        The specification accepts name, gpus and shm_size. Pass None to clear.
         """
         if docker is None:
             self._docker = None
             return
-        if not isinstance(docker, dict):
-            raise TypeError(type(docker))
-        if "name" not in docker:
-            raise ValueError("docker specification must contain 'name'")
-        self._docker = deepcopy(docker)
+        self._docker = validate_container_spec(docker)
 
     def get_docker(self):
         return deepcopy(self._docker)

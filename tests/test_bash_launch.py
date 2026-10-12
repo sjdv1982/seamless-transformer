@@ -144,11 +144,12 @@ def _raw(module, Buffer, language, code, environment=None, *, probe=False, compi
                                           scratch=True, require_value=True)
 
 
-def test_bash_docker_stopgap_refuses_host_execution(monkeypatch, tmp_path):
+def test_bash_docker_disabled_refuses_host_execution(monkeypatch, tmp_path):
     module, Buffer = _raw_setup(monkeypatch)
+    monkeypatch.setenv("SEAMLESS_CONTAINER_RUNTIME", "none")
     sentinel = tmp_path / "host-executed"
     code = f"touch {shlex.quote(str(sentinel))}; printf 42 > RESULT"
-    with pytest.raises(RuntimeError, match="container execution is not implemented yet; refusing to run on the host"):
+    with pytest.raises(RuntimeError, match="does not allow|refus|disabled"):
         _raw(module, Buffer, "bash", code, {"docker": {"name": "ubuntu:22.04"}})
     assert not sentinel.exists()
 

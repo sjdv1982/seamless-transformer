@@ -10,23 +10,30 @@ def test_environment_empty_save_and_lowlevel():
 
 
 def test_environment_roundtrip_all_props():
-    env = Environment()
-    env.set_conda("name: test\ndependencies:\n  - python\n")
-    env.set_conda_env("seamless1")
-    env.set_which(["python", "gcc"])
-    env.set_powers({"docker": True})
-    env.set_docker({"name": "python:3.12"})
+    for container in (False, True):
+        env = Environment()
+        env.set_conda("name: test\ndependencies:\n  - python\n")
+        env.set_which(["python", "gcc"])
+        env.set_powers({"docker": True})
+        if container:
+            env.set_docker({"name": "python:3.12"})
+        else:
+            env.set_conda_env("seamless1")
 
-    state = env._save()
-    restored = Environment()
-    restored._load(state)
+        state = env._save()
+        restored = Environment()
+        restored._load(state)
 
-    assert restored._save() == state
-    lowlevel = restored._to_lowlevel()
-    assert lowlevel["conda_environment"] == "seamless1"
-    assert lowlevel["conda"]["dependencies"] == ["python"]
-    assert lowlevel["which"] == ["python", "gcc"]
-    assert lowlevel["docker"] == {"name": "python:3.12"}
+        assert restored._save() == state
+        lowlevel = restored._to_lowlevel()
+        assert lowlevel["conda"]["dependencies"] == ["python"]
+        assert lowlevel["which"] == ["python", "gcc"]
+        if container:
+            assert lowlevel["docker"] == {"name": "python:3.12"}
+            assert "conda_environment" not in lowlevel
+        else:
+            assert lowlevel["conda_environment"] == "seamless1"
+            assert "docker" not in lowlevel
 
 
 def test_environment_validation():

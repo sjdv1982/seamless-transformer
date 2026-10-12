@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import threading
 import sys
+import uuid
 from io import BytesIO
 from typing import IO, cast
 
@@ -24,6 +25,12 @@ from .compression_utils import (
     strip_compression_suffix,
 )
 from .process_lock import NOTIFY_ENV, current_holder
+from .container import (
+    build_container_command,
+    remove_container,
+    select_container_runtime,
+    validate_container_spec,
+)
 
 
 def _write_file(pinname, data, filemode, *, directory=None):
@@ -109,6 +116,14 @@ def write_bash_job(
     directory=None,
     which_=(),
     conda_command_=None,
+    docker_=None,
+    container_runtime_=None,
+    tf_checksum_=None,
+    process_id_=None,
+    container_name_=None,
+    read_directories_=None,
+    portable_job_directory_=True,
+    container_command_=None,
 ):
     """Materialize a bash transformation job in the supplied directory."""
 
@@ -119,6 +134,33 @@ def write_bash_job(
 
     if conda_environment_ and conda_command_ is None:
         conda_command_ = _conda_run_command(conda_environment_)
+
+    container_command = container_command_
+    if docker_ is not None:
+        docker_ = validate_container_spec(docker_)
+        if conda_environment_:
+            raise ValueError(
+                "docker and conda_environment cannot be used together; pick one, "
+                "or activate the conda environment in the script itself"
+            )
+        if container_command is None:
+            if container_runtime_ is None:
+                container_runtime_ = select_container_runtime(docker_["name"])
+            if read_directories_ is None:
+                from .transformation_namespace import _get_read_folder_directories
+
+                read_directories_ = _get_read_folder_directories()
+            job_directory = os.getcwd() if directory is None else directory
+            container_command = build_container_command(
+                container_runtime_,
+                docker_,
+                job_directory,
+                read_directories_,
+                tf_checksum=tf_checksum_,
+                process_id=process_id_,
+                container_name=container_name_,
+                portable_job_directory=portable_job_directory_,
+            )
 
     META_FILE_PREFIX = "META__FILE__"
 
@@ -200,9 +242,9 @@ def write_bash_job(
                 with open(job_path(pin), "bw") as pinf:
                     np.save(pinf, v, allow_pickle=False)
 
-    bash_header = """set -u -e
-trap 'jobs -p | xargs -r kill' EXIT
-"""
+    bash_header = "set -u -e\n"
+    if container_command is None:
+        bash_header += "trap 'jobs -p | xargs -r kill' EXIT\n"
     bashcode2 = bash_header + bashcode
 
     script_lines = ["#!/bin/bash\n"]
@@ -216,16 +258,24 @@ trap 'jobs -p | xargs -r kill' EXIT
     script_lines.extend(_which_check_lines(which_))
     script_lines.append(bashcode2)
 
-    if conda_command_ is not None:
+    if conda_command_ is not None or container_command is not None:
         inner_script_path = job_path("transform-inner.sh")
         with open(inner_script_path, "w", encoding="utf-8") as script_file:
             script_file.writelines(script_lines)
         os.chmod(inner_script_path, 0o755)
 
-        launcher_lines = [
-            "#!/bin/bash\n",
-            "exec " + shlex.join(conda_command_) + "\n",
-        ]
+        if container_command is not None:
+            launcher_command = shlex.join(container_command)
+            portable_mount = shlex.quote(
+                "type=bind,src=__SEAMLESS_JOB_DIR__,dst=/seamless-job"
+            )
+            launcher_command = launcher_command.replace(
+                portable_mount,
+                'type=bind,src="$PWD",dst=/seamless-job',
+            )
+        else:
+            launcher_command = shlex.join(conda_command_)
+        launcher_lines = ["#!/bin/bash\n", "exec " + launcher_command + "\n"]
     else:
         launcher_lines = script_lines
 
@@ -246,6 +296,9 @@ def execute_bash(
     OUTPUTPIN,
     *,
     which_=(),
+    docker_=None,
+    container_runtime_=None,
+    tf_checksum_=None,
 ):
     from . import SeamlessStreamTransformationError
 
@@ -267,6 +320,19 @@ def execute_bash(
             except ValueError:
                 return sdata
 
+    docker_spec = None
+    if docker_ is not None:
+        docker_spec = validate_container_spec(docker_)
+        if conda_environment_:
+            raise ValueError(
+                "docker and conda_environment cannot be used together; pick one, "
+                "or activate the conda environment in the script itself"
+            )
+        if container_runtime_ is None:
+            container_runtime_ = select_container_runtime(docker_spec["name"])
+    container_name = (
+        "seamless-{}".format(uuid.uuid4().hex[:12]) if docker_spec is not None else None
+    )
     process = None
     tempdir = None
     notify_path = None
@@ -301,6 +367,23 @@ def execute_bash(
         conda_command = (
             _conda_run_command(conda_environment_) if conda_environment_ else None
         )
+        container_command = None
+        read_directories = None
+        if docker_spec is not None:
+            from .transformation_namespace import _get_read_folder_directories
+
+            read_directories = _get_read_folder_directories()
+            if hasattr(tf_checksum_, "hex"):
+                tf_checksum_ = tf_checksum_.hex()
+            container_command = build_container_command(
+                container_runtime_,
+                docker_spec,
+                tempdir,
+                read_directories,
+                tf_checksum=tf_checksum_,
+                process_id=os.getpid(),
+                container_name=container_name,
+            )
         write_bash_job(
             bashcode,
             pins_,
@@ -310,10 +393,21 @@ def execute_bash(
             directory=tempdir,
             which_=which_,
             conda_command_=conda_command,
+            docker_=docker_spec,
+            container_runtime_=container_runtime_,
+            tf_checksum_=tf_checksum_,
+            process_id_=os.getpid(),
+            container_name_=container_name,
+            read_directories_=read_directories,
+            container_command_=container_command,
         )
         child_env = os.environ.copy()
         holder = current_holder()
-        notify_holder = holder if holder is not None and holder.held else None
+        notify_holder = (
+            holder
+            if docker_spec is None and holder is not None and holder.held
+            else None
+        )
         if notify_holder is not None:
             candidate_notify_path = tempdir + ".notify"
             os.mkfifo(candidate_notify_path, 0o600)
@@ -404,7 +498,21 @@ def execute_bash(
         process.wait()
 
         if not os.path.exists(os.path.join(tempdir, ".seamless-started")):
-            if conda_command is not None:
+            failure_hint = ""
+            if docker_spec is not None:
+                environment_description = "{} image {!r}".format(
+                    container_runtime_, docker_spec["name"]
+                )
+                launcher_line = "exec " + shlex.join(container_command)
+                if process.returncode == 125:
+                    failure_hint = (
+                        "Hint: the container runtime could not start the image; "
+                        "check that the image is present and that every bind-mount "
+                        "source exists"
+                    )
+                elif process.returncode in (126, 127):
+                    failure_hint = "Hint: bash was not found in the container image"
+            elif conda_command is not None:
                 environment_description = "Conda environment {!r}".format(
                     conda_environment_
                 )
@@ -412,11 +520,15 @@ def execute_bash(
             else:
                 environment_description = "Environment"
                 launcher_line = "bash transform.sh"
-            raise SeamlessStreamTransformationError(
+            failure_message = (
                 "\nBash transformer exception\n"
                 "==========================\n\n"
                 f"Error: {environment_description} was not entered; transform.sh could not be started\n"
                 f"Return code: {process.returncode}\n"
+            )
+            if failure_hint:
+                failure_message += f"{failure_hint}\n"
+            failure_message += (
                 f"Launcher: {launcher_line}\n\n"
                 "*************************************************\n"
                 "* Command\n"
@@ -424,6 +536,7 @@ def execute_bash(
                 f"{launcher_line}\n"
                 "*************************************************\n"
             )
+            raise SeamlessStreamTransformationError(failure_message)
 
         missing_marker = os.path.join(tempdir, ".seamless-missing")
         if os.path.exists(missing_marker):
@@ -432,6 +545,10 @@ def execute_bash(
             checked_where = (
                 "inside conda environment {!r}".format(conda_environment_)
                 if conda_environment_
+                else "inside {} image {!r}".format(
+                    container_runtime_, docker_spec["name"]
+                )
+                if docker_spec is not None
                 else "in the bash script environment"
             )
             raise SeamlessStreamTransformationError(
@@ -443,8 +560,17 @@ def execute_bash(
             environment_line = (
                 "Environment: conda environment {!r}".format(conda_environment_)
                 if conda_environment_
+                else "Environment: {} image {!r}".format(
+                    container_runtime_, docker_spec["name"]
+                )
+                if docker_spec is not None
                 else ""
             )
+            if docker_spec is not None and process.returncode == 137:
+                environment_line += (
+                    "\nHint: the container job was killed, possibly for exceeding "
+                    "a memory limit"
+                )
             raise SeamlessStreamTransformationError(
                 """
 Bash transformer exception
@@ -513,6 +639,8 @@ Error: Result folder RESULT is empty
             result = read_data(resultdata)
     finally:
         _kill_process_group()
+        if container_name is not None:
+            remove_container(container_runtime_, container_name)
         if selector is not None:
             try:
                 selector.close()

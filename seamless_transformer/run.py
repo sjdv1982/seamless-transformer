@@ -31,6 +31,7 @@ from .transformation_utils import (
 from .probe_index import ensure_record_bucket_preconditions_sync, is_record_probe
 from .record_runtime import get_record_mode
 from .execute_bash import execute_bash, write_bash_job
+from .container import select_container_runtime, validate_container_spec
 from .process_lock import scope as process_lock_scope
 
 PACK_DEEP_RESULTS = True
@@ -150,6 +151,8 @@ def run_transformation_dict(
     language = transformation.get("__language__", "python")
     is_probe = is_record_probe(transformation, tf_dunder)
     environment_keys = {key for key in ("docker", "conda_environment") if key in env_dict}
+    docker_spec = None
+    container_runtime = None
     if environment_keys and not is_probe:
         if language != "bash" or _is_compiled_transformation(transformation, tf_dunder):
             raise RuntimeError(
@@ -157,12 +160,13 @@ def run_transformation_dict(
             )
         if {"docker", "conda_environment"}.issubset(environment_keys):
             raise RuntimeError(
-                "docker and conda_environment cannot be used together; pick one"
+                "docker and conda_environment cannot be used together; pick one, "
+                "or activate the conda environment in the script itself"
             )
-        if "docker" in environment_keys:
-            raise RuntimeError(
-                "container execution is not implemented yet; refusing to run on the host"
-            )
+    if "docker" in env_dict and not is_probe:
+        docker_spec = validate_container_spec(env_dict["docker"])
+        if language == "bash":
+            container_runtime = select_container_runtime(docker_spec["name"])
 
     skip_environment_which = is_probe and bool(environment_keys)
     check_environment_which_on_host = (
@@ -243,6 +247,9 @@ def run_transformation_dict(
                 namespace.get("PINS", {}),
                 namespace.get("FILESYSTEM", {}),
                 which_=env_dict.get("which", ()),
+                docker_=docker_spec,
+                container_runtime_=container_runtime,
+                tf_checksum_=checksum_hex,
             )
             return encode_remote_job_written(job_directory)
         namespace["execute_bash"] = execute_bash
@@ -251,10 +258,14 @@ def run_transformation_dict(
         namespace["pins_"] = sorted(pins.keys())
         namespace["conda_environment_"] = env_dict.get("conda_environment", "")
         namespace["which_"] = env_dict.get("which", ())
+        namespace["docker_"] = docker_spec
+        namespace["container_runtime_"] = container_runtime
+        namespace["tf_checksum_"] = checksum_hex
         code = (
             f"{output_name} = execute_bash("
             "bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN, "
-            "which_=which_)"
+            "which_=which_, docker_=docker_, container_runtime_="
+            "container_runtime_, tf_checksum_=tf_checksum_)"
         )
         inputs = []
 
@@ -331,8 +342,21 @@ def _write_remote_bash_job(
     filesystem: Dict[str, Any],
     *,
     which_=(),
+    docker_=None,
+    container_runtime_=None,
+    tf_checksum_=None,
 ) -> str:
     """Materialize a bash transformation job and stop before execution."""
+
+    if docker_ is not None:
+        docker_ = validate_container_spec(docker_)
+        if conda_environment:
+            raise ValueError(
+                "docker and conda_environment cannot be used together; pick one, "
+                "or activate the conda environment in the script itself"
+            )
+        if container_runtime_ is None:
+            container_runtime_ = select_container_runtime(docker_["name"])
 
     job_directory = os.path.abspath(os.path.expanduser(remote_job_dir))
     try:
@@ -355,6 +379,10 @@ def _write_remote_bash_job(
             filesystem,
             directory=job_directory,
             which_=which_,
+            docker_=docker_,
+            container_runtime_=container_runtime_,
+            tf_checksum_=tf_checksum_,
+            portable_job_directory_=True,
         )
     except Exception:
         shutil.rmtree(job_directory, ignore_errors=True)
