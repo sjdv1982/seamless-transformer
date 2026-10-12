@@ -273,6 +273,12 @@ def write_bash_job(
                 portable_mount,
                 'type=bind,src="$PWD",dst=/seamless-job',
             )
+            portable_job_bind = shlex.quote(
+                "__SEAMLESS_JOB_DIR__:/seamless-job"
+            )
+            launcher_command = launcher_command.replace(
+                portable_job_bind, '"$PWD":/seamless-job'
+            )
         else:
             launcher_command = shlex.join(conda_command_)
         launcher_lines = ["#!/bin/bash\n", "exec " + launcher_command + "\n"]

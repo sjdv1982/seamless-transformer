@@ -208,10 +208,10 @@ def build_container_command(
     container_name: str | None = None,
     portable_job_directory: bool = False,
 ) -> list[str]:
-    """Build a Docker or Podman argv for a materialized bash job."""
+    """Build a Docker, Podman, or Apptainer argv for a materialized bash job."""
     spec = validate_container_spec(spec)
-    if runtime not in ("docker", "podman"):
-        raise ValueError("Runtime {!r} does not use the Docker/Podman command".format(runtime))
+    if runtime not in ("docker", "podman", "apptainer"):
+        raise ValueError("Unknown container runtime {!r}".format(runtime))
 
     pull_policy = os.environ.get("SEAMLESS_CONTAINER_PULL", "never")
     if pull_policy not in ("never", "missing"):
@@ -235,6 +235,59 @@ def build_container_command(
     mount_job_directory = (
         "__SEAMLESS_JOB_DIR__" if portable_job_directory else job_directory
     )
+
+    if runtime == "apptainer":
+        apptainer_directory = os.environ.get("SEAMLESS_APPTAINER_DIR")
+        image = None
+        sif_path = None
+        if apptainer_directory:
+            apptainer_directory = os.path.abspath(
+                os.path.expanduser(apptainer_directory)
+            )
+            # The Docker image name is also the literal SIF-relative path.
+            sif_path = os.path.join(apptainer_directory, spec["name"] + ".sif")
+            if os.path.isfile(sif_path):
+                image = sif_path
+        elif pull_policy == "never":
+            raise ValueError(
+                "SEAMLESS_APPTAINER_DIR must name the directory of local SIF images"
+            )
+
+        if image is None:
+            if pull_policy == "missing":
+                image = "docker://" + spec["name"]
+            else:
+                assert sif_path is not None
+                pull_command = shlex.join(
+                    ["apptainer", "pull", sif_path, "docker://" + spec["name"]]
+                )
+                raise FileNotFoundError(
+                    "Apptainer SIF image {!r} is missing. Create it with: {}".format(
+                        sif_path, pull_command
+                    )
+                )
+
+        command = [
+            "apptainer",
+            "exec",
+            "--containall",
+            "--cwd",
+            "/seamless-job",
+            "--home",
+            "{}:/seamless-job".format(mount_job_directory),
+            "--bind",
+            "{}:/seamless-job".format(mount_job_directory),
+        ]
+        for directory in directories:
+            command.extend(["--bind", "{}:{}:ro".format(directory, directory)])
+        if spec.get("gpus", False):
+            command.append("--nv")
+        try:
+            command.extend(shlex.split(os.environ.get("SEAMLESS_CONTAINER_ARGS", "")))
+        except ValueError as exc:
+            raise ValueError("Invalid SEAMLESS_CONTAINER_ARGS: {}".format(exc)) from exc
+        command.extend([image, "bash", "transform-inner.sh"])
+        return command
 
     command = [
         runtime,
