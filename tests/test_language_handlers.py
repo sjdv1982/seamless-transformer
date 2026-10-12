@@ -103,6 +103,11 @@ def test_registration_rejects_unoffered_parameter():
         register_language_handler("invalid-" + uuid.uuid4().hex, invalid_handler)
 
 
+def test_registration_rejects_lambda_with_clear_source_error():
+    with pytest.raises((ValueError, TypeError), match=r"(?i)(function|source|lambda)"):
+        register_language_handler("lambda-" + uuid.uuid4().hex, lambda pins: pins)
+
+
 @pytest.mark.parametrize("direct,class_name", [(False, "HandlerTransformer"), (True, "DirectHandlerTransformer")])
 def test_factory_handler_classes_and_read_only_language(language, direct, class_name):
     tf = Transformer(language, direct=direct)

@@ -147,19 +147,39 @@ def register_language_handler(name, handler, *, metavars=None) -> None:
         raise ValueError(f"Language {name!r} is already registered by another kind")
     if not inspect.isfunction(handler):
         raise TypeError("language handler must be a Python function")
+    if handler.__name__ == "<lambda>":
+        raise ValueError(
+            "language handler must be a named Python function; "
+            "lambda handlers do not have a stable source definition"
+        )
     if handler.__closure__:
         raise ValueError("language handler must not close over external variables")
 
-    source = getsource(handler)
+    try:
+        source = getsource(handler)
+    except (OSError, TypeError, ValueError, SyntaxError) as exc:
+        raise ValueError(
+            f"could not retrieve valid source for language handler {name!r}; "
+            "use a named function defined in source code"
+        ) from exc
     if not isinstance(source, str):
         raise ValueError("could not retrieve source for language handler")
-    mode, function_name = analyze_code(source, f"language-handler-{name}")
+    try:
+        mode, function_name = analyze_code(source, f"language-handler-{name}")
+        tree = ast.parse(source)
+    except (SyntaxError, TypeError) as exc:
+        raise ValueError(
+            f"could not parse source for language handler {name!r}: {exc}"
+        ) from exc
     if mode != "function" or function_name is None:
-        raise ValueError("language handler source must be exactly one Python function")
+        raise ValueError(
+            "language handler source must be exactly one named Python function"
+        )
 
-    tree = ast.parse(source)
     if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):
-        raise ValueError("language handler source must be exactly one Python function")
+        raise ValueError(
+            "language handler source must be exactly one named Python function"
+        )
     function = tree.body[0]
     if function.args.posonlyargs or function.args.vararg or function.args.kwarg:
         raise ValueError("language handler parameters must be passed by keyword")
