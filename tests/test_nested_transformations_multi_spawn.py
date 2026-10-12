@@ -28,14 +28,16 @@ def test_nested_transformations_multi():
                 def leaf(label: str):
                     import time
                     import os
-                    from seamless.transformer import global_lock
 
                     time.sleep(0.5)
                     return label, os.getpid()
 
                 leaf = delayed(leaf)
+                leaf.process_lock = False
 
-                left = leaf(f"{label}-a").start()
+                left_handle = leaf(f"{label}-a")
+                assert left_handle.meta["process_lock"] is False
+                left = left_handle.start()
 
                 right = leaf(f"{label}-b").start()
                 return left.run(), right.run()

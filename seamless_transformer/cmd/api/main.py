@@ -488,6 +488,20 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
     )
 
     parser.add_argument(
+        "--driver",
+        help="Declare this transformation as a driver",
+        action="store_true",
+        default=False,
+    )
+
+    parser.add_argument(
+        "--no-process-lock",
+        help="Run this transformation without claiming the process lock",
+        action="store_true",
+        default=False,
+    )
+
+    parser.add_argument(
         "--local",
         help="""Don't delegate the transformation to a remote server, but execute in-process.
     This is most useful for driver scripts that contain themselves seamless-run commands""",
@@ -663,6 +677,11 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
     ################################################################
 
     meta = None
+    if args.driver:
+        meta = {"driver": True, "process_lock": False}
+    elif args.no_process_lock:
+        meta = {"process_lock": False}
+
     if args.write_remote_job:
         if meta is None:
             meta = {}
@@ -1226,6 +1245,9 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         return 0
 
     elif args.qsubmit:
+        from seamless_transformer.process_lock import drop_for_nested_work
+
+        drop_for_nested_work()
         if args.auto_confirm not in ("yes", "no"):
             msg(
                 1,

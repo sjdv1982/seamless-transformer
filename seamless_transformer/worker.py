@@ -3586,6 +3586,7 @@ async def forward_to_parent(
     scratch: bool,
     strict_dunder: bool = False,
     dispatch_request_id: str | None = None,
+    driver_context: bool = False,
 ) -> Checksum | str:
     if dispatch_request_id is None:
         dispatch_request_id = uuid.uuid4().hex
@@ -3595,6 +3596,7 @@ async def forward_to_parent(
         "tf_dunder": tf_dunder,
         "scratch": scratch,
         "strict_dunder": bool(strict_dunder),
+        "driver_context": bool(driver_context),
         "delegate_request_id": dispatch_request_id,
     }
     owner_dask_key = _get_current_owner_dask_key()

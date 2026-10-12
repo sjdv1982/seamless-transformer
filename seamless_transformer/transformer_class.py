@@ -12,6 +12,7 @@ from seamless import Buffer, Checksum, ensure_open
 
 from .environment import Environment
 from .pretransformation import direct_transformer_to_pretransformation
+from .transformation_utils import apply_lock_meta_update, resolve_lock_meta
 from .transformation_class import Transformation, transformation_from_pretransformation
 from .frozen_transformer import FrozenTransformer
 
@@ -649,7 +650,7 @@ class TransformerCore(Generic[P, R]):
         if getattr(self, "_workflow_backend", None) is not None:
             self._workflow_backend.meta = meta
             return
-        self._meta.update(meta)
+        apply_lock_meta_update(self._meta, meta)
         for k in list(self._meta.keys()):
             if self._meta[k] is None and k != "local":
                 self._meta.pop(k)
@@ -724,7 +725,7 @@ class TransformerCore(Generic[P, R]):
 
         if self._workflow_backend is not None:
             return self._workflow_backend.driver
-        return self._meta.get("driver", False)
+        return resolve_lock_meta(self._meta)[1]
 
     @driver.setter
     def driver(self, value):
@@ -734,6 +735,23 @@ class TransformerCore(Generic[P, R]):
             self._workflow_backend.driver = value
             return
         self.meta = {"driver": value}
+
+    @property
+    def process_lock(self) -> bool:
+        """Whether this transformer's body claims the per-process lock."""
+
+        if self._workflow_backend is not None:
+            return resolve_lock_meta(self._workflow_backend.meta)[0]
+        return resolve_lock_meta(self._meta)[0]
+
+    @process_lock.setter
+    def process_lock(self, value: bool):
+        if not isinstance(value, bool):
+            raise TypeError(type(value))
+        if self._workflow_backend is not None:
+            self._workflow_backend.process_lock = value
+            return
+        self.meta = {"process_lock": value}
 
     @property
     def local(self) -> bool | None:

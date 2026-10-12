@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time
 
 import pytest
 from seamless import Checksum
@@ -13,6 +14,21 @@ from seamless_transformer.transformation_cache import (
 
 def _checksum(char: str) -> Checksum:
     return Checksum(char * 64)
+
+
+def _wait_for_release(release, should_abort=None, abort_seen=None):
+    deadline = time.monotonic() + 5
+    while not release.is_set():
+        if should_abort is not None and should_abort():
+            if abort_seen is not None:
+                abort_seen.set()
+            raise TransformationCancelledError("Transformation was canceled")
+        assert time.monotonic() < deadline, "release event was never set"
+        release.wait(0.01)
+    if should_abort is not None and should_abort():
+        if abort_seen is not None:
+            abort_seen.set()
+        raise TransformationCancelledError("Transformation was canceled")
 
 
 @pytest.fixture(autouse=True)
@@ -30,10 +46,10 @@ def test_same_checksum_latches_onto_active_submission(monkeypatch):
     release = threading.Event()
     calls = []
 
-    def fake_run(*_args):
+    def fake_run(*_args, should_abort=None):
         calls.append(1)
         started.set()
-        assert release.wait(5)
+        _wait_for_release(release, should_abort)
         return _checksum("b")
 
     monkeypatch.setattr(transformation_cache, "run_transformation_dict", fake_run)
@@ -77,10 +93,10 @@ def test_cancelled_first_awaiter_does_not_kill_peer(monkeypatch):
     release = threading.Event()
     calls = []
 
-    def fake_run(*_args):
+    def fake_run(*_args, should_abort=None):
         calls.append(1)
         started.set()
-        assert release.wait(5)
+        _wait_for_release(release, should_abort)
         return _checksum("2")
 
     monkeypatch.setattr(transformation_cache, "run_transformation_dict", fake_run)
@@ -145,9 +161,9 @@ def test_strict_different_dunder_rejects_while_active(monkeypatch):
     started = threading.Event()
     release = threading.Event()
 
-    def fake_run(*_args):
+    def fake_run(*_args, should_abort=None):
         started.set()
-        assert release.wait(5)
+        _wait_for_release(release, should_abort)
         return _checksum("d")
 
     monkeypatch.setattr(transformation_cache, "run_transformation_dict", fake_run)
@@ -185,13 +201,14 @@ def test_cancel_by_checksum_makes_strict_resubmission_possible(monkeypatch):
     cache = TransformationCache()
     started = threading.Event()
     release = threading.Event()
+    waiter_aborted = threading.Event()
     calls = []
 
-    def fake_run(*_args):
+    def fake_run(*_args, should_abort=None):
         calls.append(1)
         if len(calls) == 1:
             started.set()
-            assert release.wait(5)
+            _wait_for_release(release, should_abort, waiter_aborted)
             return _checksum("f")
         return _checksum("e")
 
@@ -213,6 +230,7 @@ def test_cancel_by_checksum_makes_strict_resubmission_possible(monkeypatch):
         assert cache.cancel_by_checksum(tf_checksum) is True
         assert cache.cancel_by_checksum(tf_checksum) is False
         assert cache.transformation_status(tf_checksum) == "not-running"
+        assert await asyncio.to_thread(waiter_aborted.wait, 1)
 
         assert await cache.run(
             {"code": "return 1"},
@@ -236,11 +254,17 @@ def test_cancel_by_checksum_releases_owner_before_backend_finishes(monkeypatch):
     cache = TransformationCache()
     started = threading.Event()
     release = threading.Event()
+    backend_finished = threading.Event()
 
-    def fake_run(*_args):
+    def fake_run(*_args, should_abort=None):
         started.set()
-        assert release.wait(5)
-        return _checksum("8")
+        try:
+            # This fake is already inside the body; should_abort only applies
+            # while the real process-lock scope is waiting to enter it.
+            assert release.wait(5)
+            return _checksum("8")
+        finally:
+            backend_finished.set()
 
     monkeypatch.setattr(transformation_cache, "run_transformation_dict", fake_run)
 
@@ -261,6 +285,7 @@ def test_cancel_by_checksum_releases_owner_before_backend_finishes(monkeypatch):
             assert cache.cancel_by_checksum(tf_checksum) is True
             with pytest.raises(TransformationCancelledError):
                 await asyncio.wait_for(task, timeout=0.5)
+            assert not backend_finished.is_set()
         finally:
             release.set()
 

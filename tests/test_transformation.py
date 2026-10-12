@@ -11,22 +11,24 @@ def test_transformation():
     @direct
     def func(a, b, delay) -> int:
         import time
-        from seamless.transformer import global_lock
 
-        with global_lock:
-            print("RUN", a, b)
-            time.sleep(delay)
+        print("RUN", a, b)
+        time.sleep(delay)
         return 10 * a + 2 * b
 
+    func.process_lock = True
     assert func(30, 12, 0) == 324
     assert func(40, 2, 0) == 404
     x = func(1, 2, 3)
     assert x == 14
 
     func2 = delayed(func)
+    func2.process_lock = True
     start = time.perf_counter()
 
-    result1 = func2(3, 12, DELAY).run()
+    first_handle = func2(3, 12, DELAY)
+    assert first_handle.meta["process_lock"] is True
+    result1 = first_handle.run()
     first_duration = time.perf_counter() - start
 
     start = time.perf_counter()

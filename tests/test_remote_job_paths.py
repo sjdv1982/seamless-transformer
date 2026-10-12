@@ -15,6 +15,7 @@ def test_write_remote_bash_job_expands_user(monkeypatch, tmp_path):
     captured = {}
 
     def fake_write_bash_job(*args, **kwargs):
+        captured["directory"] = kwargs["directory"]
         captured["cwd"] = Path.cwd()
 
     monkeypatch.setattr(run, "write_bash_job", fake_write_bash_job)
@@ -23,7 +24,8 @@ def test_write_remote_bash_job_expands_user(monkeypatch, tmp_path):
 
     expected = home / "remote-job"
     assert result == str(expected)
-    assert captured["cwd"] == expected
+    assert Path(captured["directory"]) == expected
+    assert captured["cwd"] == Path.cwd()
 
 
 def test_write_remote_bash_job_permission_error_is_actionable(monkeypatch):

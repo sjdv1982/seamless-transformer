@@ -23,18 +23,20 @@ from .compression_utils import (
     decompress_bytes,
     strip_compression_suffix,
 )
+from .process_lock import NOTIFY_ENV, current_holder
 
 
-def _write_file(pinname, data, filemode):
+def _write_file(pinname, data, filemode, *, directory=None):
     if pinname.startswith("/"):
         raise ValueError(f"Pin {pinname}: Absolute path is not allowed")
     path_elements = pinname.split("/")
     if ".." in path_elements:
         raise ValueError(f"Pin {pinname}: .. is not allowed")
+    path = pinname if directory is None else os.path.join(directory, pinname)
     if len(path_elements) > 1:
-        parent_dir = os.path.dirname(pinname)
+        parent_dir = os.path.dirname(path)
         os.makedirs(parent_dir, exist_ok=True)
-    with open(pinname, filemode) as pinf:
+    with open(path, filemode) as pinf:
         pinf.write(data)
 
 
@@ -50,9 +52,21 @@ def _is_shell_env_name(name: str) -> bool:
 
 
 def write_bash_job(
-    bashcode, pins_, conda_environment_, PINS, FILESYSTEM, *, script_name="transform.sh"
+    bashcode,
+    pins_,
+    conda_environment_,
+    PINS,
+    FILESYSTEM,
+    *,
+    script_name="transform.sh",
+    directory=None,
 ):
-    """Materialize a bash transformation job in the current directory."""
+    """Materialize a bash transformation job in the supplied directory."""
+
+    def job_path(path):
+        if directory is None:
+            return path
+        return os.path.join(directory, path)
 
     META_FILE_PREFIX = "META__FILE__"
 
@@ -70,33 +84,39 @@ def write_bash_job(
             v = v.hex()
         if pin.startswith(META_FILE_PREFIX):
             actual_name = pin[len(META_FILE_PREFIX):]
-            _write_file(actual_name, v if isinstance(v, bytes) else v.encode(), "bw")
+            _write_file(
+                actual_name,
+                v if isinstance(v, bytes) else v.encode(),
+                "bw",
+                directory=directory,
+            )
             continue
         if pin in FILESYSTEM:
             if FILESYSTEM[pin]["filesystem"]:
                 env[pin] = v
-                pin_parent = os.path.dirname(pin)
+                pin_path = job_path(pin)
+                pin_parent = os.path.dirname(pin_path)
                 if len(pin_parent):
                     os.makedirs(pin_parent, exist_ok=True)
                 _pin_base, pin_suffix = strip_compression_suffix(pin)
                 _found_base, found_suffix = strip_compression_suffix(v)
                 if found_suffix == pin_suffix:
-                    os.symlink(v, pin)
+                    os.symlink(v, pin_path)
                 else:
-                    with open(v, "rb") as handle:
+                    with open(job_path(v), "rb") as handle:
                         data = handle.read()
                     if found_suffix is not None:
                         data = decompress_bytes(data, found_suffix)
                     if pin_suffix is not None:
                         data = compress_bytes(data, pin_suffix)
-                    _write_file(pin, data, "bw")
+                    _write_file(pin, data, "bw", directory=directory)
                 continue
             elif FILESYSTEM[pin]["mode"] == "directory":
                 fs_entry = FILESYSTEM[pin]
                 deep = fs_entry.get("celltype") == "deepfolder"
                 directory_pin, compression_suffix = strip_compression_suffix(pin)
                 write_to_directory(
-                    directory_pin,
+                    job_path(directory_pin),
                     v,
                     cleanup=False,
                     deep=deep,
@@ -117,16 +137,16 @@ def write_bash_job(
                     env[pin] = vv.rstrip("\n")
             else:
                 vv = json.dumps(v)
-            _write_file(pin, vv, "w")
+            _write_file(pin, vv, "w", directory=directory)
         elif isinstance(v, bytes):
-            _write_file(pin, v, "bw")
+            _write_file(pin, v, "bw", directory=directory)
         else:
             if v.dtype == np.uint8 and v.ndim == 1:
                 vv = v.tobytes()
-                with open(pin, "bw") as pinf:
+                with open(job_path(pin), "bw") as pinf:
                     pinf.write(vv)
             else:
-                with open(pin, "bw") as pinf:
+                with open(job_path(pin), "bw") as pinf:
                     np.save(pinf, v, allow_pickle=False)
 
     bash_header = """set -u -e
@@ -140,6 +160,7 @@ trap 'jobs -p | xargs -r kill' EXIT
                     subprocess.check_output(
                         ["conda", "info", "--base"],
                         stderr=subprocess.DEVNULL,
+                        cwd=directory,
                     )
                     .decode()
                     .strip()
@@ -166,9 +187,10 @@ conda activate {conda_environment_}
             continue
         script_lines.append(f"export {key}={shlex.quote(str(env[key]))}\n")
     script_lines.append(bashcode2)
-    with open(script_name, "w", encoding="utf-8") as script_file:
+    script_path = job_path(script_name)
+    with open(script_path, "w", encoding="utf-8") as script_file:
         script_file.writelines(script_lines)
-    os.chmod(script_name, 0o755)
+    os.chmod(script_path, 0o755)
 
     return env, bashcode2
 
@@ -176,10 +198,7 @@ conda activate {conda_environment_}
 def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN):
     from . import SeamlessStreamTransformationError
 
-    from . import global_lock
-
     env = os.environ.copy()
-    resultfile = "RESULT"
 
     def read_data(data):
         if OUTPUTPIN in ("bytes", "folder", "deepfolder"):
@@ -199,7 +218,10 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
 
     process = None
     tempdir = None
-    old_cwd = None
+    notify_path = None
+    notify_fd = None
+    selector = None
+    output_streams = []
 
     def _kill_process_group():
         if process is None:
@@ -214,17 +236,15 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
 
     def sighandler(signalnum, frame):
         _kill_process_group()
-        if old_cwd is not None:
-            os.chdir(old_cwd)
         if tempdir is not None:
             shutil.rmtree(tempdir, ignore_errors=True)
         raise SystemExit()
 
-    global_lock.acquire()
     try:
-        old_cwd = os.getcwd()
-        tempdir = tempfile.mkdtemp(prefix="seamless-bash-transformer")
-        os.chdir(tempdir)
+        tempdir = os.path.abspath(
+            tempfile.mkdtemp(prefix="seamless-bash-transformer")
+        )
+        resultfile = os.path.join(tempdir, "RESULT")
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, sighandler)
         env, bashcode2 = write_bash_job(
@@ -233,7 +253,19 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
             conda_environment_,
             PINS,
             FILESYSTEM,
+            directory=tempdir,
         )
+        holder = current_holder()
+        notify_holder = holder if holder is not None and holder.held else None
+        if notify_holder is not None:
+            candidate_notify_path = tempdir + ".notify"
+            os.mkfifo(candidate_notify_path, 0o600)
+            notify_path = candidate_notify_path
+            notify_fd = os.open(notify_path, os.O_RDWR | os.O_NONBLOCK)
+            env[NOTIFY_ENV] = notify_path
+        else:
+            env.pop(NOTIFY_ENV, None)
+
         process = subprocess.Popen(
             bashcode2,
             shell=True,
@@ -242,6 +274,7 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
             executable="/bin/bash",
             env=env,
             start_new_session=True,
+            cwd=tempdir,
         )
         stdout = process.stdout
         stderr = process.stderr
@@ -249,6 +282,14 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
         selector = selectors.DefaultSelector()
         pipes = ((stdout, "stdout"), (stderr, "stderr"))
         pending = {stream: bytearray() for stream, _ in pipes}
+        registered_pipes = set()
+        for stream, stream_name in pipes:
+            output_streams.append(stream)
+            selector.register(stream, selectors.EVENT_READ, stream_name)
+            registered_pipes.add(stream)
+        notify_registered = notify_fd is not None
+        if notify_registered:
+            selector.register(notify_fd, selectors.EVENT_READ, "notify")
 
         def write_output(stream_name, line):
             try:
@@ -259,33 +300,52 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
                 return
             getattr(sys, stream_name).write(text)
 
-        try:
-            for stream, stream_name in pipes:
-                selector.register(stream, selectors.EVENT_READ, stream_name)
-            while selector.get_map():
-                for key, _ in selector.select():
-                    stream = cast(IO[bytes], key.fileobj)
-                    chunk = os.read(stream.fileno(), 65536)
-                    if not chunk:
-                        selector.unregister(stream)
-                        tail = pending[stream]
-                        if tail:
-                            write_output(key.data, bytes(tail))
-                            tail.clear()
-                        continue
-                    buffer = pending[stream]
-                    buffer.extend(chunk)
-                    while True:
-                        newline = buffer.find(b"\n")
-                        if newline < 0:
-                            break
-                        line = bytes(buffer[: newline + 1])
-                        del buffer[: newline + 1]
-                        write_output(key.data, line)
-        finally:
-            selector.close()
-            for stream, _ in pipes:
-                stream.close()
+        def read_notify_fifo():
+            if notify_fd is None:
+                return
+            try:
+                data = os.read(notify_fd, 65536)
+            except OSError:
+                return
+            if data and notify_holder is not None:
+                notify_holder.drop()
+
+        while process.poll() is None or registered_pipes or notify_registered:
+            if process.poll() is not None and notify_registered:
+                # Drain a signal sent just before process exit, then stop
+                # watching. Descendants cannot signal after the script exits.
+                read_notify_fifo()
+                selector.unregister(notify_fd)
+                notify_registered = False
+            if process.poll() is not None and not registered_pipes:
+                break
+            if not selector.get_map():
+                process.wait()
+                break
+            timeout = 0.1 if notify_registered else None
+            for key, _ in selector.select(timeout):
+                if key.data == "notify":
+                    read_notify_fifo()
+                    continue
+                stream = cast(IO[bytes], key.fileobj)
+                chunk = os.read(stream.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(stream)
+                    registered_pipes.discard(stream)
+                    tail = pending[stream]
+                    if tail:
+                        write_output(key.data, bytes(tail))
+                        tail.clear()
+                    continue
+                buffer = pending[stream]
+                buffer.extend(chunk)
+                while True:
+                    newline = buffer.find(b"\n")
+                    if newline < 0:
+                        break
+                    line = bytes(buffer[: newline + 1])
+                    del buffer[: newline + 1]
+                    write_output(key.data, line)
         process.wait()
 
         if process.returncode:
@@ -355,18 +415,29 @@ Error: Result folder RESULT is empty
                 resultdata = f.read()
             result = read_data(resultdata)
     finally:
-        try:
-            _kill_process_group()
-        finally:
+        _kill_process_group()
+        if selector is not None:
             try:
-                if old_cwd is not None:
-                    os.chdir(old_cwd)
-            finally:
-                try:
-                    if tempdir is not None:
-                        shutil.rmtree(tempdir, ignore_errors=True)
-                finally:
-                    global_lock.release()
+                selector.close()
+            except Exception:
+                pass
+        for stream in output_streams:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        if notify_fd is not None:
+            try:
+                os.close(notify_fd)
+            except OSError:
+                pass
+        if notify_path is not None:
+            try:
+                os.unlink(notify_path)
+            except OSError:
+                pass
+        if tempdir is not None:
+            shutil.rmtree(tempdir, ignore_errors=True)
 
     return result
 

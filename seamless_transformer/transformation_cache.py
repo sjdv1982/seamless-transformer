@@ -20,6 +20,7 @@ from seamless import Buffer, CacheMissError, Checksum, is_worker
 from . import observation
 from . import record_utils as _record_utils
 from . import worker
+from .process_lock import drop_for_nested_work
 from .probe_index import ensure_record_bucket_preconditions, is_record_probe
 from .record_assembly import (
     _COMPILED_VALIDATION_CACHE,
@@ -125,6 +126,7 @@ def _run_process_transformation_with_capture(
     tf_dunder,
     scratch,
     require_value,
+    should_abort=None,
 ):
     with process_output_route() as (stdout_capture, stderr_capture):
         try:
@@ -134,6 +136,7 @@ def _run_process_transformation_with_capture(
                 tf_dunder,
                 scratch,
                 require_value,
+                should_abort=should_abort,
             )
         except Exception as exc:
             if isinstance(exc, TransformationCancelledError):
@@ -386,6 +389,7 @@ class TransformationCache:
         force_local: bool = False,
         store_execution_record: bool = True,
         strict_dunder: bool = False,
+        driver_context: bool = False,
     ) -> Checksum:
         """Run a transformation and return its result checksum.
 
@@ -468,6 +472,7 @@ class TransformationCache:
             force_local=force_local,
             store_execution_record=store_execution_record,
             strict_dunder=strict_dunder,
+            driver_context=driver_context,
             record_mode=record_mode,
         )
 
@@ -483,6 +488,7 @@ class TransformationCache:
         store_execution_record: bool,
         strict_dunder: bool,
         record_mode: bool,
+        driver_context: bool = False,
     ) -> Checksum:
         envelope_checksum = _dunder_envelope_checksum(tf_dunder, scratch=scratch)
         member = object()
@@ -524,6 +530,7 @@ class TransformationCache:
                     store_execution_record=store_execution_record,
                     strict_dunder=strict_dunder,
                     record_mode=record_mode,
+                    driver_context=driver_context,
                     active_submission=active,
                 )
                 if cache_owned_execution:
@@ -558,6 +565,7 @@ class TransformationCache:
         strict_dunder: bool,
         record_mode: bool,
         active_submission: _ActiveSubmission,
+        driver_context: bool = False,
     ) -> None:
         try:
             result = await self._run_uncached(
@@ -570,6 +578,7 @@ class TransformationCache:
                 store_execution_record=store_execution_record,
                 strict_dunder=strict_dunder,
                 record_mode=record_mode,
+                driver_context=driver_context,
                 active_submission=active_submission,
             )
         except asyncio.CancelledError as exc:
@@ -825,6 +834,7 @@ class TransformationCache:
         strict_dunder: bool,
         record_mode: bool,
         active_submission: _ActiveSubmission | None = None,
+        driver_context: bool = False,
     ) -> Checksum:
         dispatch_started = [False]
         dispatch_request_id = uuid.uuid4().hex
@@ -852,6 +862,7 @@ class TransformationCache:
                     record_mode=record_mode,
                     dispatch_started=dispatch_started,
                     dispatch_request_id=dispatch_request_id,
+                    driver_context=driver_context,
                     active_submission=active_submission,
                 )
             except BaseException:
@@ -879,6 +890,7 @@ class TransformationCache:
         dispatch_started: list[bool],
         dispatch_request_id: str,
         active_submission: _ActiveSubmission | None = None,
+        driver_context: bool = False,
     ) -> Checksum:
         captured_logs: dict[str, Any] | None = None
         delegated_in_worker = False
@@ -1013,6 +1025,7 @@ class TransformationCache:
                 tf_dunder=tf_dunder,
                 scratch=scratch,
                 strict_dunder=strict_dunder,
+                driver_context=driver_context,
                 dispatch_request_id=dispatch_request_id,
             )
             if isinstance(result_checksum, str):
@@ -1044,6 +1057,11 @@ class TransformationCache:
                         tf_dunder,
                         scratch,
                         require_value,
+                        (
+                            (lambda: active_submission.canceled)
+                            if active_submission is not None
+                            else None
+                        ),
                     ),
                     active_submission,
                 )
@@ -1227,6 +1245,7 @@ class TransformationCache:
         force_local: bool = False,
         store_execution_record: bool = True,
         strict_dunder: bool = False,
+        driver_context: bool = False,
     ) -> Checksum:
         tf_checksum = Checksum(tf_checksum)
         self._remember_transformation_dunder(tf_checksum, tf_dunder)
@@ -1268,6 +1287,7 @@ class TransformationCache:
                     force_local=force_local,
                     store_execution_record=store_execution_record,
                     strict_dunder=strict_dunder,
+                    driver_context=driver_context,
                 ),
                 loop,
             )
@@ -1286,6 +1306,7 @@ class TransformationCache:
                     force_local=force_local,
                     store_execution_record=store_execution_record,
                     strict_dunder=strict_dunder,
+                    driver_context=driver_context,
                 )
             )
         finally:
@@ -1370,6 +1391,7 @@ async def run(
     force_local: bool = False,
     store_execution_record: bool = True,
     strict_dunder: bool = False,
+    driver_context: bool = False,
 ) -> Checksum:
     return await get_transformation_cache().run(
         transformation_dict,
@@ -1380,6 +1402,7 @@ async def run(
         force_local=force_local,
         store_execution_record=store_execution_record,
         strict_dunder=strict_dunder,
+        driver_context=driver_context,
     )
 
 
@@ -1442,6 +1465,7 @@ def run_sync(
     force_local: bool = False,
     store_execution_record: bool = True,
     strict_dunder: bool = False,
+    driver_context: bool = False,
 ) -> Checksum:
     return get_transformation_cache().run_sync(
         transformation_dict,
@@ -1452,6 +1476,7 @@ def run_sync(
         force_local=force_local,
         store_execution_record=store_execution_record,
         strict_dunder=strict_dunder,
+        driver_context=driver_context,
     )
 
 
@@ -1461,6 +1486,7 @@ async def recompute_from_transformation_checksum(
     scratch: bool = True,
     require_value: bool = True,
 ) -> Checksum | None:
+    drop_for_nested_work()
     try:
         tf_checksum_obj = Checksum(tf_checksum)
         transformation_dict = await tf_checksum_obj.resolution(celltype="plain")
@@ -1487,6 +1513,7 @@ def recompute_from_transformation_checksum_sync(
     scratch: bool = True,
     require_value: bool = True,
 ) -> Checksum | None:
+    drop_for_nested_work()
     try:
         tf_checksum_obj = Checksum(tf_checksum)
         transformation_dict = tf_checksum_obj.resolve(celltype="plain")

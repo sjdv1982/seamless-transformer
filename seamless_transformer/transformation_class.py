@@ -17,8 +17,10 @@ from seamless.util.get_event_loop import get_event_loop
 from .transformation_utils import (
     extract_tf_dunder,
     normalize_optional_pins_for_construction,
+    resolve_lock_meta,
     tf_get_buffer,
 )
+from .process_lock import drop_for_nested_work
 from . import worker
 
 _SCRATCH_REQUEST: ContextVar[tuple[int, bool] | None] = ContextVar(
@@ -212,6 +214,11 @@ def loop_is_nested(loop: asyncio.AbstractEventLoop) -> bool:
 
 
 _LOOP_THREADS: dict[asyncio.AbstractEventLoop, threading.Thread] = {}
+_LOOP_THREAD_READY: dict[asyncio.AbstractEventLoop, threading.Event] = {}
+_LOOP_THREAD_START_ERRORS: dict[
+    asyncio.AbstractEventLoop, list[BaseException]
+] = {}
+_LOOP_THREADS_LOCK = threading.Lock()
 
 
 def _compute_executor_max_workers() -> int:
@@ -235,17 +242,80 @@ def _ensure_loop_running(loop: asyncio.AbstractEventLoop) -> None:
 
     if loop.is_running():
         return
-    thread = _LOOP_THREADS.get(loop)
-    if thread and thread.is_alive():
-        return
+    with _LOOP_THREADS_LOCK:
+        if loop.is_running():
+            return
+        thread = _LOOP_THREADS.get(loop)
+        ready = _LOOP_THREAD_READY.get(loop)
+        startup_errors = _LOOP_THREAD_START_ERRORS.get(loop)
+        if thread is None or not thread.is_alive():
+            ready = threading.Event()
+            startup_errors = []
 
-    def _runner():
-        asyncio.set_event_loop(loop)
-        loop.run_forever()
+            def _runner():
+                try:
+                    asyncio.set_event_loop(loop)
+                    # The callback fires only after run_forever has marked the
+                    # loop running, closing the create_task startup race.
+                    loop.call_soon(ready.set)
+                    loop.run_forever()
+                except BaseException as exc:
+                    startup_errors.append(exc)
+                    ready.set()
+                    raise
 
-    thread = threading.Thread(target=_runner, daemon=True, name="seamless-loop")
-    _LOOP_THREADS[loop] = thread
-    thread.start()
+            thread = threading.Thread(target=_runner, daemon=True, name="seamless-loop")
+            _LOOP_THREADS[loop] = thread
+            _LOOP_THREAD_READY[loop] = ready
+            _LOOP_THREAD_START_ERRORS[loop] = startup_errors
+            thread.start()
+
+    assert ready is not None
+    assert startup_errors is not None
+    ready.wait()
+    if startup_errors:
+        raise RuntimeError("Could not start the transformation event loop") from startup_errors[0]
+    if not loop.is_running():
+        raise RuntimeError("Transformation event loop stopped during startup")
+
+
+def _create_task_on_loop(
+    loop: asyncio.AbstractEventLoop,
+    coroutine,
+    done_callback=None,
+) -> asyncio.Task:
+    """Create a task on its loop thread, waking a loop owned by another thread."""
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if not loop.is_running() or running_loop is loop:
+        task = loop.create_task(coroutine)
+        if done_callback is not None:
+            task.add_done_callback(done_callback)
+        return task
+
+    created = threading.Event()
+    result = []
+    error = []
+
+    def _create():
+        try:
+            task = loop.create_task(coroutine)
+            if done_callback is not None:
+                task.add_done_callback(done_callback)
+            result.append(task)
+        except BaseException as exc:
+            error.append(exc)
+        finally:
+            created.set()
+
+    loop.call_soon_threadsafe(_create)
+    created.wait()
+    if error:
+        raise error[0]
+    return result[0]
 
 
 _DRIVER_LOOP: asyncio.AbstractEventLoop | None = None
@@ -313,6 +383,14 @@ def _dask_available() -> bool:
     return get_seamless_dask_client() is not None
 
 
+def _driver_context_active() -> bool:
+    try:
+        from .run import is_driver_context
+    except Exception:
+        return False
+    return bool(is_driver_context())
+
+
 class Transformation(TransformationDaskMixin, Generic[T]):
     """Resolve and evaluate transformation checksums, sync or async.
 
@@ -365,6 +443,7 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         self._input_refholds: list[tuple[Checksum, str]] = []
         self._definition_refheld = False
         self._evaluated = False
+        self._driver_context: bool | None = None
         self._exception = None
         self._cancelled = False
         self._cancel_requested = False
@@ -1156,6 +1235,10 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             await self._ensure_result_value()
         return self._result_checksum
 
+    def _record_driver_context(self) -> None:
+        if getattr(self, "_driver_context", None) is None:
+            self._driver_context = _driver_context_active()
+
     def _compute(self, api_origin: str) -> Checksum | None:
         """Evaluate through a public entry point.
 
@@ -1166,6 +1249,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
         if api_origin == "dependency":
             return self._compute_dependency()
+        drop_for_nested_work()
+        self._record_driver_context()
         self._enable_result_holding()
         return self._compute_sync(api_origin)
 
@@ -1189,23 +1274,13 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         await self._evaluation(require_value=require_value)
         return self._result_checksum
 
-    def _compute_in_thread(
-        self, require_value: bool, driver_context: bool = False
-    ) -> None:
+    def _compute_in_thread(self, require_value: bool) -> None:
         """Run the computation in a dedicated event loop in a worker thread."""
 
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            try:
-                from .run import _driver_context
-            except Exception:
-                loop.run_until_complete(self._computation(require_value=require_value))
-            else:
-                with _driver_context(driver_context):
-                    loop.run_until_complete(
-                        self._computation(require_value=require_value)
-                    )
+            loop.run_until_complete(self._computation(require_value=require_value))
         finally:
             try:
                 loop.run_until_complete(loop.shutdown_asyncgens())
@@ -1223,7 +1298,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         If require_value is True, it is made sure that the value will be available too.
         (If only the checksum is available, the transformation will be recomputed.)
         """
+        drop_for_nested_work()
         ensure_open("transformation computation")
+        self._record_driver_context()
         self._enable_result_holding()
         if self._cancelled:
             return None
@@ -1279,7 +1356,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         _internal: bool = False,
     ) -> "Transformation[T]":
         """Ensure the computation task is scheduled; return self for chaining."""
+        drop_for_nested_work()
         ensure_open("transformation start")
+        self._record_driver_context()
         if not _internal:
             self._enable_result_holding()
         if self._cancelled:
@@ -1289,10 +1368,11 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         if _dask_available() and not self._prefer_local_execution():
             if self._computation_task is None:
                 loop = loop or _sync_task_loop()
-                self._computation_task = loop.create_task(
-                    self._compute_with_dask_async(require_value=False)
+                self._computation_task = _create_task_on_loop(
+                    loop,
+                    self._compute_with_dask_async(require_value=False),
+                    self._future_cleanup,
                 )
-                self._computation_task.add_done_callback(self._future_cleanup)
             return self
         if self._computation_task is not None or self._computation_future is not None:
             return self
@@ -1303,49 +1383,27 @@ class Transformation(TransformationDaskMixin, Generic[T]):
             except Exception:
                 local_only = False
             if not local_only:
-                driver_context = False
-                driver_ctx_manager = None
-                try:
-                    from .run import is_driver_context, _driver_context
-                except Exception:
-                    is_driver_context = None
-                else:
-                    driver_context = is_driver_context()
-                    driver_ctx_manager = _driver_context
                 loop = loop or get_event_loop()
                 _ensure_loop_running(loop)
-                if driver_ctx_manager is None:
-                    self._computation_task = loop.create_task(
-                        self._computation(require_value=False)
-                    )
-                else:
-
-                    async def _run_with_driver():
-                        with driver_ctx_manager(driver_context):
-                            return await self._computation(require_value=False)
-
-                    self._computation_task = loop.create_task(_run_with_driver())
-                self._computation_task.add_done_callback(self._future_cleanup)
+                self._computation_task = _create_task_on_loop(
+                    loop,
+                    self._computation(require_value=False),
+                    self._future_cleanup,
+                )
                 return self
         if is_worker() or worker.has_spawned():
             # Offload to a thread with its own event loop for concurrency.
-            driver_context = False
-            try:
-                from .run import is_driver_context
-
-                driver_context = is_driver_context()
-            except Exception:
-                driver_context = False
             self._computation_future = _COMPUTE_EXECUTOR.submit(
-                self._compute_in_thread, False, driver_context
+                self._compute_in_thread, False
             )
             return self
         loop = loop or _sync_task_loop()
         _ensure_loop_running(loop)
-        self._computation_task = loop.create_task(
-            self._computation(require_value=False)
+        self._computation_task = _create_task_on_loop(
+            loop,
+            self._computation(require_value=False),
+            self._future_cleanup,
         )
-        self._computation_task.add_done_callback(self._future_cleanup)
         return self
 
     @property
@@ -1439,7 +1497,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
 
         First runs .compute, then resolve the result checksum into a value.
         Raise RuntimeError in case of an exception."""
+        drop_for_nested_work()
         ensure_open("transformation task")
+        self._record_driver_context()
         self._enable_result_holding()
         return get_event_loop().create_task(self._run())
 
@@ -1492,6 +1552,8 @@ class Transformation(TransformationDaskMixin, Generic[T]):
     def clear_exception(self) -> None:
         if self._cancelled:
             return
+        if self._exception is not None:
+            self._driver_context = None
         self._exception = None
         if self._constructed and self._transformation_checksum is None:
             self._constructed = False
@@ -1578,17 +1640,18 @@ def transformation_from_pretransformation(
             meta_payload.update(existing_meta)
         if frozen_meta:
             meta_payload.update(frozen_meta)
-        try:
-            from .run import is_driver_context
-        except Exception:
-            driver_context = False
-        else:
-            driver_context = bool(is_driver_context())
-        if driver_context:
-            meta_payload["driver"] = True
-        if meta_payload:
-            dunder["__meta__"] = deepcopy(meta_payload)
+        process_lock, driver = resolve_lock_meta(meta_payload)
+        meta_payload["process_lock"] = process_lock
+        meta_payload["driver"] = driver
+        dunder["__meta__"] = deepcopy(meta_payload)
         return dunder
+
+    def _sync_transformation_lock_meta(transformation_obj: "Transformation") -> None:
+        meta_payload = prepared_tf_dunder.get("__meta__", {})
+        process_lock, driver = resolve_lock_meta(meta_payload)
+        transformation_obj._meta["process_lock"] = process_lock
+        transformation_obj._meta["driver"] = driver
+        transformation_obj._meta_view = _readonly_recursive(transformation_obj._meta)
 
     def _prepared_dict_with_dependencies(
         transformation_obj: "Transformation",
@@ -1654,6 +1717,7 @@ def transformation_from_pretransformation(
         if post_prepare_sync is not None:
             post_prepare_sync(prepared_execution_dict)
         prepared_tf_dunder = _collect_tf_dunder(prepared_execution_dict)
+        _sync_transformation_lock_meta(transformation_obj)
         tf_buffer = tf_get_buffer(prepared_execution_dict)
         tf_checksum = tf_buffer.get_checksum()
         tf_buffer.tempref()
@@ -1671,6 +1735,7 @@ def transformation_from_pretransformation(
         elif post_prepare_sync is not None:
             post_prepare_sync(prepared_execution_dict)
         prepared_tf_dunder = _collect_tf_dunder(prepared_execution_dict)
+        _sync_transformation_lock_meta(transformation_obj)
         tf_buffer = tf_get_buffer(prepared_execution_dict)
         tf_checksum = tf_buffer.get_checksum()
         tf_buffer.tempref()
@@ -1692,6 +1757,7 @@ def transformation_from_pretransformation(
             scratch=scratch,
             require_value=require_value,
             strict_dunder=bool(transformation_obj._strict_dunder),
+            driver_context=bool(getattr(transformation_obj, "_driver_context", False)),
         )
 
     async def evaluator_async(transformation_obj, require_value: bool) -> Checksum:
@@ -1708,10 +1774,17 @@ def transformation_from_pretransformation(
             scratch=scratch,
             require_value=require_value,
             strict_dunder=bool(transformation_obj._strict_dunder),
+            driver_context=bool(getattr(transformation_obj, "_driver_context", False)),
         )
 
     def destructor(transformation_obj):  # pylint: disable=unused-argument
         pre_transformation.release()
+
+    initial_meta = _collect_tf_dunder(frozen_payload_template).get("__meta__", {})
+    initial_process_lock, initial_driver = resolve_lock_meta(initial_meta)
+    transformation_meta = deepcopy(frozen_meta)
+    transformation_meta["process_lock"] = initial_process_lock
+    transformation_meta["driver"] = initial_driver
 
     tf = Transformation(
         pre_transformation.result_celltype,
@@ -1720,7 +1793,7 @@ def transformation_from_pretransformation(
         evaluator_sync,
         evaluator_async,
         upstream_dependencies=frozen_dependencies,
-        meta=frozen_meta,
+        meta=transformation_meta,
         destructor=destructor,
         pretransformation=pre_transformation,
         tf_dunder=explicit_tf_dunder,
