@@ -71,7 +71,6 @@ def write_bash_job(
     META_FILE_PREFIX = "META__FILE__"
 
     env = os.environ.copy()
-    base_env = env.copy()
     for pin in pins_:
         if pin == "pins_":
             continue
@@ -179,11 +178,11 @@ conda activate {conda_environment_}
 
     bashcode2 = bash_header + bashcode
 
-    script_lines = ["#!/bin/bash\n"]
-    for key in sorted(env):
-        if env[key] == base_env.get(key):
+    script_lines = ["#!/bin/bash\n", ": > .seamless-started\n"]
+    for key in sorted(set(pins_)):
+        if key in ("pins_", "bashcode") or key.startswith(META_FILE_PREFIX):
             continue
-        if not _is_shell_env_name(key):
+        if key not in env or not _is_shell_env_name(key):
             continue
         script_lines.append(f"export {key}={shlex.quote(str(env[key]))}\n")
     script_lines.append(bashcode2)
@@ -247,7 +246,7 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
         resultfile = os.path.join(tempdir, "RESULT")
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, sighandler)
-        env, bashcode2 = write_bash_job(
+        write_bash_job(
             bashcode,
             pins_,
             conda_environment_,
@@ -255,6 +254,7 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
             FILESYSTEM,
             directory=tempdir,
         )
+        child_env = os.environ.copy()
         holder = current_holder()
         notify_holder = holder if holder is not None and holder.held else None
         if notify_holder is not None:
@@ -262,17 +262,15 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
             os.mkfifo(candidate_notify_path, 0o600)
             notify_path = candidate_notify_path
             notify_fd = os.open(notify_path, os.O_RDWR | os.O_NONBLOCK)
-            env[NOTIFY_ENV] = notify_path
+            child_env[NOTIFY_ENV] = notify_path
         else:
-            env.pop(NOTIFY_ENV, None)
+            child_env.pop(NOTIFY_ENV, None)
 
         process = subprocess.Popen(
-            bashcode2,
-            shell=True,
+            ["bash", "transform.sh"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            executable="/bin/bash",
-            env=env,
+            env=child_env,
             start_new_session=True,
             cwd=tempdir,
         )
@@ -347,6 +345,19 @@ def execute_bash(bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPI
                     del buffer[: newline + 1]
                     write_output(key.data, line)
         process.wait()
+
+        if not os.path.exists(os.path.join(tempdir, ".seamless-started")):
+            raise SeamlessStreamTransformationError(
+                "\nBash transformer exception\n"
+                "==========================\n\n"
+                "Error: Environment was not entered; transform.sh could not be started\n"
+                f"Return code: {process.returncode}\n\n"
+                "*************************************************\n"
+                "* Command\n"
+                "*************************************************\n"
+                "bash transform.sh\n"
+                "*************************************************\n"
+            )
 
         if process.returncode:
             raise SeamlessStreamTransformationError(

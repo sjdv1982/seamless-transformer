@@ -22,7 +22,12 @@ def test_bash_drains_one_mib_stderr_before_stdout_eof(returncode):
         from seamless_transformer import SeamlessStreamTransformationError
         module = importlib.import_module('seamless_transformer.execute_bash')
         code = "head -c 1048576 /dev/zero | tr '\\\\0' x >&2; printf 'stderr-tail' >&2; printf 'stdout-tail'; printf 42 > RESULT; exit {returncode}"
-        module.write_bash_job = lambda code, *args, **kwargs: (os.environ.copy(), code)
+        def write_bash_job(code, *args, **kwargs):
+            script_path = os.path.join(kwargs["directory"], "transform.sh")
+            with open(script_path, "w", encoding="utf-8") as script_file:
+                script_file.write("#!/bin/bash\\n: > .seamless-started\\n" + code)
+            return os.environ.copy(), code
+        module.write_bash_job = write_bash_job
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             try:
@@ -47,7 +52,13 @@ def test_bash_cleanup_failure_releases_lock_and_uses_safe_session(monkeypatch, t
     from seamless_transformer import process_lock
 
     module = importlib.import_module("seamless_transformer.execute_bash")
-    monkeypatch.setattr(module, "write_bash_job", lambda code, *args, **kwargs: (os.environ.copy(), code))
+    def write_bash_job(code, *args, **kwargs):
+        script_path = os.path.join(kwargs["directory"], "transform.sh")
+        with open(script_path, "w", encoding="utf-8") as script_file:
+            script_file.write("#!/bin/bash\n: > .seamless-started\n" + code)
+        return os.environ.copy(), code
+
+    monkeypatch.setattr(module, "write_bash_job", write_bash_job)
     monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **kwargs: str(tmp_path))
     # Avoid installing the production SIGTERM handler in the pytest process.
     monkeypatch.setattr(module.signal, "signal", lambda *args: None)

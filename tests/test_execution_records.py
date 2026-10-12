@@ -120,8 +120,10 @@ def test_record_mode_writes_execution_record(monkeypatch):
         tf_dunder,
         scratch,
         require_value,
+        should_abort=None,
     ):
         del transformation_dict, tf_checksum_arg, tf_dunder, scratch, require_value
+        del should_abort
         return result_checksum
 
     monkeypatch.setattr(transformation_cache, "database_remote", fake_database_remote)
@@ -269,8 +271,10 @@ def test_record_probe_skips_execution_record_write(monkeypatch):
         tf_dunder,
         scratch,
         require_value,
+        should_abort=None,
     ):
         del transformation_dict, tf_checksum_arg, tf_dunder, scratch, require_value
+        del should_abort
         return result_checksum
 
     async def _unexpected_probe_context(*args, **kwargs):
@@ -328,8 +332,10 @@ def test_minimal_record_written_when_record_mode_false(monkeypatch):
         tf_dunder,
         scratch,
         require_value,
+        should_abort=None,
     ):
         del transformation_dict, tf_checksum_arg, tf_dunder, scratch, require_value
+        del should_abort
         return result_checksum
 
     async def _unexpected_probe_context(*args, **kwargs):
@@ -412,8 +418,10 @@ def test_execution_record_write_can_be_skipped(monkeypatch):
         tf_dunder,
         scratch,
         require_value,
+        should_abort=None,
     ):
         del transformation_dict, tf_checksum_arg, tf_dunder, scratch, require_value
+        del should_abort
         return result_checksum
 
     monkeypatch.setattr(transformation_cache, "database_remote", fake_database_remote)
@@ -476,8 +484,10 @@ def test_compiled_record_writes_compilation_context(monkeypatch):
         tf_dunder,
         scratch,
         require_value,
+        should_abort=None,
     ):
         del transformation_dict, tf_checksum_arg, tf_dunder, scratch, require_value
+        del should_abort
         return result_checksum
 
     monkeypatch.setattr(transformation_cache, "database_remote", fake_database_remote)
@@ -607,8 +617,10 @@ def test_compiled_record_reports_native_link_contract_violation(monkeypatch, tmp
         tf_dunder,
         scratch,
         require_value,
+        should_abort=None,
     ):
         del transformation_dict, tf_checksum_arg, tf_dunder, scratch, require_value
+        del should_abort
         return result_checksum
 
     monkeypatch.setenv("CONDA_PREFIX", str(conda_prefix))
@@ -862,8 +874,11 @@ def test_spawn_record_writes_single_execution_record(monkeypatch):
         tf_dunder,
         scratch,
         strict_dunder,
+        with_logs=False,
     ):
         del transformation_dict, tf_checksum, tf_dunder, scratch, strict_dunder
+        if with_logs:
+            return result_checksum, None
         return result_checksum
 
     monkeypatch.setattr(transformation_cache, "database_remote", fake_database_remote)

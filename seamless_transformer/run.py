@@ -146,8 +146,32 @@ def run_transformation_dict(
             env_dict = env_buffer.get_value("plain")
         if not isinstance(env_dict, dict):
             env_dict = {}
+
+    language = transformation.get("__language__", "python")
+    is_probe = is_record_probe(transformation, tf_dunder)
+    environment_keys = {key for key in ("docker", "conda_environment") if key in env_dict}
+    if environment_keys and not is_probe:
+        if language != "bash" or _is_compiled_transformation(transformation, tf_dunder):
+            raise RuntimeError(
+                "docker and conda_environment apply to bash transformers only"
+            )
+        if "docker" in environment_keys:
+            raise RuntimeError(
+                "container execution is not implemented yet; refusing to run on the host"
+            )
+
+    skip_environment_which = is_probe and bool(environment_keys)
+    if env_checksum0 is not None:
         import shutil
-        missing = [binary for binary in env_dict.get("which", ()) if shutil.which(binary) is None]
+        missing = (
+            []
+            if skip_environment_which
+            else [
+                binary
+                for binary in env_dict.get("which", ())
+                if shutil.which(binary) is None
+            ]
+        )
         if missing:
             raise RuntimeError("Required environment binaries are unavailable: " + ", ".join(missing))
 
@@ -160,7 +184,6 @@ def run_transformation_dict(
 
     tf_namespace = build_transformation_namespace_sync(transformation)
     code, namespace, modules_to_build = tf_namespace
-    language = transformation.get("__language__", "python")
     if language == "python" and isinstance(code, str) and len(code) == 64:
         # Defensive fallback: recover code text if a checksum hex string leaked through.
         tf_dict_fallback = None
