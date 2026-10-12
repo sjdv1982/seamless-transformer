@@ -344,7 +344,9 @@ def build_container_command(
     return command
 
 
-def remove_container(runtime: str, container_name: str) -> None:
+def remove_container(
+    runtime: str, container_name: str, *, detached: bool = False
+) -> None:
     """Force-remove a named Docker or Podman container, ignoring cleanup errors."""
     if runtime == "docker":
         command = ["docker", "rm", "-f", container_name]
@@ -353,14 +355,70 @@ def remove_container(runtime: str, container_name: str) -> None:
     else:
         return
     try:
-        subprocess.run(
-            command,
-            stdout=subprocess.DEVNULL,
+        if detached:
+            subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+        else:
+            subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def remove_worker_containers(worker_pid: int) -> None:
+    """Detach removal of Docker or Podman containers left by a killed worker."""
+
+    try:
+        runtime = select_container_runtime()
+    except Exception:
+        return
+    if runtime not in ("docker", "podman"):
+        return
+    try:
+        result = subprocess.run(
+            [
+                runtime,
+                "ps",
+                "-aq",
+                "--filter",
+                "label=seamless.pid={}".format(worker_pid),
+            ],
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            timeout=5,
+            text=True,
+            timeout=2,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
+        return
+    if result.returncode:
+        return
+    containers = result.stdout.split()
+    if not containers:
+        return
+    if runtime == "docker":
+        command = [runtime, "rm", "-f", *containers]
+    else:
+        command = [runtime, "rm", "-f", "-t", "0", *containers]
+    try:
+        subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError:
         pass
 
 
@@ -368,6 +426,7 @@ __all__ = [
     "build_container_command",
     "container_runtime_info",
     "remove_container",
+    "remove_worker_containers",
     "select_container_runtime",
     "validate_container_spec",
 ]

@@ -261,11 +261,13 @@ def run_transformation_dict(
         namespace["docker_"] = docker_spec
         namespace["container_runtime_"] = container_runtime
         namespace["tf_checksum_"] = checksum_hex
+        namespace["should_abort_"] = should_abort
         code = (
             f"{output_name} = execute_bash("
             "bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN, "
             "which_=which_, docker_=docker_, container_runtime_="
-            "container_runtime_, tf_checksum_=tf_checksum_)"
+            "container_runtime_, tf_checksum_=tf_checksum_, "
+            "should_abort_=should_abort_)"
         )
         inputs = []
 

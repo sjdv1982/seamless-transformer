@@ -25,6 +25,7 @@ from .compression_utils import (
     strip_compression_suffix,
 )
 from .process_lock import NOTIFY_ENV, current_holder
+from .bash_cancellation import register_cleanup
 from .container import (
     build_container_command,
     remove_container,
@@ -305,10 +306,18 @@ def execute_bash(
     docker_=None,
     container_runtime_=None,
     tf_checksum_=None,
+    should_abort_=None,
 ):
     from . import SeamlessStreamTransformationError
+    from seamless.error_envelope import ExecutionCanceledError
 
     env = os.environ.copy()
+
+    def check_cancelled():
+        if should_abort_ is not None and should_abort_():
+            raise ExecutionCanceledError("Transformation was canceled")
+
+    check_cancelled()
 
     def read_data(data):
         if OUTPUTPIN in ("bytes", "folder", "deepfolder"):
@@ -340,6 +349,7 @@ def execute_bash(
         "seamless-{}".format(uuid.uuid4().hex[:12]) if docker_spec is not None else None
     )
     process = None
+    process_started = threading.Event()
     tempdir = None
     notify_path = None
     notify_fd = None
@@ -348,9 +358,14 @@ def execute_bash(
 
     def _kill_process_group():
         if process is None:
+            # SIGTERM can arrive while the thread calling Popen is still
+            # returning the new process object. Give it a short chance to publish
+            # the process handle before the worker exits.
+            process_started.wait(0.1)
+        if process is None:
             return
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(process.pid, signal.SIGKILL)
         except Exception:
             try:
                 process.kill()
@@ -359,11 +374,21 @@ def execute_bash(
 
     def sighandler(signalnum, frame):
         _kill_process_group()
+        if container_name is not None:
+            remove_container(container_runtime_, container_name, detached=True)
         if tempdir is not None:
             shutil.rmtree(tempdir, ignore_errors=True)
         raise SystemExit()
 
+    def cleanup_launch():
+        _kill_process_group()
+        if container_name is not None:
+            remove_container(container_runtime_, container_name, detached=True)
+
+    unregister_cleanup = register_cleanup(tf_checksum_, cleanup_launch)
+
     try:
+        check_cancelled()
         tempdir = os.path.abspath(
             tempfile.mkdtemp(prefix="seamless-bash-transformer")
         )
@@ -423,14 +448,18 @@ def execute_bash(
         else:
             child_env.pop(NOTIFY_ENV, None)
 
-        process = subprocess.Popen(
-            ["bash", "transform.sh"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=child_env,
-            start_new_session=True,
-            cwd=tempdir,
-        )
+        try:
+            process = subprocess.Popen(
+                ["bash", "transform.sh"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=child_env,
+                start_new_session=True,
+                cwd=tempdir,
+            )
+        finally:
+            process_started.set()
+        check_cancelled()
         stdout = process.stdout
         stderr = process.stderr
         assert stdout is not None and stderr is not None
@@ -644,9 +673,12 @@ Error: Result folder RESULT is empty
                 resultdata = f.read()
             result = read_data(resultdata)
     finally:
-        _kill_process_group()
-        if container_name is not None:
-            remove_container(container_runtime_, container_name)
+        try:
+            cleanup_launch()
+            if container_name is not None:
+                remove_container(container_runtime_, container_name)
+        finally:
+            unregister_cleanup()
         if selector is not None:
             try:
                 selector.close()

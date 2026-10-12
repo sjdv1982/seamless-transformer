@@ -18,6 +18,7 @@ import uuid
 from seamless import Buffer, CacheMissError, Checksum, is_worker
 
 from . import observation
+from .bash_cancellation import run_cleanups
 from . import record_utils as _record_utils
 from . import worker
 from .process_lock import drop_for_nested_work
@@ -671,6 +672,7 @@ class TransformationCache:
                 TransformationCancelledError("Transformation was canceled")
             )
         try:
+            run_cleanups(tf_checksum)
             worker.cancel_by_checksum(tf_checksum)
         except Exception:
             pass
@@ -714,6 +716,7 @@ class TransformationCache:
                 TransformationCancelledError("Transformation was canceled")
             )
         try:
+            run_cleanups(tf_checksum)
             worker.cancel_by_checksum(tf_checksum)
         except Exception:
             pass
@@ -776,6 +779,10 @@ class TransformationCache:
             active = self._active_submissions.pop(tf_checksum, None)
         if active is not None:
             canceled = self._hard_cancel_active(active)
+        try:
+            run_cleanups(tf_checksum)
+        except Exception:
+            pass
         try:
             canceled = worker.cancel_by_checksum(tf_checksum) or canceled
         except Exception:
