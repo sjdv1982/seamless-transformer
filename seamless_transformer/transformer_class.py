@@ -508,9 +508,23 @@ class TransformerCore(Generic[P, R]):
             else:
                 modules["main"] = globals_def
 
+        transformation_meta = deepcopy(frozen.meta)
+        from .languages import get_language_handler, is_handler_language
+
+        if is_handler_language(frozen.language):
+            from collections.abc import Mapping
+
+            metavars = deepcopy(get_language_handler(frozen.language).metavars)
+            stored_metavars = transformation_meta.get("metavars")
+            if stored_metavars is not None:
+                if not isinstance(stored_metavars, Mapping):
+                    raise TypeError("transformer meta['metavars'] must be a mapping")
+                metavars.update(stored_metavars)
+            transformation_meta["metavars"] = metavars
+
         pre_transformation = direct_transformer_to_pretransformation(
             frozen.codebuf,
-            deepcopy(frozen.meta),
+            transformation_meta,
             deepcopy(frozen.celltypes),
             modules,
             arguments,
@@ -525,7 +539,7 @@ class TransformerCore(Generic[P, R]):
             transformation_from_pretransformation(
                 pre_transformation,
                 upstream_dependencies=deps,
-                meta=deepcopy(frozen.meta),
+                meta=transformation_meta,
                 scratch=frozen.scratch,
                 tf_dunder={},
             ),
@@ -1101,6 +1115,104 @@ class DirectBashTransformer(DirectCallMixin, BashTransformer):
     """Direct Bash transformer."""
 
 
+
+class HandlerMetaVars:
+    """Metavars declared by one registered handler."""
+
+    def __init__(self, transformer):
+        self._transformer = transformer
+
+    def _definition(self):
+        from .languages import get_language_handler
+
+        return get_language_handler(self._transformer.language)
+
+    def _values(self):
+        defaults = deepcopy(self._definition().metavars)
+        backend = self._transformer._workflow_backend
+        if backend is None:
+            stored = self._transformer._meta.get("metavars", {})
+        else:
+            stored = backend.cfg.meta.get("metavars", {})
+        if stored:
+            from collections.abc import Mapping
+
+            if not isinstance(stored, Mapping):
+                raise TypeError("transformer meta['metavars'] must be a mapping")
+            defaults.update(deepcopy(dict(stored)))
+        return defaults
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        definition = self._definition()
+        if name not in definition.metavars:
+            raise AttributeError(f"No metavar {name!r}")
+        return self._values().get(name)
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            return super().__setattr__(name, value)
+        definition = self._definition()
+        if name not in definition.metavars:
+            raise AttributeError(f"No metavar {name!r}")
+        if name == "BACKEND":
+            from .languages import _validate_backend_value
+
+            _validate_backend_value(value, self._transformer.language)
+        values = self._values()
+        values[name] = value
+        transformer = self._transformer
+        backend = transformer._workflow_backend
+        if backend is None:
+            transformer._meta["metavars"] = values
+        else:
+            backend.context._set_node_config(
+                backend.node_path, "meta", {"metavars": values}
+            )
+
+    def to_dict(self):
+        return self._values()
+
+
+class HandlerTransformer(PythonBashBaseTransformer[P, R]):
+    """Delayed transformer backed by a registered language handler."""
+
+    def __init__(
+        self,
+        code: str | Checksum | None = None,
+        *,
+        language: str,
+        scratch: bool = False,
+        local: bool = False,
+    ):
+        if code is not None and not isinstance(code, (str, Checksum)):
+            raise TypeError("handler transformer code must be text or a Checksum")
+        super().__init__(
+            code,
+            language=language,
+            scratch=scratch,
+            local=local,
+        )
+
+    @PythonBashBaseTransformer.code.setter
+    def code(self, code: str | Checksum):
+        if not isinstance(code, (str, Checksum)):
+            raise TypeError("handler transformer code must be text or a Checksum")
+        if getattr(self, "_workflow_backend", None) is not None:
+            self._workflow_backend.code = code
+            return
+        return self._set_code(code)
+
+    @property
+    def metavars(self):
+        return HandlerMetaVars(self)
+
+
+class DirectHandlerTransformer(DirectCallMixin, HandlerTransformer):
+    """Direct-call transformer backed by a registered language handler."""
+
+
 class Transformer:
     """Factory for Python, Bash, and compiled Transformer builders."""
 
@@ -1119,6 +1231,12 @@ class Transformer:
             target = DirectCompiledTransformer if direct else CompiledTransformer
             return target(language)
 
+        from .languages import is_handler_language
+
+        if is_handler_language(language):
+            target = DirectHandlerTransformer if direct else HandlerTransformer
+            return target(language=language)
+
         try:
             target = {
                 ("python", False): PythonTransformer,
@@ -1128,7 +1246,8 @@ class Transformer:
             }[(language, bool(direct))]
         except KeyError:
             raise ValueError(
-                "non-compiled transformer language must be 'python' or 'bash'"
+                "transformer language must be 'python' or 'bash', a compiled "
+                "language, or a registered handler language"
             ) from None
         return target()
 
@@ -1171,6 +1290,15 @@ class CelltypesWrapper:
             all_celltypes = celltypes + ["deepcell", "deepfolder", "folder", "module"]
         if value not in all_celltypes:
             raise TypeError(value, all_celltypes)
+        if (
+            key != "result"
+            and value == "deepcell"
+            and getattr(self._owner, "language", None) == "bash"
+        ):
+            raise TypeError(
+                f"Bash transformer pin {key!r} cannot be deepcell; "
+                "declare it deepfolder, folder or plain"
+            )
         from seamless.cell_class import _check_projected_source
         ref = self._args.get(key, (None, None))[0]
         _check_projected_source(ref, value)
@@ -1350,6 +1478,8 @@ __all__ = [
     "DirectPythonTransformer",
     "BashTransformer",
     "DirectBashTransformer",
+    "HandlerTransformer",
+    "DirectHandlerTransformer",
     "DirectCallMixin",
     "Transformer",
     "CelltypesWrapper",

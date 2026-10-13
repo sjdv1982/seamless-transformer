@@ -19,6 +19,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 import threading
 import concurrent.futures as _cf
 import traceback
@@ -1066,6 +1067,19 @@ async def _child_initializer(channel: ChildChannel) -> None:
     from seamless_config.extern_clients import set_remote_clients_from_env
 
     global _child_channel, _child_loop, _quiet
+
+    def handle_sigterm(signum, _frame):
+        try:
+            from .bash_cancellation import run_all_cleanups
+
+            run_all_cleanups()
+        except BaseException:
+            pass
+        finally:
+            # Do not wait for the Python executor to join its worker threads.
+            os._exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
     _child_channel = channel
     _child_loop = asyncio.get_running_loop()
     install_output_routing()

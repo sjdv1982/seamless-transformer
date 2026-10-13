@@ -602,7 +602,8 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
     defaults (e.g. switch from ``profile`` to ``debug``).
 
     **Environment**: ``tf.environment`` is an :class:`~seamless_transformer.environment.Environment`
-    that controls conda, docker, and execution powers for the transformation.
+    that checks required binaries on the worker's ``PATH``. A requested conda
+    environment must match this process, and Docker is refused.
 
     **Additional objects**: ``tf.objects`` holds a list of
     :class:`CompiledObject` instances — extra source files in the same or a

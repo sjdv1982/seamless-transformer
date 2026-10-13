@@ -1,6 +1,7 @@
 """Execution helpers for direct transformers."""
 
 from typing import Any, Dict, List, Tuple
+from collections.abc import Mapping
 from contextlib import contextmanager
 import ctypes
 import os
@@ -24,6 +25,7 @@ from .transformation_utils import (
     TRANSFORMATION_EXECUTION_DUNDER_KEYS,
     is_deep_celltype,
     merge_transformation_meta,
+    pack_bash_deepcell_result,
     pack_deep_structure,
     resolve_env_checksum,
     resolve_lock_meta,
@@ -31,6 +33,8 @@ from .transformation_utils import (
 from .probe_index import ensure_record_bucket_preconditions_sync, is_record_probe
 from .record_runtime import get_record_mode
 from .execute_bash import execute_bash, write_bash_job
+from .container import select_container_runtime, validate_container_spec
+from .environment import _validate_environment_dispatch
 from .process_lock import scope as process_lock_scope
 
 PACK_DEEP_RESULTS = True
@@ -146,10 +150,19 @@ def run_transformation_dict(
             env_dict = env_buffer.get_value("plain")
         if not isinstance(env_dict, dict):
             env_dict = {}
-        import shutil
-        missing = [binary for binary in env_dict.get("which", ()) if shutil.which(binary) is None]
-        if missing:
-            raise RuntimeError("Required environment binaries are unavailable: " + ", ".join(missing))
+
+    language = transformation.get("__language__", "python")
+    is_probe = is_record_probe(transformation, tf_dunder)
+    docker_spec = None
+    container_runtime = None
+    if not is_probe:
+        docker_spec = _validate_environment_dispatch(env_dict)
+        if docker_spec is not None and language == "bash":
+            container_runtime = select_container_runtime(docker_spec["name"])
+        if language == "python" or _is_compiled_transformation(transformation, tf_dunder):
+            from .languages import check_in_memory_environment
+
+            check_in_memory_environment(env_dict, language)
 
     if get_record_mode() and not is_record_probe(transformation, tf_dunder):
         ensure_record_bucket_preconditions_sync(transformation, tf_dunder)
@@ -160,7 +173,6 @@ def run_transformation_dict(
 
     tf_namespace = build_transformation_namespace_sync(transformation)
     code, namespace, modules_to_build = tf_namespace
-    language = transformation.get("__language__", "python")
     if language == "python" and isinstance(code, str) and len(code) == 64:
         # Defensive fallback: recover code text if a checksum hex string leaked through.
         tf_dict_fallback = None
@@ -180,6 +192,36 @@ def run_transformation_dict(
             except Exception:
                 pass
 
+    handler_checksum_value = _get_execution_dunder(
+        transformation, tf_dunder, "__handler__"
+    )
+    from .languages import get_language_handler, is_handler_language
+
+    handler_definition = None
+    handler_code = None
+    handler_checksum = None
+    handler_language = (
+        handler_checksum_value is not None or is_handler_language(language)
+    )
+    if handler_language:
+        if handler_checksum_value is None:
+            handler_definition = get_language_handler(language)
+            handler_code = handler_definition.source
+            handler_checksum = Buffer(handler_code, "text").get_checksum().hex()
+        else:
+            try:
+                handler_checksum = Checksum(handler_checksum_value).hex()
+                handler_buffer = Checksum(handler_checksum).resolve()
+            except Exception as exc:
+                raise RuntimeError("Invalid language handler checksum") from exc
+            if handler_buffer is None:
+                raise RuntimeError(
+                    f"Cannot resolve language handler: {handler_checksum}"
+                )
+            handler_code = handler_buffer.get_value("text")
+            if not isinstance(handler_code, str):
+                raise RuntimeError("Language handler source is not text")
+
     module_workspace = {}
     if modules_to_build:
         build_all_modules(
@@ -198,6 +240,8 @@ def run_transformation_dict(
     checksum_hex = Checksum(code_checksum).hex() if code_checksum is not None else None
     if checksum_hex:
         identifier = f"{identifier}-{checksum_hex}"
+    if handler_checksum:
+        identifier = f"{identifier}-handler-{handler_checksum}"
 
     if is_deep_celltype(output_celltype):
         namespace["OUTPUTPIN"] = output_celltype
@@ -212,6 +256,10 @@ def run_transformation_dict(
                 env_dict.get("conda_environment", ""),
                 namespace.get("PINS", {}),
                 namespace.get("FILESYSTEM", {}),
+                which_=env_dict.get("which", ()),
+                docker_=docker_spec,
+                container_runtime_=container_runtime,
+                tf_checksum_=checksum_hex,
             )
             return encode_remote_job_written(job_directory)
         namespace["execute_bash"] = execute_bash
@@ -219,11 +267,116 @@ def run_transformation_dict(
         pins = namespace.get("PINS", {})
         namespace["pins_"] = sorted(pins.keys())
         namespace["conda_environment_"] = env_dict.get("conda_environment", "")
+        namespace["which_"] = env_dict.get("which", ())
+        namespace["docker_"] = docker_spec
+        namespace["container_runtime_"] = container_runtime
+        namespace["tf_checksum_"] = checksum_hex
+        namespace["should_abort_"] = should_abort
         code = (
             f"{output_name} = execute_bash("
-            "bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN)"
+            "bashcode, pins_, conda_environment_, PINS, FILESYSTEM, OUTPUTPIN, "
+            "which_=which_, docker_=docker_, container_runtime_="
+            "container_runtime_, tf_checksum_=tf_checksum_, "
+            "should_abort_=should_abort_)"
         )
         inputs = []
+
+    if handler_language:
+        import ast
+
+        handler_tree = ast.parse(handler_code)
+        if len(handler_tree.body) != 1 or not isinstance(
+            handler_tree.body[0], ast.FunctionDef
+        ):
+            raise RuntimeError("Language handler source must be one Python function")
+        handler_function = handler_tree.body[0]
+        handler_function_name = handler_function.name
+        handler_parameters = tuple(
+            arg.arg
+            for arg in (
+                handler_function.args.args
+                + handler_function.args.kwonlyargs
+            )
+        )
+        used_names = {
+            node.id for node in ast.walk(handler_tree) if isinstance(node, ast.Name)
+        }
+        used_names.update(
+            node.name
+            for node in ast.walk(handler_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        )
+        used_names.update(handler_parameters)
+        handler_entry_name = "__seamless_language_handler_entry__"
+        while handler_entry_name in used_names:
+            handler_entry_name += "_"
+        handler_function.name = handler_entry_name
+        if handler_function_name not in handler_parameters:
+            alias_decorator = ast.parse(
+                "(lambda _name: lambda _function: "
+                "(globals().__setitem__(_name, _function) or _function))"
+                f"({handler_function_name!r})",
+                mode="eval",
+            ).body
+            handler_function.decorator_list.insert(0, alias_decorator)
+        ast.fix_missing_locations(handler_tree)
+        handler_code = ast.unparse(handler_tree)
+        handler_filesystem = {
+            transformation.get("__as__", {}).get(name, name): entry
+            for name, entry in namespace.get("FILESYSTEM", {}).items()
+        }
+        handler_pins = namespace.get("PINS", {})
+        as_map = transformation.get("__as__", {})
+        for pinname, entry in transformation.items():
+            if pinname in ("code", "__language__", "__output__") or pinname.startswith("__"):
+                continue
+            if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+                continue
+            pinname_as = as_map.get(pinname, pinname)
+            if pinname_as in handler_pins:
+                handler_filesystem.setdefault(pinname_as, {}).setdefault(
+                    "celltype", entry[0]
+                )
+        if handler_pins:
+            handler_pins = dict(handler_pins)
+            for pinname, value in handler_pins.items():
+                fs_entry = handler_filesystem.get(pinname, {})
+                if (
+                    fs_entry.get("celltype") == "bytes"
+                    and not fs_entry.get("filesystem", False)
+                    and isinstance(value, Buffer)
+                ):
+                    handler_pins[pinname] = value.content
+        handler_metavars = {}
+        if handler_definition is not None:
+            handler_metavars.update(handler_definition.metavars)
+        stored_metavars = meta.get("metavars", {})
+        if stored_metavars is not None:
+            if not isinstance(stored_metavars, Mapping):
+                raise TypeError("transformation meta['metavars'] must be a mapping")
+            handler_metavars.update(stored_metavars)
+        if "BACKEND" in handler_metavars:
+            from .languages import _validate_backend_value
+
+            _validate_backend_value(handler_metavars["BACKEND"], language)
+        offered_arguments = {
+            "code": code,
+            "pins": handler_pins,
+            "filesystem": handler_filesystem,
+            "output_name": output_name,
+            "output_celltype": output_celltype,
+            "metavars": handler_metavars,
+            "environment": env_dict,
+            "process_lock": process_lock_active,
+        }
+        namespace = {
+            name: offered_arguments[name]
+            for name in handler_parameters
+        }
+        module_workspace = {}
+        code = handler_code
+        inputs = handler_parameters
+
 
     if _is_compiled_transformation(transformation, tf_dunder):
         with process_lock_scope(process_lock_active, should_abort=should_abort):
@@ -255,15 +408,29 @@ def run_transformation_dict(
         return result_checksum
 
     with process_lock_scope(process_lock_active, should_abort=should_abort):
-        result = _execute(
-            module_workspace,
-            code,
-            identifier,
-            namespace,
-            inputs,
-            output_name,
-            driver_active,
-        )
+        if handler_language:
+            from .languages import _use_cli_execution_context
+
+            with _use_cli_execution_context(checksum_hex, should_abort):
+                result = _execute(
+                    module_workspace,
+                    code,
+                    identifier,
+                    namespace,
+                    inputs,
+                    output_name,
+                    driver_active,
+                )
+        else:
+            result = _execute(
+                module_workspace,
+                code,
+                identifier,
+                namespace,
+                inputs,
+                output_name,
+                driver_active,
+            )
 
     if result is None and output_celltype not in ("plain", "mixed", "bytes"):
         raise RuntimeError(f"Null result is not allowed for celltype {output_celltype!r}")
@@ -273,7 +440,28 @@ def run_transformation_dict(
             raise NotImplementedError(
                 "Packing deep transformation results is not supported yet"
             )
-        result = pack_deep_structure(result, output_celltype)
+        if language == "bash" and output_celltype == "deepcell":
+            result = pack_bash_deepcell_result(result)
+        else:
+            result = pack_deep_structure(result, output_celltype)
+
+    if output_celltype == "checksum" and isinstance(result, Checksum):
+        result = result.hex()
+    elif output_celltype not in ("deepcell", "folder", "checksum"):
+        def contains_checksum(value):
+            if isinstance(value, Checksum):
+                return True
+            if isinstance(value, Mapping):
+                return any(contains_checksum(child) for child in value.values())
+            if isinstance(value, (list, tuple, set, frozenset)):
+                return any(contains_checksum(child) for child in value)
+            return False
+
+        if contains_checksum(result):
+            raise TypeError(
+                f"A Checksum can only be returned under a deep or checksum result, "
+                f"not {output_celltype!r}"
+            )
 
     result_buffer = Buffer(result, output_celltype)
     result_checksum = result_buffer.get_checksum()
@@ -296,8 +484,23 @@ def _write_remote_bash_job(
     conda_environment: str,
     pins: Dict[str, Any],
     filesystem: Dict[str, Any],
+    *,
+    which_=(),
+    docker_=None,
+    container_runtime_=None,
+    tf_checksum_=None,
 ) -> str:
     """Materialize a bash transformation job and stop before execution."""
+
+    if docker_ is not None:
+        docker_ = validate_container_spec(docker_)
+        if conda_environment:
+            raise ValueError(
+                "docker and conda_environment cannot be used together; pick one, "
+                "or activate the conda environment in the script itself"
+            )
+        if container_runtime_ is None:
+            container_runtime_ = select_container_runtime(docker_["name"])
 
     job_directory = os.path.abspath(os.path.expanduser(remote_job_dir))
     try:
@@ -319,6 +522,11 @@ def _write_remote_bash_job(
             pins,
             filesystem,
             directory=job_directory,
+            which_=which_,
+            docker_=docker_,
+            container_runtime_=container_runtime_,
+            tf_checksum_=tf_checksum_,
+            portable_job_directory_=True,
         )
     except Exception:
         shutil.rmtree(job_directory, ignore_errors=True)

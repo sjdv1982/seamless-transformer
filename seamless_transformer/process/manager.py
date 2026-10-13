@@ -6,6 +6,7 @@ import asyncio
 import logging
 import multiprocessing as mp
 import os
+import signal
 import sys
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
@@ -14,6 +15,7 @@ from typing import Any, Callable, Dict, Optional
 from .channel import ChildChannel, Endpoint, ConnectionClosed
 from .shared_memory import SharedMemoryRegistry
 from .utils import run_handler
+from ..container import remove_worker_containers
 from seamless.util.get_event_loop import get_event_loop
 
 
@@ -193,14 +195,27 @@ class ProcessManager:
             except Exception:
                 pass
         process = handle.process
+        force_killed_pid = None
         terminated = False
         if process and process.is_alive():
+            terminated = True
             process.terminate()
             process.join(timeout=2.0)
             if process.is_alive():
+                force_killed_pid = process.pid
                 process.kill()
                 process.join(timeout=1.0)
-            terminated = True
+            elif process.exitcode == -signal.SIGKILL:
+                # The caller may have SIGKILLed the worker just before the
+                # terminate/join sequence above. Preserve its PID for the
+                # container backstop even when it exits during that join.
+                force_killed_pid = process.pid
+        elif process and process.exitcode == -signal.SIGKILL:
+            # The process may have died before the cancellation reached here.
+            force_killed_pid = process.pid
+        if force_killed_pid is not None:
+            # A hard kill can bypass the child's registered container cleanup.
+            remove_worker_containers(force_killed_pid)
         if handle.pid is not None:
             await self.memory_registry.reset_pid(handle.pid)
         if handle.restart and not self._closing and not handle.closing:
@@ -301,6 +316,16 @@ class ProcessManager:
             )
         if handle.restarting or handle.closing or self._closing:
             return
+        process = handle.process
+        if (
+            process is not None
+            and not process.is_alive()
+            and process.exitcode == -signal.SIGKILL
+        ):
+            # An externally killed worker can reach this automatic restart path
+            # before cancel_by_checksum gets to restart_worker. Its containers
+            # still need the same PID-label backstop.
+            remove_worker_containers(process.pid)
         if not handle.restart:
             # During shutdown or explicit disable, skip restart noise and just drop the handle.
             handle.restarting = False

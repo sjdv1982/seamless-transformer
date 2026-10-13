@@ -21,6 +21,7 @@ TRANSFORMATION_ORTHOGONAL_DUNDER_KEYS = {
     "__meta__",
     "__env__",
     "__compilation__",
+    "__handler__",
     "__record_probe__",
     "__code_checksum__",
     "__code_text__",
@@ -308,12 +309,6 @@ def pack_deep_structure(structure, celltype: str):
     for key, value in members.items():
         if isinstance(value, Checksum):
             result[key] = value.hex()
-        elif (
-            isinstance(value, str)
-            and len(value) == 64
-            and all(c in "0123456789abcdef" for c in value)
-        ):
-            result[key] = value
         else:
             buffer = Buffer(value, "mixed" if celltype == "deepcell" else None)
             result[key] = buffer.get_checksum().hex()
@@ -325,6 +320,32 @@ def pack_deep_structure(structure, celltype: str):
             # decision on whether deep members should follow the parent
             # result's own scratch flag.
             buffer.transfer_write()
+    return result
+
+
+def pack_bash_deepcell_result(structure):
+    """Pack exact mixed-buffer bytes returned by a bash deepcell job."""
+    if structure is None:
+        return None
+    from seamless.checksum.deep import validate_deep_structure
+
+    members = validate_deep_structure(structure, index=False)
+    result = {}
+    for key, value in members.items():
+        if not isinstance(value, bytes):
+            raise TypeError(
+                f"Bash deepcell result member {key!r} must contain raw buffer bytes"
+            )
+        buffer = Buffer(value)
+        try:
+            buffer.get_value("mixed")
+        except Exception as exc:
+            raise ValueError(
+                f"Bash deepcell result member {key!r} is not a valid mixed buffer"
+            ) from exc
+        result[key] = buffer.get_checksum().hex()
+        buffer.tempref()
+        buffer.transfer_write()
     return result
 
 
@@ -342,6 +363,7 @@ __all__ = [
     "is_deep_celltype",
     "unpack_deep_structure",
     "pack_deep_structure",
+    "pack_bash_deepcell_result",
     "TRANSFORMATION_LOAD_BEARING_DUNDER_KEYS",
     "TRANSFORMATION_ORTHOGONAL_DUNDER_KEYS",
     "TRANSFORMATION_DERIVED_DUNDER_KEYS",
