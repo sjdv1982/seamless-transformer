@@ -179,6 +179,8 @@ class TransformerCore(Generic[P, R]):
 
     def _freeze(self) -> FrozenTransformer:
         """Return an immutable copy of this builder's settings (not an owner)."""
+        if self.language == "python":
+            self.environment._validate_bash_only()
         if self._workflow_backend is not None:
             return self._workflow_backend.freeze()
         pin_args, input_celltypes = self._frozen_pin_inputs()

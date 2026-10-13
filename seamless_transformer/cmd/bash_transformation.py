@@ -3,6 +3,7 @@
 import asyncio
 import builtins
 import os
+import shlex
 import sys
 from contextlib import nullcontext
 
@@ -33,15 +34,27 @@ def prepare_bash_code(
 
     bashcode = ""
     if make_executables:
-        has_cwd_executable = False
-        make_executables_str = ""
-        for make_executable in make_executables:
-            if not os.path.dirname(make_executable):
-                has_cwd_executable = True
-            make_executables_str += f" '{make_executable}'"
+        has_cwd_executable = any(
+            not os.path.dirname(make_executable)
+            for make_executable in make_executables
+        )
         if has_cwd_executable:
             bashcode += "export PATH=./:$PATH\n"
-        bashcode += f"chmod +x{make_executables_str}\n"
+        executable_words = " ".join(shlex.quote(path) for path in make_executables)
+        bashcode += "(\n"
+        bashcode += f"for seamless_executable in {executable_words}; do\n"
+        bashcode += '  if [ -L "./$seamless_executable" ]; then\n'
+        bashcode += (
+            '    seamless_executable_copy=$(mktemp '
+            '"./.seamless-executable.XXXXXX")\n'
+        )
+        bashcode += (
+            '    cp -L "./$seamless_executable" "$seamless_executable_copy"\n'
+        )
+        bashcode += '    mv "$seamless_executable_copy" "./$seamless_executable"\n'
+        bashcode += "  fi\n"
+        bashcode += '  chmod +x "./$seamless_executable"\n'
+        bashcode += "done\n)\n"
 
     if meta_variable_names:
         for name in sorted(meta_variable_names):

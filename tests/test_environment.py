@@ -14,7 +14,6 @@ def test_environment_roundtrip_all_props():
         env = Environment()
         env.set_conda("name: test\ndependencies:\n  - python\n")
         env.set_which(["python", "gcc"])
-        env.set_powers({"docker": True})
         if container:
             env.set_docker({"name": "python:3.12"})
         else:

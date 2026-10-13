@@ -8,6 +8,7 @@ import sys
 import os
 import json
 import re
+import shlex
 import traceback
 import threading
 import logging
@@ -61,11 +62,18 @@ except Exception:  # pragma: no cover - optional dependency
 CONFIG_FILENAMES = ("seamless.yaml", "seamless.profile.yaml")
 
 
-def resolve_executable(command):
-    """Resolve the mapped executable path for the first command word.
+def resolve_executable(command, *, search_path=True):
+    """Resolve the mapped executable path for a command's first word.
 
+    An existing local file takes precedence over a same-named host PATH entry.
     Returns the mapped executable path, or None if the first arg is a POSIX tool.
     """
+    local_executable = pathlib.Path(command[0]).expanduser()
+    if local_executable.is_file():
+        return command[0]
+    if not search_path:
+        return None
+
     mapped_execarg = None
 
     args1 = [pathlib.Path(command[0]), pathlib.Path(command[0]).expanduser()]
@@ -433,7 +441,10 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         "--docker",
         "--docker-image",
         dest="docker_image",
-        help="Specify Docker image where transformation is to run in",
+        help=(
+            "Run a bash transformation in this Docker image, using docker, podman, "
+            "or apptainer on the executing host."
+        ),
     )
 
     parser.add_argument(
@@ -441,7 +452,7 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
         "--conda-env",
         "--conda-environment",
         dest="conda_environment",
-        help="Specify an existing conda environment where the transformation could run in.",
+        help="Run a bash transformation in this existing conda environment.",
     )
 
     parser.add_argument(
@@ -710,13 +721,56 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
 
     first_command = commands[primary_index]
 
-    first_mapped_execarg = resolve_executable(first_command.words)
+    has_execution_environment = (
+        args.docker_image is not None or args.conda_environment is not None
+    )
+    mapped_executables = [
+        resolve_executable(command.words, search_path=not has_execution_environment)
+        for command in commands
+    ]
+
+    # Executables outside the selected working directory still have to be
+    # uploaded, independently of the ordinary file-mapping mode. Give them
+    # stable, command-indexed names so equal basenames cannot collide.
+    working_directory = pathlib.Path(workdir).expanduser().resolve()
+    executable_upload_targets = {}
+    executable_upload_mappings = {}
+    used_executable_targets = set()
+    source_targets = {}
+    for commandnr, executable in enumerate(mapped_executables):
+        if executable is None:
+            continue
+        source_path = pathlib.Path(executable).expanduser().absolute()
+        source = source_path.as_posix()
+        try:
+            source_path.resolve().relative_to(working_directory)
+        except ValueError:
+            target = source_targets.get(source)
+            if target is None:
+                target_base = f".seamless-executables/{commandnr + 1}-executable"
+                target = target_base
+                suffix = 1
+                while (
+                    target in used_executable_targets
+                    or target in {word for command in commands for word in command.words}
+                    or (working_directory / target).exists()
+                ):
+                    target = f"{target_base}-{suffix}"
+                    suffix += 1
+                source_targets[source] = target
+                executable_upload_mappings[target] = source
+                used_executable_targets.add(target)
+            executable_upload_targets[commandnr] = target
+
+    first_mapped_execarg = mapped_executables[primary_index]
 
     msg(1, f"First command: {first_command.commandstring}")
 
     first_command_words = copy(first_command.words)
     if first_mapped_execarg:
-        first_command_words[0] = first_mapped_execarg
+        first_command_words[0] = executable_upload_targets.get(
+            primary_index, first_mapped_execarg
+        )
     first_pipeline_words = copy(first_command_words)
 
     msg(2, "Try to obtain argtypes from rules")
@@ -732,14 +786,44 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
     try:
         if primary_pipeline:
             pp_start, pp_end = primary_pipeline
-            for com in commands[pp_start:pp_end]:
+            for commandnr in range(pp_start, pp_end):
+                com = commands[commandnr]
                 if com is not first_command:
-                    first_pipeline_words += com.words
+                    command_words = copy(com.words)
+                    mapped_execarg = mapped_executables[commandnr]
+                    if mapped_execarg:
+                        command_words[0] = executable_upload_targets.get(
+                            commandnr, mapped_execarg
+                        )
+                    first_pipeline_words += command_words
         argtypes_initial = guess_arguments(
             first_pipeline_words,
             overrule_ext=overrule_ext,
             overrule_no_ext=overrule_no_ext,
         )
+        # Only the primary pipeline's arguments participate in normal
+        # argtyping. Executable files in every command still need to be
+        # uploaded, even when their command is outside that pipeline.
+        executable_words = [
+            executable
+            for commandnr, executable in enumerate(mapped_executables)
+            if executable is not None and commandnr not in executable_upload_targets
+        ]
+        if executable_words:
+            argtypes_executables = guess_arguments(
+                executable_words,
+                overrule_ext=True,
+                overrule_no_ext=True,
+            )
+            for word, argtype in argtypes_executables.items():
+                if word != "@order":
+                    argtypes_initial.setdefault(word, argtype)
+        for target, source in executable_upload_mappings.items():
+            argtypes_initial[target] = {
+                "type": "file",
+                "mapping": source,
+                "fixed_mapping": True,
+            }
     except ValueError as exc:
         err(*exc.args)
 
@@ -818,6 +902,17 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
     argtypesstr = json.dumps(argtypes, sort_keys=False, indent=2)
     msg(1, "argtypes dict:\n" + argtypesstr)
 
+    def mapped_executable_name(executable):
+        source = pathlib.Path(executable).expanduser().absolute().as_posix()
+        for name, argtype in argtypes.items():
+            if (
+                isinstance(argtype, dict)
+                and argtype.get("type") == "file"
+                and argtype.get("mapping") == source
+            ):
+                return name
+        return None
+
     mapped_first_pipeline = argtypes["@order"]
 
     ################################################################
@@ -842,29 +937,21 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
     for commandnr, command in enumerate(commands):
         if commandnr != primary_index:
             msg(1, f"Command #{commandnr+1}: {command.commandstring}")
-            mapped_execarg = resolve_executable(command.words)
-            if mapped_execarg:
-                wordnode = command.wordnodes[0]
-                old_word = command.words[0]
-                if mapped_execarg != old_word:
-                    word_substitutions[wordnode] = mapped_execarg
+        mapped_execarg = mapped_executables[commandnr]
+        if mapped_execarg is not None:
+            mapped_name = mapped_executable_name(mapped_execarg)
         else:
-            mapped_execarg = first_mapped_execarg
+            mapped_name = None
 
-        if mapped_execarg:
+        if mapped_name is not None:
             wordnode = command.wordnodes[0]
-            word = command.words[0]
-            word = word_substitutions.get(wordnode, word)
-            if word not in (
-                "cd",
-                "echo",
-                "eval",
-                "exec",
-                "export",
-                "set",
-                "source",
-            ):
-                make_executables.append(word)
+            # A bare filename is not executable through PATH from the job
+            # directory. Keep it relative to that directory explicitly.
+            executable_word = mapped_name if "/" in mapped_name else "./" + mapped_name
+            if word_substitutions.get(wordnode, command.words[0]) != executable_word:
+                word_substitutions[wordnode] = executable_word
+            if mapped_name not in make_executables:
+                make_executables.append(mapped_name)
 
     ################################################################
 
@@ -1065,8 +1152,13 @@ def _main(argv: list[str] | None = None, *, probe_mode: bool | None = None) -> i
 
     for node in sorted(word_substitutions.keys(), key=lambda node: -node.pos[0]):
         word = word_substitutions[node]
+        start, end = node.pos
+        quote = commandstring[start - 1 : start]
+        already_quoted = quote in ("'", '"') and commandstring[end : end + 1] == quote
         commandstring = (
-            commandstring[: node.pos[0]] + word + commandstring[node.pos[1] :]
+            commandstring[:start]
+            + (word if already_quoted else shlex.quote(word))
+            + commandstring[end:]
         )
 
     if args.prologues:

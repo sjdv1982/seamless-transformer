@@ -14,8 +14,14 @@ from .container import validate_container_spec
 class Environment:
     """Execution environment for an individual transformer.
 
-    Controls the conda environment, Docker container, required binaries, and
-    execution powers that the transformation worker will use.
+    Controls the conda environment, Docker container, and required binaries
+    for the transformation worker.
+
+    Bash transformations run through a wrapper in the selected conda
+    environment or container image. Their ``which`` checks run inside that
+    environment, or on the executing host for plain bash. Python and compiled
+    transformations check required binaries on the worker's ``PATH`` and
+    reject conda or container settings.
 
     Access via ``transformer.environment`` on any :class:`~seamless_transformer.transformer_class.Transformer`
     or :class:`~seamless_transformer.compiled_transformer.CompiledTransformer`::
@@ -30,19 +36,19 @@ class Environment:
 
     - **conda**: a conda environment YAML spec (string, path, or file object).
       The YAML must be a mapping with a ``dependencies`` key.
-    - **conda_env**: the name of an existing conda environment to activate.
-    - **which**: a list of binary names that must be on ``PATH`` in the worker.
-    - **powers**: a dict of execution privilege escalations (platform-specific).
+    - **conda_env**: the name of an existing conda environment for the bash
+      ``conda run`` wrapper.
+    - **which**: binary names checked inside a selected bash conda environment
+      or container image, and on the worker's ``PATH`` for other languages.
     - **docker**: a dict with at least a ``"name"`` key specifying the Docker image.
     """
 
-    _props = ("_conda", "_conda_env_name", "_which", "_powers", "_docker")
+    _props = ("_conda", "_conda_env_name", "_which", "_docker")
 
     def __init__(self):
         self._conda = None
         self._conda_env_name = None
         self._which = None
-        self._powers = None
         self._docker = None
 
     def _save(self) -> dict[str, Any] | None:
@@ -71,8 +77,6 @@ class Environment:
             result["conda"] = yaml.safe_load(self._conda)
         if self._conda_env_name is not None:
             result["conda_environment"] = self._conda_env_name
-        if self._powers is not None:
-            result["powers"] = deepcopy(self._powers)
         if self._docker is not None:
             docker = validate_container_spec(self._docker)
             if self._conda_env_name is not None:
@@ -120,7 +124,11 @@ class Environment:
         return deepcopy(self._conda)
 
     def set_conda_env(self, conda_env_name):
-        """Set the name of an existing conda environment to activate on the worker."""
+        """Wrap bash execution with ``conda run -n <name>``.
+
+        Required binaries are checked inside the selected environment for bash
+        transformations. Other-language checks use the worker's ``PATH``.
+        """
         if conda_env_name is not None and not isinstance(conda_env_name, str):
             raise TypeError(type(conda_env_name))
         self._conda_env_name = conda_env_name
@@ -129,7 +137,11 @@ class Environment:
         return self._conda_env_name
 
     def set_which(self, which):
-        """Set a list of binary names that must be on PATH in the worker.
+        """Set binary names whose availability is checked before execution.
+
+        Bash transformations check inside the selected conda environment or
+        container image, and otherwise on the executing host. Other languages
+        check on the worker's ``PATH``.
 
         Pass a list of strings (e.g. ``["gcc", "make"]``) or ``None`` to clear.
         """
@@ -148,20 +160,11 @@ class Environment:
     def get_which(self):
         return deepcopy(self._which)
 
-    def set_powers(self, powers):
-        """Set execution privilege escalations (platform-specific dict).
-
-        Pass ``None`` to clear.
-        """
-        if powers is None:
-            self._powers = None
-            return
-        if not isinstance(powers, dict):
-            raise TypeError(type(powers))
-        self._powers = deepcopy(powers)
-
-    def get_powers(self):
-        return deepcopy(self._powers)
+    def _validate_bash_only(self):
+        if self._docker is not None or self._conda_env_name is not None:
+            raise ValueError(
+                "docker and conda_environment apply to bash transformers only"
+            )
 
     def set_docker(self, docker: dict):
         """Set the Docker image and optional runtime settings for this transformer.

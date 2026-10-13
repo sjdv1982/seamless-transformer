@@ -503,6 +503,7 @@ class CompiledMixin:
         return self._call_signature
 
     def _freeze(self):
+        self.environment._validate_bash_only()
         if self._workflow_backend is not None:
             return self._workflow_backend.freeze()
         from .frozen_transformer import FrozenTransformer
@@ -602,7 +603,8 @@ class CompiledTransformer(CompiledMixin, TransformerCore):
     defaults (e.g. switch from ``profile`` to ``debug``).
 
     **Environment**: ``tf.environment`` is an :class:`~seamless_transformer.environment.Environment`
-    that controls conda, docker, and execution powers for the transformation.
+    that checks required binaries on the worker's ``PATH``. Conda environments
+    and Docker images apply to bash transformers only.
 
     **Additional objects**: ``tf.objects`` holds a list of
     :class:`CompiledObject` instances — extra source files in the same or a

@@ -225,6 +225,11 @@ def build_container_command(
     directories = []
     for directory in read_directories or ():
         directory = os.path.abspath(os.path.expanduser(os.fspath(directory)))
+        # Read-folder clients can name a fresh cache directory that has not
+        # received any buffers yet. Container runtimes reject a bind mount whose
+        # source is absent, and there is nothing available to read from it.
+        if not os.path.isdir(directory):
+            continue
         if directory not in directories:
             directories.append(directory)
     for path in [job_directory, *directories]:
