@@ -70,7 +70,7 @@ def observing_handler(code, pins, filesystem, output_name, output_celltype,
 
     emit('body_start')
     assert process_lock is True
-    handler = julia if metavars['BACKEND'] == 'juliacall' else r
+    handler = julia if metavars['LANGUAGE'] == 'julia' else r
     try:
         result = handler(code=code, pins=pins, filesystem=filesystem,
                          output_name=output_name, output_celltype=output_celltype,
@@ -102,8 +102,9 @@ def child(cell):
     from seamless_transformer.languages import register_language_handler
 
     event('driver_start', cell=cell)
-    backend = 'juliacall' if cell['language'] == 'julia' else 'ryp'
-    register_language_handler(cell['language'], observing_handler, metavars={'BACKEND': backend})
+    backend = 'mem'
+    register_language_handler(cell['language'], observing_handler,
+                             metavars={'BACKEND': backend, 'LANGUAGE': cell['language']})
     if cell['mode'] == 'spawn':
         spawn(1)
     if cell['language'] == 'julia':

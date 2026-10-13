@@ -9,7 +9,7 @@ from seamless_transformer import Environment, Transformer
 
 @pytest.mark.parametrize('language', ['python', 'c'])
 @pytest.mark.parametrize('environment', ['docker', 'conda'])
-def test_nonbash_environment_is_refused_when_frozen(language, environment):
+def test_in_memory_environment_is_checked_when_submitted(language, environment):
     tf = Transformer(language, compiled=language == 'c')
     nonce = uuid.uuid4().hex
     if language == 'python':
@@ -22,8 +22,12 @@ def test_nonbash_environment_is_refused_when_frozen(language, environment):
         tf.environment.set_docker({'name': 'never-launched:' + nonce})
     else:
         tf.environment.set_conda_env('never-created-' + nonce)
-    with pytest.raises((ValueError, RuntimeError), match='bash transformers only|only.*bash'):
-        tf.transformation()
+    handle = tf.build()
+    assert handle.construct() is not None
+    result = handle.compute()
+    assert result is None
+    message = (handle.exception or '').lower()
+    assert 'docker image' in message or 'requires conda environment' in message
 
 
 def test_legacy_powers_saved_state_loads_but_is_not_saved_or_emitted():

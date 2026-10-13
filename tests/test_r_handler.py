@@ -13,9 +13,9 @@ from seamless_transformer.run import run_transformation_dict
 from seamless_transformer.transformation_utils import extract_tf_dunder
 
 
-@pytest.fixture(scope="module", params=["Rscript", "ryp"])
+@pytest.fixture(params=["cli", "mem"])
 def backend(request):
-    if request.param == "ryp":
+    if request.param == "mem":
         if importlib.util.find_spec("ryp") is None:
             pytest.skip("ryp missing")
     else:
@@ -106,8 +106,8 @@ def test_values_and_actual_checksum_parity(backend, form, style, celltype, value
     else:
         assert result == expected
         assert type(result) is type(expected)
-    if backend == "ryp":
-        cli = builder("Rscript", code, value, celltype, output)
+    if backend == "mem":
+        cli = builder("cli", code, value, celltype, output)
         assert execution(cli)[0] == execution(tf)[0]
         assert result_checksum(cli) == checksum
 
@@ -129,7 +129,7 @@ transform <- function(value) {
 '''
     for index, value in enumerate((5, 9), 1):
         np.testing.assert_array_equal(run(builder(backend, code, value, output="binary")),
-                                      [value + 2, index if backend == "ryp" else 1])
+                                      [value + 2, index if backend == "mem" else 1])
 
 
 @pytest.mark.parametrize("form", ["value", "file", "gzip"])
@@ -160,7 +160,7 @@ def test_mutating_pin_does_not_write_through(backend, form, tmp_path, monkeypatc
 ])
 def test_documented_cli_only_transport_failure(backend, value, celltype, code, expected):
     tf = builder(backend, "result <- " + code, value, celltype)
-    if backend == "Rscript":
+    if backend == "cli":
         with pytest.raises(Exception):
             run(tf)
     else:
@@ -169,19 +169,19 @@ def test_documented_cli_only_transport_failure(backend, value, celltype, code, e
 
 @pytest.mark.parametrize("dtype", ["int32", "int64", "float64"])
 def test_array_dtype_result_checksum_parity(backend, dtype):
-    if backend != "ryp":
+    if backend != "mem":
         pytest.skip("paired computation once per case")
     value = np.arange(6, dtype=dtype).reshape(2, 3)
     for expression in ("value", "value + 1"):
         code = "result <- " + expression
-        assert result_checksum(builder("Rscript", code, value, "binary", "binary")) == result_checksum(
-            builder("ryp", code, value, "binary", "binary"))
+        assert result_checksum(builder("cli", code, value, "binary", "binary")) == result_checksum(
+            builder("mem", code, value, "binary", "binary"))
 
 
 @pytest.mark.parametrize("environment", [{"docker": {"name": "unused"}},
                                         {"conda_environment": "definitely-not-seamless1"}])
 def test_embedded_environment_refusal(backend, environment):
-    if backend != "ryp":
+    if backend != "mem":
         pytest.skip("embedded environment contract")
     from seamless_transformer.languages import get_language_handler
     with pytest.raises(Exception, match="docker|Docker|conda|environment"):
@@ -192,7 +192,7 @@ def test_embedded_environment_refusal(backend, environment):
 
 
 def test_embedded_current_environment_and_lock_requirement(backend):
-    if backend != "ryp":
+    if backend != "mem":
         pytest.skip("embedded lock contract")
     from seamless_transformer.languages import get_language_handler
     handler = get_language_handler("r").handler
@@ -239,12 +239,12 @@ def test_block_isolation_is_fresh(backend):
 
 @pytest.mark.parametrize("style", ["block", "function"])
 def test_mutation_success_checksum_parity(backend, style):
-    if backend != "ryp":
+    if backend != "mem":
         pytest.skip("paired computation once per case")
     value = np.array([3., 4.])
     code = "value[1] <- 99; result <- value" if style == "block" else "transform <- function(value) {value[1] <- 99; value}"
-    assert result_checksum(builder("Rscript", code, value, "binary", "binary")) == result_checksum(
-        builder("ryp", code, value, "binary", "binary"))
+    assert result_checksum(builder("cli", code, value, "binary", "binary")) == result_checksum(
+        builder("mem", code, value, "binary", "binary"))
     np.testing.assert_array_equal(value, [3., 4.])
 
 
@@ -256,7 +256,7 @@ def test_mutation_success_checksum_parity(backend, style):
 ])
 def test_extreme_integer_and_logical_normalization_parity(backend, form, value,
                                                         tmp_path, monkeypatch):
-    if backend != "ryp":
+    if backend != "mem":
         pytest.skip("paired successful executions once per case")
     buffer = Buffer(value, "binary")
     before = buffer.get_checksum()
@@ -279,7 +279,7 @@ def test_extreme_integer_and_logical_normalization_parity(backend, form, value,
                         lambda: [] if form == "value" else [str(tmp_path)])
     expected = value.copy() if value.dtype.kind == "b" else value.astype(np.float64)
     results = []
-    for selected in ("Rscript", "ryp"):
+    for selected in ("cli", "mem"):
         tf = builder(selected, "result <- value", value, "binary", "binary")
         checksum = result_checksum(tf)
         result = checksum.resolve().get_value("binary")
@@ -319,8 +319,8 @@ def test_bytes_magic_remains_raw_and_checksum_parity(backend, form, payload_kind
     checksum = result_checksum(tf)
     assert checksum.resolve().content == value
     assert checksum == before
-    if backend == "ryp":
-        cli = builder("Rscript", "result <- value", value, "bytes", "bytes")
+    if backend == "mem":
+        cli = builder("cli", "result <- value", value, "bytes", "bytes")
         assert result_checksum(cli) == checksum
     assert Buffer(value, "bytes").get_checksum() == before
     if form != "value":
@@ -363,7 +363,7 @@ def test_json_marker_dicts_remain_lists_and_checksum_parity(
     tf = builder(backend, code, value, celltype)
     checksum = result_checksum(tf)
     assert checksum.resolve().get_value("plain") is True
-    if backend == "ryp":
-        cli = builder("Rscript", code, value, celltype)
+    if backend == "mem":
+        cli = builder("cli", code, value, celltype)
         assert execution(cli)[0] == execution(tf)[0]
         assert result_checksum(cli) == checksum

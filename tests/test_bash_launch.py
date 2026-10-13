@@ -155,16 +155,18 @@ def test_bash_docker_disabled_refuses_host_execution(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("environment", [
-    {"docker": {"name": "ubuntu:22.04"}}, {"conda_environment": "seamless1"},
+    {"docker": {"name": "ubuntu:22.04"}},
+    {"conda_environment": "different-conda-environment"},
 ])
 @pytest.mark.parametrize("compiled", [False, True])
-def test_non_bash_environment_fails_before_body(monkeypatch, tmp_path, environment, compiled):
+
+def test_in_memory_backend_environment_fails_before_body(monkeypatch, tmp_path, environment, compiled):
     module, Buffer = _raw_setup(monkeypatch)
     sentinel = tmp_path / "body-executed"
     code = f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\nresult = 42"
     monkeypatch.setattr(module, "_is_compiled_transformation", lambda *args: compiled)
     monkeypatch.setattr(module, "call_compiled_transform", lambda *args: pytest.fail("compiled body ran"))
-    with pytest.raises(RuntimeError, match="bash transformers only"):
+    with pytest.raises(RuntimeError, match="Docker image|requires conda environment"):
         _raw(module, Buffer, "python", code, environment, compiled=compiled)
     assert not sentinel.exists()
 

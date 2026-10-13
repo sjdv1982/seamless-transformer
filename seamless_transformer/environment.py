@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -11,17 +12,29 @@ import yaml
 from .container import validate_container_spec
 
 
+def _validate_environment_dispatch(environment):
+    """Validate specifications that make any backend dispatch impossible."""
+    if environment is None:
+        environment = {}
+    if not isinstance(environment, Mapping):
+        raise TypeError("transformation environment must be a mapping")
+    if "docker" in environment and "conda_environment" in environment:
+        raise RuntimeError(
+            "docker and conda_environment cannot be used together; pick one, "
+            "or activate the conda environment in the script itself"
+        )
+    if "docker" in environment:
+        return validate_container_spec(environment["docker"])
+    return None
+
+
 class Environment:
     """Execution environment for an individual transformer.
 
     Controls the conda environment, Docker container, and required binaries
-    for the transformation worker.
-
-    Bash transformations run through a wrapper in the selected conda
-    environment or container image. Their ``which`` checks run inside that
-    environment, or on the executing host for plain bash. Python and compiled
-    transformations check required binaries on the worker's ``PATH`` and
-    reject conda or container settings.
+    for the transformation worker. CLI backends enter the selected conda
+    environment or container image. In-memory backends require their process
+    to already be in the requested conda environment and reject Docker.
 
     Access via ``transformer.environment`` on any :class:`~seamless_transformer.transformer_class.Transformer`
     or :class:`~seamless_transformer.compiled_transformer.CompiledTransformer`::
@@ -78,13 +91,7 @@ class Environment:
         if self._conda_env_name is not None:
             result["conda_environment"] = self._conda_env_name
         if self._docker is not None:
-            docker = validate_container_spec(self._docker)
-            if self._conda_env_name is not None:
-                raise ValueError(
-                    "docker and conda_environment cannot be used together; pick one, "
-                    "or activate the conda environment in the script itself"
-                )
-            result["docker"] = docker
+            result["docker"] = deepcopy(self._docker)
         return result or None
 
     def set_conda(self, conda):
@@ -124,10 +131,10 @@ class Environment:
         return deepcopy(self._conda)
 
     def set_conda_env(self, conda_env_name):
-        """Wrap bash execution with ``conda run -n <name>``.
+        """Set a conda requirement or CLI environment for this transformer.
 
-        Required binaries are checked inside the selected environment for bash
-        transformations. Other-language checks use the worker's ``PATH``.
+        CLI backends enter the environment. In-memory backends require their
+        process to already be running in the specified environment.
         """
         if conda_env_name is not None and not isinstance(conda_env_name, str):
             raise TypeError(type(conda_env_name))
@@ -139,9 +146,8 @@ class Environment:
     def set_which(self, which):
         """Set binary names whose availability is checked before execution.
 
-        Bash transformations check inside the selected conda environment or
-        container image, and otherwise on the executing host. Other languages
-        check on the worker's ``PATH``.
+        CLI backends check inside the selected environment. In-memory backends
+        check the PATH of the process that runs the transformation.
 
         Pass a list of strings (e.g. ``["gcc", "make"]``) or ``None`` to clear.
         """
@@ -160,21 +166,13 @@ class Environment:
     def get_which(self):
         return deepcopy(self._which)
 
-    def _validate_bash_only(self):
-        if self._docker is not None or self._conda_env_name is not None:
-            raise ValueError(
-                "docker and conda_environment apply to bash transformers only"
-            )
-
     def set_docker(self, docker: dict):
         """Set the Docker image and optional runtime settings for this transformer.
 
-        The specification accepts name, gpus and shm_size. Pass None to clear.
+        The specification is validated when an uncached transformation is
+        dispatched. Pass None to clear.
         """
-        if docker is None:
-            self._docker = None
-            return
-        self._docker = validate_container_spec(docker)
+        self._docker = deepcopy(docker)
 
     def get_docker(self):
         return deepcopy(self._docker)

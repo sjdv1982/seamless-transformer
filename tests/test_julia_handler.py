@@ -1,9 +1,11 @@
 """Real Julia CLI contract; backend parameterization is extended in phase 4."""
 import gzip
+import json
 import importlib
 import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -15,16 +17,15 @@ from seamless_transformer.run import run_transformation_dict
 from seamless_transformer.transformation_utils import extract_tf_dunder
 
 
-@pytest.fixture(scope="module", params=["julia", "juliacall"])
-def backend(request):
-    # Paired tests also launch the CLI when only the embedded parameter was
-    # selected. juliacall resolves its own project independently.
-    julia_project = Path(__file__).resolve().parents[2] / "seamless" / "julia"
-    os.environ["JULIA_PROJECT"] = str(julia_project)
-    if request.param == "juliacall":
+@pytest.fixture(params=["cli", "mem"])
+def backend(request, monkeypatch):
+    # JuliaCall uses its own conda-local project. The CLI receives the tracked
+    # Julia project only for this fixture instance.
+    if request.param == "mem":
         if importlib.util.find_spec("juliacall") is None:
             pytest.skip("juliacall is missing")
         return request.param
+    monkeypatch.setenv("JULIA_PROJECT", str(Path(__file__).resolve().parents[2] / "seamless" / "julia"))
     executable = shutil.which("julia")
     if executable is None:
         pytest.skip("Julia CLI executable is missing from PATH")
@@ -156,7 +157,7 @@ function transform(value)
 end
 '''
     for index, value in enumerate((5, 9), 1):
-        expected_calls = index if backend == "juliacall" else 1
+        expected_calls = index if backend == "mem" else 1
         np.testing.assert_array_equal(run(builder(backend, code, value, output="binary")),
                                       [value + 2, expected_calls])
 
@@ -185,7 +186,7 @@ def test_mutating_array_does_not_write_through(backend, form, tmp_path, monkeypa
 def test_mixed_container_is_refused_by_cli(backend):
     tf = builder(backend, 'result = sum(value["array"]) + value["plain"]',
                  {"array": np.array([1, 2]), "plain": 3}, "mixed")
-    if backend == "julia":
+    if backend == "cli":
         with pytest.raises(Exception):
             run(tf)
     else:
@@ -229,10 +230,22 @@ def test_stdout_and_stderr_reach_transformation_logs(backend):
 
 def result_checksum(tf):
     """Execute the body even if this transformation already has a cached result."""
-    checksum, payload = execution(tf)
-    result = run_transformation_dict(payload, checksum)
-    assert result is not None
-    return Checksum(result)
+    uses_cli = tf.metavars.BACKEND == "cli"
+    previous_project = os.environ.get("JULIA_PROJECT")
+    if uses_cli:
+        project = Path(__file__).resolve().parents[2] / "seamless" / "julia"
+        os.environ["JULIA_PROJECT"] = str(project)
+    try:
+        checksum, payload = execution(tf)
+        result = run_transformation_dict(payload, checksum)
+        assert result is not None
+        return Checksum(result)
+    finally:
+        if uses_cli:
+            if previous_project is None:
+                os.environ.pop("JULIA_PROJECT", None)
+            else:
+                os.environ["JULIA_PROJECT"] = previous_project
 
 
 @pytest.mark.parametrize("form", ["value", "file", "gzip"])
@@ -251,7 +264,7 @@ def result_checksum(tf):
 ])
 def test_successful_result_checksum_parity(backend, form, style, celltype, value,
                                           expression, output, tmp_path, monkeypatch):
-    if backend != "juliacall":
+    if backend != "mem":
         pytest.skip("paired computation is run once per case")
     namespace = importlib.import_module("seamless_transformer.transformation_namespace")
     buffer = Buffer(value, celltype)
@@ -262,8 +275,8 @@ def test_successful_result_checksum_parity(backend, form, style, celltype, value
     monkeypatch.setattr(namespace, "_get_read_folder_directories",
                         lambda: [] if form == "value" else [str(tmp_path)])
     code = "result = " + expression if style == "block" else "transform(value) = " + expression
-    cli = builder("julia", code, value, celltype, output)
-    embedded = builder("juliacall", code, value, celltype, output)
+    cli = builder("cli", code, value, celltype, output)
+    embedded = builder("mem", code, value, celltype, output)
     assert execution(cli)[0] == execution(embedded)[0]
     assert result_checksum(cli) == result_checksum(embedded)
 
@@ -272,19 +285,19 @@ def test_successful_result_checksum_parity(backend, form, style, celltype, value
                                        ("int32", (3,)), ("int64", (2, 2)),
                                        ("float64", (1,))])
 def test_array_dtype_checksum_parity(backend, dtype, shape):
-    if backend != "juliacall":
+    if backend != "mem":
         pytest.skip("paired computation is run once per case")
     value = np.arange(np.prod(shape), dtype=dtype).reshape(shape)
     for expression in ("value", "value .+ 1"):
         code = "result = " + expression
-        assert result_checksum(builder("julia", code, value, "binary", "binary")) == result_checksum(
-            builder("juliacall", code, value, "binary", "binary"))
+        assert result_checksum(builder("cli", code, value, "binary", "binary")) == result_checksum(
+            builder("mem", code, value, "binary", "binary"))
 
 
 @pytest.mark.parametrize("environment", [{"docker": {"name": "unused"}},
                                         {"conda_environment": "definitely-not-seamless1"}])
 def test_embedded_environment_refusal(backend, environment):
-    if backend != "juliacall":
+    if backend != "mem":
         pytest.skip("embedded environment contract")
     from seamless_transformer.languages import get_language_handler
     with pytest.raises(Exception, match="docker|Docker|conda|environment"):
@@ -296,7 +309,7 @@ def test_embedded_environment_refusal(backend, environment):
 
 
 def test_embedded_current_environment_and_lock_requirement(backend):
-    if backend != "juliacall":
+    if backend != "mem":
         pytest.skip("embedded lock contract")
     from seamless_transformer.languages import get_language_handler
     handler = get_language_handler("julia").handler
@@ -318,12 +331,12 @@ def test_block_isolation_is_fresh(backend):
 
 @pytest.mark.parametrize("style", ["block", "function"])
 def test_mutation_success_checksum_parity(backend, style):
-    if backend != "juliacall":
+    if backend != "mem":
         pytest.skip("paired computation once per case")
     value = np.array([3, 4], dtype=np.int64)
     code = "value[1] = 99; result = value" if style == "block" else "transform(value) = (value[1] = 99; value)"
-    assert result_checksum(builder("julia", code, value, "binary", "binary")) == result_checksum(
-        builder("juliacall", code, value, "binary", "binary"))
+    assert result_checksum(builder("cli", code, value, "binary", "binary")) == result_checksum(
+        builder("mem", code, value, "binary", "binary"))
     np.testing.assert_array_equal(value, [3, 4])
 
 
@@ -346,7 +359,7 @@ def test_stdout_stderr_before_error_reach_transformation_logs(backend):
 @pytest.mark.parametrize("dtype", ["int32", "uint64", "float64", "bool"])
 def test_typed_array_layout_mutation_parity_and_input_immunity(backend, layout, form,
                                                             dtype, tmp_path, monkeypatch):
-    if backend != "juliacall":
+    if backend != "mem":
         pytest.skip("paired successful executions once per case")
     original = np.arange(1, 7).astype(dtype)
     value = original if layout == "vector" else np.array(original.reshape(2, 3), order=layout)
@@ -364,7 +377,7 @@ def test_typed_array_layout_mutation_parity_and_input_immunity(backend, layout, 
     expected = expected.astype({"int32": "int64", "uint64": "uint64",
                                 "float64": "float64", "bool": "bool"}[dtype])
     checksums = []
-    for selected in ("julia", "juliacall"):
+    for selected in ("cli", "mem"):
         checksum = result_checksum(builder(selected, code, value, "binary", "binary"))
         result = checksum.resolve().get_value("binary")
         np.testing.assert_array_equal(result, expected)
@@ -404,9 +417,35 @@ def test_bytes_magic_remains_raw_and_checksum_parity(backend, form, payload_kind
     checksum = result_checksum(tf)
     assert checksum.resolve().content == value
     assert checksum == before
-    if backend == "juliacall":
-        cli = builder("julia", "result = value", value, "bytes", "bytes")
+    if backend == "mem":
+        cli = builder("cli", "result = value", value, "bytes", "bytes")
         assert result_checksum(cli) == checksum
     assert Buffer(value, "bytes").get_checksum() == before
     if form != "value":
         assert path.read_bytes() == stored
+
+
+def test_julia_cli_readiness_canary(monkeypatch):
+    from seamless_transformer.languages import get_language_handler
+
+    project = Path(__file__).resolve().parents[2] / "seamless" / "julia"
+    monkeypatch.setenv("JULIA_PROJECT", str(project))
+    executable = shutil.which("julia")
+    assert executable is not None, "Julia CLI executable is required for the Phase 2 canary"
+    probe = subprocess.run(
+        [executable, "--startup-file=no", "-e", "using NPZ, JSON"],
+        capture_output=True, text=True, timeout=180,
+    )
+    assert probe.returncode == 0, "Julia CLI requires NPZ and JSON: " + probe.stderr[-1000:]
+    code = f"# Phase 2 readiness canary {uuid.uuid4().hex}\nresult = value + 1"
+    result = get_language_handler("julia").handler(
+        code=code,
+        pins={"value": 41},
+        filesystem={"value": {"celltype": "plain", "filesystem": False}},
+        output_name="result",
+        output_celltype="plain",
+        metavars={"BACKEND": "cli"},
+        environment=None,
+        process_lock=True,
+    )
+    assert result == 42

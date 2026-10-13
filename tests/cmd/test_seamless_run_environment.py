@@ -190,3 +190,12 @@ def test_executable_preparation_preserves_same_named_variable_inputs(tmp_path, e
     assert 'PINS:' + first + ':' + second in output
     assert script.stat().st_mode & 0o111 == 0
 
+
+
+def test_combined_docker_and_conda_fails_at_dispatch(tmp_path):
+    marker = tmp_path / 'ran-body'
+    output = cli(tmp_path, ['--docker', 'phase2-unused-image', '--conda', 'phase2-unused-env'],
+                 ['sh', '-c', 'touch "$1"', 'sh', str(marker)], success=False)
+    assert 'cannot be used together' in output.lower()
+    assert not marker.exists()
+

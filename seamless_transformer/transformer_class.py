@@ -179,8 +179,6 @@ class TransformerCore(Generic[P, R]):
 
     def _freeze(self) -> FrozenTransformer:
         """Return an immutable copy of this builder's settings (not an owner)."""
-        if self.language == "python":
-            self.environment._validate_bash_only()
         if self._workflow_backend is not None:
             return self._workflow_backend.freeze()
         pin_args, input_celltypes = self._frozen_pin_inputs()
@@ -1158,6 +1156,10 @@ class HandlerMetaVars:
         definition = self._definition()
         if name not in definition.metavars:
             raise AttributeError(f"No metavar {name!r}")
+        if name == "BACKEND":
+            from .languages import _validate_backend_value
+
+            _validate_backend_value(value, self._transformer.language)
         values = self._values()
         values[name] = value
         transformer = self._transformer

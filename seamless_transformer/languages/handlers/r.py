@@ -24,12 +24,12 @@ def r(
 
     if not isinstance(metavars, Mapping):
         metavars = {}
-    backend = metavars.get("BACKEND", "Rscript")
-    if backend not in ("Rscript", "ryp"):
+    backend = metavars.get("BACKEND", "cli")
+    if backend not in ("cli", "mem"):
         raise ValueError(f"Unknown R backend: {backend!r}")
-    if backend == "ryp" and not process_lock:
+    if backend == "mem" and not process_lock:
         raise RuntimeError(
-            "The ryp backend requires the process lock; use BACKEND='Rscript' instead"
+            "The mem backend requires the process lock; use BACKEND='cli' instead"
         )
     if not isinstance(pins, Mapping):
         raise TypeError("R handler pins must be a mapping")
@@ -43,22 +43,10 @@ def r(
             f"R handler cannot return deep or folder celltype {output_celltype!r}"
         )
     environment = environment if isinstance(environment, Mapping) else {}
-    if backend == "ryp":
-        if environment.get("docker"):
-            raise RuntimeError("The ryp backend cannot run in a Docker environment")
-        conda_environment = environment.get("conda_environment")
-        if conda_environment:
-            if "/" in str(conda_environment):
-                matches = os.path.realpath(os.environ.get("CONDA_PREFIX", "")) == os.path.realpath(
-                    str(conda_environment)
-                )
-            else:
-                matches = os.environ.get("CONDA_DEFAULT_ENV") == str(conda_environment)
-            if not matches:
-                raise RuntimeError(
-                    "The ryp backend requires the process to run in "
-                    f"conda environment {conda_environment!r}"
-                )
+    if backend == "mem":
+        from seamless_transformer.languages import check_in_memory_environment
+
+        check_in_memory_environment(environment, "r")
 
     from seamless_transformer.compression_utils import (
         decompress_bytes,
@@ -141,14 +129,14 @@ def r(
         container_celltype = celltype in {"binary", "mixed"}
         if container_celltype and raw.startswith(b"\x93NUMPY"):
             array = np.load(io.BytesIO(raw), allow_pickle=False)
-            if backend == "Rscript" and (array.dtype == np.float32 or array.ndim > 2):
+            if backend == "cli" and (array.dtype == np.float32 or array.ndim > 2):
                 reason = "float32" if array.dtype == np.float32 else "more than two dimensions"
                 raise RuntimeError(
-                    f"RcppCNPy cannot read arrays with {reason}; use BACKEND='ryp'"
+                    f"RcppCNPy cannot read arrays with {reason}; use BACKEND='mem'"
                 )
             array_dtype = str(array.dtype)
             array_type = "integer" if array.dtype.kind in "iub" else "numeric"
-            if backend == "Rscript" and array.dtype.kind in "iub":
+            if backend == "cli" and array.dtype.kind in "iub":
                 # RcppCNPy 0.2.15 misreads NPY int32 when asked for either
                 # integer or numeric. R's shared native representation is
                 # double, so materialize that canonical dtype for the CLI.
@@ -158,7 +146,7 @@ def r(
                 np.save(normalized, array, allow_pickle=False)
                 raw = normalized.getvalue()
                 on_file = False
-            if backend == "ryp":
+            if backend == "mem":
                 raw = (
                     b"SEAMLESS-R-JSON\n"
                     + json.dumps(
@@ -168,9 +156,9 @@ def r(
                     ).encode("utf-8")
                 )
         elif celltype == "mixed" and raw.startswith(b"\x94SEAMLESS-MIXED"):
-            if backend == "Rscript":
+            if backend == "cli":
                 raise RuntimeError(
-                    "The Rscript backend cannot read a Seamless-mixed pin container"
+                    "The R CLI backend cannot read a Seamless-mixed pin container"
                 )
             from seamless.util.mixed.io import deserialize
 
@@ -375,7 +363,7 @@ result <- runtime$run("pins.json", "transformer.R")
 writeBin(charToRaw(enc2utf8(result)), "RESULT")
 '''
 
-    if backend == "Rscript":
+    if backend == "cli":
         job_pins = {}
         job_filesystem = {}
         for spec in pin_specs:
@@ -494,4 +482,4 @@ assign(
 
 from seamless_transformer.languages import register_language_handler
 
-register_language_handler("r", r, metavars={"BACKEND": "Rscript"})
+register_language_handler("r", r, metavars={"BACKEND": "cli"})

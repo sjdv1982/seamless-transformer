@@ -1,4 +1,5 @@
 """Container specification is checked on every submission face."""
+import re
 import subprocess
 import os
 import uuid
@@ -40,11 +41,19 @@ def test_valid_image_spec_setter_and_validator(spec):
 
 
 @pytest.mark.parametrize('spec,message', INVALID)
-def test_invalid_image_spec_is_rejected_by_setter_and_validator(spec, message):
+def test_invalid_image_spec_is_rejected_at_dispatch(spec, message):
     with pytest.raises((ValueError, TypeError), match=message):
         validate_container_spec(spec)
-    with pytest.raises((ValueError, TypeError), match=message):
-        Transformer('bash').environment.set_docker(spec)
+
+    tf = Transformer('bash')
+    tf.code = 'printf 42 > RESULT'
+    tf.environment.set_docker(spec)
+    assert tf.environment.get_docker() == spec
+    handle = tf.build()
+    assert handle.construct() is not None
+    result = handle.compute()
+    assert result is None
+    assert re.search(message, handle.exception or "", re.IGNORECASE)
 
 
 def raw_run(environment, code='printf 42 > RESULT'):
@@ -73,8 +82,11 @@ def test_two_environments_refused_when_transformer_is_frozen():
     tf.code = 'printf 42 > RESULT'
     tf.environment.set_docker({'name': 'image'})
     tf.environment.set_conda_env('seamless1')
-    with pytest.raises(Exception, match='pick one|cannot be used together'):
-        tf.transformation()
+    handle = tf.build()
+    assert handle.construct() is not None
+    result = handle.compute()
+    assert result is None
+    assert 'pick one' in (handle.exception or '').lower() or 'cannot be used together' in (handle.exception or '').lower()
 
 
 def test_two_environments_refused_on_raw_dict():

@@ -32,6 +32,7 @@ from .probe_index import ensure_record_bucket_preconditions_sync, is_record_prob
 from .record_runtime import get_record_mode
 from .execute_bash import execute_bash, write_bash_job
 from .container import select_container_runtime, validate_container_spec
+from .environment import _validate_environment_dispatch
 from .process_lock import scope as process_lock_scope
 
 PACK_DEEP_RESULTS = True
@@ -150,41 +151,16 @@ def run_transformation_dict(
 
     language = transformation.get("__language__", "python")
     is_probe = is_record_probe(transformation, tf_dunder)
-    environment_keys = {key for key in ("docker", "conda_environment") if key in env_dict}
     docker_spec = None
     container_runtime = None
-    if environment_keys and not is_probe:
-        if language != "bash" or _is_compiled_transformation(transformation, tf_dunder):
-            raise RuntimeError(
-                "docker and conda_environment apply to bash transformers only"
-            )
-        if {"docker", "conda_environment"}.issubset(environment_keys):
-            raise RuntimeError(
-                "docker and conda_environment cannot be used together; pick one, "
-                "or activate the conda environment in the script itself"
-            )
-    if "docker" in env_dict and not is_probe:
-        docker_spec = validate_container_spec(env_dict["docker"])
-        if language == "bash":
+    if not is_probe:
+        docker_spec = _validate_environment_dispatch(env_dict)
+        if docker_spec is not None and language == "bash":
             container_runtime = select_container_runtime(docker_spec["name"])
+        if language == "python" or _is_compiled_transformation(transformation, tf_dunder):
+            from .languages import check_in_memory_environment
 
-    skip_environment_which = is_probe and bool(environment_keys)
-    check_environment_which_on_host = (
-        language != "bash" and not skip_environment_which
-    )
-    if env_checksum0 is not None:
-        import shutil
-        if check_environment_which_on_host:
-            missing = [
-                binary
-                for binary in env_dict.get("which", ())
-                if shutil.which(binary) is None
-            ]
-        else:
-            # Bash checks these names after entering its execution environment.
-            missing = []
-        if missing:
-            raise RuntimeError("Required environment binaries are unavailable: " + ", ".join(missing))
+            check_in_memory_environment(env_dict, language)
 
     if get_record_mode() and not is_record_probe(transformation, tf_dunder):
         ensure_record_bucket_preconditions_sync(transformation, tf_dunder)
@@ -367,6 +343,10 @@ def run_transformation_dict(
             if not isinstance(stored_metavars, Mapping):
                 raise TypeError("transformation meta['metavars'] must be a mapping")
             handler_metavars.update(stored_metavars)
+        if "BACKEND" in handler_metavars:
+            from .languages import _validate_backend_value
+
+            _validate_backend_value(handler_metavars["BACKEND"], language)
         offered_arguments = {
             "code": code,
             "pins": handler_pins,

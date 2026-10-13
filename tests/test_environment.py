@@ -39,7 +39,11 @@ def test_environment_validation():
     env = Environment()
     with pytest.raises(TypeError):
         env.set_which("python")
-    with pytest.raises(ValueError):
-        env.set_docker({"image": "python"})
+    invalid_docker = {"image": "python"}
+    env.set_docker(invalid_docker)
+    assert env.get_docker() == invalid_docker
+    from seamless_transformer.container import validate_container_spec
+    with pytest.raises(ValueError, match="name|Unknown Docker"):
+        validate_container_spec(env.get_docker())
     with pytest.raises(ValueError):
         env.set_conda("name: test\n")

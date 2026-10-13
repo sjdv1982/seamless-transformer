@@ -54,6 +54,8 @@ from .record_utils import (
 )
 from .remote_job import RemoteJobWritten, parse_remote_job_written
 from .run import run_transformation_dict
+from .environment import _validate_environment_dispatch
+from .transformation_utils import resolve_env_checksum
 from .output_routing import process_output_route
 from seamless_config.select import (
     check_remote_redundancy,
@@ -101,6 +103,20 @@ def _resolve_remote_target(execution: str) -> str | None:
         get_selected_cluster=get_selected_cluster,
         check_remote_redundancy=check_remote_redundancy,
     )
+
+
+def _validate_environment_before_dispatch(transformation_dict, tf_dunder):
+    if is_record_probe(transformation_dict, tf_dunder):
+        return
+    env_checksum = resolve_env_checksum(transformation_dict, tf_dunder)
+    if env_checksum is None:
+        environment = {}
+    else:
+        env_buffer = Checksum(env_checksum).resolve()
+        environment = env_buffer.get_value("plain") if env_buffer is not None else {}
+        if not isinstance(environment, dict):
+            environment = {}
+    _validate_environment_dispatch(environment)
 
 
 @dataclass
@@ -508,6 +524,7 @@ class TransformationCache:
                         "before strict re-submission"
                     )
             else:
+                _validate_environment_before_dispatch(transformation_dict, tf_dunder)
                 cache_owned_execution = (
                     getattr(self._run_uncached, "__self__", None) is self
                     and run_transformation_dict is not _ORIGINAL_RUN_TRANSFORMATION_DICT

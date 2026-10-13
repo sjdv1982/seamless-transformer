@@ -22,6 +22,75 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def check_in_memory_environment(environment, language):
+    """Check an in-memory backend's conda, Docker, and required-binary rules.
+
+    A conda setting is a requirement on the current process; this function
+    never activates an environment. Docker is unsupported by in-memory
+    backends. Required binaries are checked on this process's PATH.
+    """
+    import os
+    import shutil
+    from collections.abc import Mapping
+
+    if environment is None:
+        environment = {}
+    if not isinstance(environment, Mapping):
+        raise TypeError("transformation environment must be a mapping")
+
+    language = str(language)
+    if "docker" in environment:
+        hint = '; use BACKEND="cli"' if language in {"python", "r", "julia"} else ""
+        raise RuntimeError(
+            f"The in-memory backend for {language!r} cannot use a Docker image{hint}"
+        )
+
+    conda_environment = environment.get("conda_environment")
+    if conda_environment is not None:
+        if not isinstance(conda_environment, str):
+            raise TypeError("conda_environment must be a string")
+        if "/" in conda_environment:
+            current = os.environ.get("CONDA_PREFIX")
+            matches = current is not None and os.path.realpath(current) == os.path.realpath(
+                conda_environment
+            )
+            current_description = current if current is not None else "<unset>"
+        else:
+            current = os.environ.get("CONDA_DEFAULT_ENV")
+            matches = current == conda_environment
+            current_description = current if current is not None else "<unset>"
+        if not matches:
+            raise RuntimeError(
+                f"The in-memory backend for {language!r} requires conda environment "
+                f"{conda_environment!r}, but the current process is in "
+                f"{current_description!r}"
+            )
+
+    required = environment.get("which", ())
+    if required is None:
+        required = ()
+    elif not isinstance(required, (tuple, list)):
+        raise TypeError("which must be a list or tuple of binary names")
+    missing = []
+    for binary in required:
+        if not isinstance(binary, str):
+            raise TypeError("which binary names must be strings")
+        if shutil.which(binary) is None:
+            missing.append(binary)
+    if missing:
+        raise RuntimeError(
+            "Required environment binaries are unavailable: " + ", ".join(missing)
+        )
+
+
+def _validate_backend_value(value, language):
+    if type(value) is not str or value not in ("cli", "mem"):
+        raise ValueError(
+            f"Invalid BACKEND for language {language!r}: {value!r}; "
+            "expected 'cli' or 'mem'"
+        )
+
+
 @dataclass
 class CompilationConfig:
     compiler: str
@@ -198,6 +267,8 @@ def register_language_handler(name, handler, *, metavars=None) -> None:
     defaults = dict(metavars)
     if any(not isinstance(key, str) for key in defaults):
         raise TypeError("metavar names must be strings")
+    if "BACKEND" in defaults:
+        _validate_backend_value(defaults["BACKEND"], name)
 
     _handler_registry[name] = LanguageHandlerDefinition(
         name=name,
@@ -252,6 +323,7 @@ __all__ = [
     "is_compiled_language",
     "is_handler_language",
     "available_languages",
+    "check_in_memory_environment",
     "register_language_handler",
     "run_in_interpreter_thread",
     "_registry",

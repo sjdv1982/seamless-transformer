@@ -27,13 +27,13 @@ def julia(
 
     if not isinstance(metavars, Mapping):
         metavars = {}
-    backend = metavars.get("BACKEND", "julia")
-    if backend not in ("julia", "juliacall"):
+    backend = metavars.get("BACKEND", "cli")
+    if backend not in ("cli", "mem"):
         raise ValueError(f"Unknown Julia backend: {backend!r}")
-    if backend == "juliacall" and not process_lock:
+    if backend == "mem" and not process_lock:
         raise RuntimeError(
-            "The juliacall backend requires the process lock; "
-            "use BACKEND='julia' instead"
+            "The mem backend requires the process lock; "
+            "use BACKEND='cli' instead"
         )
     if not isinstance(pins, Mapping):
         raise TypeError("Julia handler pins must be a mapping")
@@ -47,22 +47,10 @@ def julia(
             f"Julia handler cannot return deep or folder celltype {output_celltype!r}"
         )
     environment = environment if isinstance(environment, Mapping) else {}
-    if backend == "juliacall":
-        if environment.get("docker"):
-            raise RuntimeError("The juliacall backend cannot run in a Docker environment")
-        conda_environment = environment.get("conda_environment")
-        if conda_environment:
-            if "/" in str(conda_environment):
-                matches = os.path.realpath(os.environ.get("CONDA_PREFIX", "")) == os.path.realpath(
-                    str(conda_environment)
-                )
-            else:
-                matches = os.environ.get("CONDA_DEFAULT_ENV") == str(conda_environment)
-            if not matches:
-                raise RuntimeError(
-                    "The juliacall backend requires the process to run in "
-                    f"conda environment {conda_environment!r}"
-                )
+    if backend == "mem":
+        from seamless_transformer.languages import check_in_memory_environment
+
+        check_in_memory_environment(environment, "julia")
 
     from seamless_transformer.compression_utils import (
         decompress_bytes,
@@ -151,7 +139,7 @@ def julia(
             if not isinstance(value, (str, os.PathLike)):
                 raise TypeError(f"Julia handler file pin {name!r} must be a path")
             path = os.fspath(value)
-            if backend == "juliacall" and container_celltype:
+            if backend == "mem" and container_celltype:
                 _, suffix = strip_compression_suffix(path)
                 if not suffix:
                     with open(path, "rb") as f:
@@ -172,7 +160,7 @@ def julia(
             and celltype == "mixed"
             and raw.startswith(b"\x94SEAMLESS-MIXED")
         ):
-            if backend == "julia":
+            if backend == "cli":
                 raise RuntimeError(
                     "The Julia CLI backend cannot read a Seamless-mixed pin container"
                 )
@@ -190,7 +178,7 @@ def julia(
             native_array is None
             and container_celltype
             and raw.startswith(b"\x93NUMPY")
-            and backend == "juliacall"
+            and backend == "mem"
         ):
             native_array = np.load(__import__("io").BytesIO(raw), allow_pickle=False)
 
@@ -587,7 +575,7 @@ open("RESULT", "w") do io
 end
 '''
 
-    if backend == "julia":
+    if backend == "cli":
         job_pins = {}
         job_filesystem = {}
         for spec in pin_specs:
@@ -759,7 +747,7 @@ end
     return result
 
 
-register_language_handler("julia", julia, metavars={"BACKEND": "julia"})
+register_language_handler("julia", julia, metavars={"BACKEND": "cli"})
 
 
 __all__ = ["julia"]

@@ -121,13 +121,36 @@ def test_factory_handler_classes_and_read_only_language(language, direct, class_
 def test_metavar_defaults_survive_partial_override_and_reject_unknown(language):
     tf = builder(language)
     assert tf.metavars.BACKEND == "cli"
-    tf.metavars.BACKEND = "memory"
+    tf.metavars.BACKEND = "mem"
     with pytest.raises((AttributeError, KeyError, ValueError)):
         tf.metavars.UNDECLARED = 1
     handle, checksum, payload = execution_dict(tf)
-    assert handle.meta["metavars"] == {"BACKEND": "memory", "OTHER": 7}
+    assert handle.meta["metavars"] == {"BACKEND": "mem", "OTHER": 7}
     result = execute(payload, checksum)
-    assert result["metavars"] == {"BACKEND": "memory", "OTHER": 7}
+    assert result["metavars"] == {"BACKEND": "mem", "OTHER": 7}
+
+
+@pytest.mark.parametrize("value", ["ryp", "juliacall", "Rscript", "julia", "arbitrary", 7, None])
+def test_direct_handler_backend_rejects_non_contract_values_before_storage(language, value):
+    tf = builder(language)
+    before = tf.metavars.BACKEND
+    with pytest.raises(ValueError, match="BACKEND"):
+        tf.metavars.BACKEND = value
+    assert tf.metavars.BACKEND == before
+
+
+def test_third_party_handler_accepts_only_contract_backend_values(language):
+    tf = builder(language)
+    tf.metavars.BACKEND = "mem"
+    assert tf.metavars.BACKEND == "mem"
+
+
+def test_raw_transformation_dict_rejects_invalid_backend(language):
+    tf = builder(language)
+    handle, checksum, payload = execution_dict(tf)
+    payload["__meta__"]["metavars"]["BACKEND"] = "ryp"
+    with pytest.raises(ValueError, match="BACKEND"):
+        execute(payload, checksum)
 
 
 def test_handler_source_and_backend_are_orthogonal_but_celltype_is_not(language):
@@ -135,7 +158,7 @@ def test_handler_source_and_backend_are_orthogonal_but_celltype_is_not(language)
     first, first_checksum, first_dict = execution_dict(tf)
     first_source = first_dict["__handler__"]
     assert Checksum(first_source).resolve().get_value("text").startswith("def toy_handler(")
-    tf.metavars.BACKEND = "memory"
+    tf.metavars.BACKEND = "mem"
     second, second_checksum, second_dict = execution_dict(tf)
     assert second_checksum == first_checksum
     register_language_handler(language, alternate_handler, metavars={"BACKEND": "cli", "OTHER": 7})
