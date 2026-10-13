@@ -1,6 +1,7 @@
 """Execution helpers for direct transformers."""
 
 from typing import Any, Dict, List, Tuple
+from collections.abc import Mapping
 from contextlib import contextmanager
 import ctypes
 import os
@@ -24,6 +25,7 @@ from .transformation_utils import (
     TRANSFORMATION_EXECUTION_DUNDER_KEYS,
     is_deep_celltype,
     merge_transformation_meta,
+    pack_bash_deepcell_result,
     pack_deep_structure,
     resolve_env_checksum,
     resolve_lock_meta,
@@ -281,7 +283,6 @@ def run_transformation_dict(
 
     if handler_language:
         import ast
-        from collections.abc import Mapping
 
         handler_tree = ast.parse(handler_code)
         if len(handler_tree.body) != 1 or not isinstance(
@@ -325,6 +326,17 @@ def run_transformation_dict(
             for name, entry in namespace.get("FILESYSTEM", {}).items()
         }
         handler_pins = namespace.get("PINS", {})
+        as_map = transformation.get("__as__", {})
+        for pinname, entry in transformation.items():
+            if pinname in ("code", "__language__", "__output__") or pinname.startswith("__"):
+                continue
+            if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+                continue
+            pinname_as = as_map.get(pinname, pinname)
+            if pinname_as in handler_pins:
+                handler_filesystem.setdefault(pinname_as, {}).setdefault(
+                    "celltype", entry[0]
+                )
         if handler_pins:
             handler_pins = dict(handler_pins)
             for pinname, value in handler_pins.items():
@@ -396,15 +408,29 @@ def run_transformation_dict(
         return result_checksum
 
     with process_lock_scope(process_lock_active, should_abort=should_abort):
-        result = _execute(
-            module_workspace,
-            code,
-            identifier,
-            namespace,
-            inputs,
-            output_name,
-            driver_active,
-        )
+        if handler_language:
+            from .languages import _use_cli_execution_context
+
+            with _use_cli_execution_context(checksum_hex, should_abort):
+                result = _execute(
+                    module_workspace,
+                    code,
+                    identifier,
+                    namespace,
+                    inputs,
+                    output_name,
+                    driver_active,
+                )
+        else:
+            result = _execute(
+                module_workspace,
+                code,
+                identifier,
+                namespace,
+                inputs,
+                output_name,
+                driver_active,
+            )
 
     if result is None and output_celltype not in ("plain", "mixed", "bytes"):
         raise RuntimeError(f"Null result is not allowed for celltype {output_celltype!r}")
@@ -414,7 +440,28 @@ def run_transformation_dict(
             raise NotImplementedError(
                 "Packing deep transformation results is not supported yet"
             )
-        result = pack_deep_structure(result, output_celltype)
+        if language == "bash" and output_celltype == "deepcell":
+            result = pack_bash_deepcell_result(result)
+        else:
+            result = pack_deep_structure(result, output_celltype)
+
+    if output_celltype == "checksum" and isinstance(result, Checksum):
+        result = result.hex()
+    elif output_celltype not in ("deepcell", "folder", "checksum"):
+        def contains_checksum(value):
+            if isinstance(value, Checksum):
+                return True
+            if isinstance(value, Mapping):
+                return any(contains_checksum(child) for child in value.values())
+            if isinstance(value, (list, tuple, set, frozenset)):
+                return any(contains_checksum(child) for child in value)
+            return False
+
+        if contains_checksum(result):
+            raise TypeError(
+                f"A Checksum can only be returned under a deep or checksum result, "
+                f"not {output_celltype!r}"
+            )
 
     result_buffer = Buffer(result, output_celltype)
     result_checksum = result_buffer.get_checksum()

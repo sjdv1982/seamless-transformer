@@ -20,6 +20,74 @@ thread. Calls from that thread run inline. Set
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+
+_cli_execution_context = ContextVar("seamless_cli_execution_context", default=(None, None))
+
+
+@contextmanager
+def _use_cli_execution_context(tf_checksum, should_abort):
+    token = _cli_execution_context.set((tf_checksum, should_abort))
+    try:
+        yield
+    finally:
+        _cli_execution_context.reset(token)
+
+
+def execute_cli(command, pins_, PINS, FILESYSTEM, OUTPUTPIN, environment):
+    """Run a language command through the shared CLI job machinery."""
+    from collections.abc import Mapping
+
+    if environment is None:
+        environment = {}
+    if not isinstance(environment, Mapping):
+        raise TypeError("transformation environment must be a mapping")
+    from seamless_transformer.execute_bash import execute_bash
+
+    if environment.get("docker") is not None:
+        import os
+
+        from seamless import CacheMissError
+        from seamless_transformer.execute_bash import _container_can_read
+        from seamless_transformer.transformation_namespace import (
+            _get_read_folder_directories,
+        )
+
+        read_directories = _get_read_folder_directories()
+        for pinname, entry in FILESYSTEM.items():
+            if not isinstance(entry, Mapping) or entry.get("celltype") != "deepfolder":
+                continue
+            value = PINS.get(pinname)
+            if not isinstance(value, Mapping):
+                continue
+            for member, path in value.items():
+                if not isinstance(path, (str, os.PathLike)):
+                    raise CacheMissError(
+                        f"deepfolder member {member!r} is not a stored buffer path"
+                    )
+                if not os.path.isfile(path) or not _container_can_read(
+                    os.fspath(path), read_directories
+                ):
+                    raise CacheMissError(
+                        f"deepfolder member {member!r}: buffer file is a link "
+                        "which the container cannot follow"
+                    )
+
+    tf_checksum, should_abort = _cli_execution_context.get()
+    return execute_bash(
+        command,
+        pins_,
+        environment.get("conda_environment", ""),
+        PINS,
+        FILESYSTEM,
+        OUTPUTPIN,
+        which_=environment.get("which", ()),
+        docker_=environment.get("docker"),
+        tf_checksum_=tf_checksum,
+        should_abort_=should_abort,
+    )
 
 
 def check_in_memory_environment(environment, language):
@@ -324,6 +392,7 @@ __all__ = [
     "is_handler_language",
     "available_languages",
     "check_in_memory_environment",
+    "execute_cli",
     "register_language_handler",
     "run_in_interpreter_thread",
     "_registry",

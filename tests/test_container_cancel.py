@@ -129,6 +129,127 @@ finally:
     seamless.close()
 '''
 
+_HANDLER_CANCEL_SCRIPT = r'''
+import json, os, pathlib, signal, subprocess, sys, time, uuid
+import seamless
+from seamless_transformer import Transformer
+from seamless_config.select import select_execution
+from seamless_transformer.transformation_cache import get_transformation_cache
+
+language, mode, runtime, image = sys.argv[1:]
+select_execution(mode)
+if mode == 'spawn':
+    from seamless_transformer import spawn
+    spawn(1)
+
+token = 'seamless-handler-cancel-' + uuid.uuid4().hex
+command = 'exec -a ' + token + ' sleep 120'
+marker = '/tmp/' + token + '.started'
+if language == 'r':
+    literal = json.dumps(command)
+    code = ('system2("bash", c("-c", shQuote(' + literal + ')), '
+            'wait=FALSE, stdout="/dev/null", stderr="/dev/null")\n'
+            'file.create(' + json.dumps(marker) + ')\n'
+            'Sys.sleep(120)\nresult <- "finished"')
+else:
+    literal = json.dumps(command)
+    code = ('run(pipeline(Cmd(["bash", "-c", ' + literal + ']), '
+            'stdout=devnull, stderr=devnull), wait=false)\n'
+            'write(' + json.dumps(marker) + ', "started")\n'
+            'sleep(120)\nresult = "finished"')
+
+tf = Transformer(language)
+tf.code = code
+tf.celltypes.result = 'text'
+tf.local = True
+if runtime in ('docker', 'podman', 'apptainer'):
+    tf.environment.set_docker({'name': image})
+job = tf.transformation()
+job.construct()
+checksum = job.transformation_checksum.hex()
+
+def engine(*args):
+    result = subprocess.run([runtime, *args], capture_output=True,
+                            text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout.strip()
+
+def containers():
+    return engine('ps', '-aq', '--filter', 'label=seamless.tf=' + checksum)
+
+def token_pids():
+    result = []
+    for entry in pathlib.Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / 'cmdline').read_bytes().split(b'\0')
+            if argv and argv[0] == token.encode():
+                result.append(int(entry.name))
+        except (OSError, ProcessLookupError):
+            pass
+    return result
+
+def group_live(pgid):
+    rows = subprocess.check_output(['ps', '-eo', 'pgid=,stat='], text=True)
+    return any(int(fields[0]) == pgid and not fields[1].startswith('Z')
+               for row in rows.splitlines() if len(fields := row.split()) == 2)
+
+def wait(predicate, timeout, message):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        value = predicate()
+        if value:
+            return value
+        if job.exception is not None:
+            raise AssertionError((message, job.exception, job.logs))
+        time.sleep(.05)
+    raise AssertionError((message, job.status, job.exception, job.logs))
+
+pgid = None
+container = None
+try:
+    job.start()
+    if runtime in ('docker', 'podman'):
+        container = wait(containers, 45, 'container never started').splitlines()[0]
+        def handler_started():
+            result = subprocess.run(
+                [runtime, 'exec', container, 'test', '-f', marker],
+                capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return True
+            if result.returncode == 1:
+                return False
+            raise AssertionError(result.stdout + result.stderr)
+        wait(handler_started, 30, 'R/Julia handler did not enter its sleep')
+    else:
+        pid = wait(token_pids, 45, 'sleep never started')[0]
+        pgid = os.getpgid(pid)
+
+    get_transformation_cache().cancel_by_checksum(checksum)
+    end = time.monotonic() + 8
+    while time.monotonic() < end:
+        gone = not containers() if container else not group_live(pgid)
+        if gone:
+            break
+        time.sleep(.05)
+    else:
+        raise AssertionError(('hard cancel did not remove the process group/container',
+                              language, mode, runtime, checksum, pgid, container))
+    print('HANDLER_CANCEL_OK', language, mode, runtime, flush=True)
+finally:
+    if container:
+        subprocess.run([runtime, 'rm', '-f', *(['-t', '0'] if runtime == 'podman' else []), container],
+                       capture_output=True, timeout=15)
+    if pgid and group_live(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    job.cancel()
+    seamless.close()
+'''
+
 
 @pytest.fixture(scope='session')
 def apptainer_images(tmp_path_factory):
@@ -274,3 +395,36 @@ def test_executor_finally_unregisters_and_kills_background_job(fail, monkeypatch
         for callback in callbacks:
             callback()
         registry.run_cleanups(checksum)
+
+
+@pytest.mark.parametrize('language', ['r', 'julia'])
+@pytest.mark.parametrize('mode', ['process', 'spawn'])
+@pytest.mark.parametrize('runtime', ['plain', 'docker', 'podman', 'apptainer'])
+def test_handler_cli_hard_cancel(language, mode, runtime, language_runtime_images):
+    env = os.environ.copy()
+    env.pop('SEAMLESS_CONTAINER_ARGS', None)
+    env.pop('SEAMLESS_APPTAINER_DIR', None)
+    env.pop('SEAMLESS_CONTAINER_RUNTIME', None)
+    if runtime != 'plain':
+        env['SEAMLESS_CONTAINER_RUNTIME'] = runtime
+        env['SEAMLESS_CONTAINER_PULL'] = 'never'
+        if runtime == 'apptainer':
+            env['SEAMLESS_APPTAINER_DIR'] = str(language_runtime_images['sif_dir'])
+    command = [
+        sys.executable,
+        '-c',
+        _HANDLER_CANCEL_SCRIPT,
+        language,
+        mode,
+        runtime,
+        language_runtime_images[language],
+    ]
+    result = subprocess.run(
+        command,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f'HANDLER_CANCEL_OK {language} {mode} {runtime}' in result.stdout

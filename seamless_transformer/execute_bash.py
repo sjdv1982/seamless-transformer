@@ -14,11 +14,9 @@ from typing import IO, cast
 
 import numpy as np
 
-from seamless import Buffer, Checksum
+from seamless import Buffer, Checksum, CacheMissError
 
 from seamless.util.mixed.get_form import get_form
-from seamless.util.mount_directory import write_to_directory
-
 from .compression_utils import (
     compress_bytes,
     decompress_bytes,
@@ -106,6 +104,149 @@ def _which_check_lines(which_):
     return lines
 
 
+def _container_can_read(path, read_directories):
+    """Return whether a buffer path resolves under a directory we bind."""
+    resolved = os.path.realpath(path)
+    for directory in read_directories or ():
+        root = os.path.realpath(directory)
+        try:
+            if os.path.commonpath((root, resolved)) == root:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def _validate_container_deepfolder_members(structure, read_directories):
+    """Require every deepfolder path to be readable through a container bind."""
+    if not isinstance(structure, dict):
+        raise TypeError("deepfolder pin must contain a mapping of members")
+    for key, value in structure.items():
+        try:
+            path = os.fspath(value)
+        except TypeError:
+            path = None
+        if path is None or not os.path.isfile(path):
+            raise CacheMissError(
+                f"deepfolder member {key!r}: member is not in a read-buffer directory"
+            )
+        if not _container_can_read(path, read_directories):
+            raise CacheMissError(
+                f"deepfolder member {key!r}: "
+                "buffer file is a link which the container cannot follow"
+            )
+
+
+def _safe_directory_member_path(root, key):
+    if not isinstance(key, str) or not key:
+        raise ValueError(f"Invalid directory member name: {key!r}")
+    if os.path.isabs(key) or ".." in key.replace("\\", "/").split("/"):
+        raise ValueError(f"Invalid directory member name: {key!r}")
+    path = os.path.abspath(os.path.join(root, key))
+    if os.path.commonpath((os.path.abspath(root), path)) != os.path.abspath(root):
+        raise ValueError(f"Invalid directory member name: {key!r}")
+    return path
+
+
+def write_directory_pin(
+    pin_path,
+    structure,
+    celltype,
+    *,
+    read_directories=None,
+    container=False,
+    members_are_checksums=None,
+    compression_suffix=None,
+):
+    """Write a folder or deepfolder pin using the bash job's materialization rules."""
+    if celltype not in ("folder", "deepfolder"):
+        raise ValueError(f"Unsupported directory pin celltype {celltype!r}")
+    if not isinstance(structure, dict):
+        raise TypeError(f"{celltype} pin must contain a mapping of members")
+
+    from .transformation_namespace import _find_filesystem_path
+
+    root = os.path.abspath(pin_path)
+    os.makedirs(root, exist_ok=True)
+    deep = celltype == "deepfolder"
+    if members_are_checksums is None:
+        members_are_checksums = deep
+    if compression_suffix is None:
+        _pin_base, target_suffix = strip_compression_suffix(os.path.basename(pin_path))
+    else:
+        target_suffix = compression_suffix
+    if deep:
+        target_suffix = None
+
+    for key, value in structure.items():
+        member_is_checksum = isinstance(value, Checksum) or (
+            members_are_checksums and isinstance(value, str)
+        )
+        if deep and not member_is_checksum:
+            raise TypeError(
+                f"deepfolder member {key!r} must be a checksum"
+            )
+        if member_is_checksum:
+            checksum = Checksum(value)
+            source_path, source_suffix = _find_filesystem_path(
+                checksum, "file", read_directories
+            )
+            path_is_reachable = (
+                source_path is not None
+                and (not container or _container_can_read(source_path, read_directories))
+            )
+            target_key = key + (source_suffix or "") if deep else key + (target_suffix or "")
+            member_path = _safe_directory_member_path(root, target_key)
+            os.makedirs(os.path.dirname(member_path), exist_ok=True)
+            if path_is_reachable and (deep or source_suffix == target_suffix):
+                os.symlink(os.path.abspath(source_path), member_path)
+                continue
+            if deep:
+                reason = (
+                    "buffer file is a link which the container cannot follow"
+                    if source_path is not None
+                    else "member is not in a read-buffer directory"
+                )
+                raise CacheMissError(
+                    f"deepfolder member {key!r} ({checksum.hex()}): {reason}"
+                )
+            if source_path is not None:
+                with open(source_path, "rb") as handle:
+                    data = handle.read()
+                if source_suffix != target_suffix:
+                    if source_suffix is not None:
+                        data = decompress_bytes(data, source_suffix)
+                    if target_suffix is not None:
+                        data = compress_bytes(data, target_suffix)
+            else:
+                buffer = checksum.resolve()
+                if buffer is None:
+                    raise CacheMissError(
+                        f"folder member {key!r} ({checksum.hex()}) could not be resolved"
+                    )
+                data = buffer.content
+                if target_suffix is not None:
+                    data = compress_bytes(data, target_suffix)
+            with open(member_path, "wb") as handle:
+                handle.write(data)
+            continue
+
+        if deep:
+            raise TypeError(f"deepfolder member {key!r} must be a checksum")
+        if isinstance(value, Buffer):
+            data = value.content
+        elif isinstance(value, bytes):
+            data = value
+        else:
+            data = Buffer(value, "text" if isinstance(value, str) else "mixed").content
+        member_path = _safe_directory_member_path(root, key + (target_suffix or ""))
+        os.makedirs(os.path.dirname(member_path), exist_ok=True)
+        if target_suffix is not None:
+            data = compress_bytes(data, target_suffix)
+        with open(member_path, "wb") as handle:
+            handle.write(data)
+
+
 def write_bash_job(
     bashcode,
     pins_,
@@ -136,6 +277,11 @@ def write_bash_job(
     if conda_environment_ and conda_command_ is None:
         conda_command_ = _conda_run_command(conda_environment_)
 
+    if read_directories_ is None:
+        from .transformation_namespace import _get_read_folder_directories
+
+        read_directories_ = _get_read_folder_directories()
+
     container_command = container_command_
     if docker_ is not None:
         docker_ = validate_container_spec(docker_)
@@ -147,10 +293,6 @@ def write_bash_job(
         if container_command is None:
             if container_runtime_ is None:
                 container_runtime_ = select_container_runtime(docker_["name"])
-            if read_directories_ is None:
-                from .transformation_namespace import _get_read_folder_directories
-
-                read_directories_ = _get_read_folder_directories()
             job_directory = os.getcwd() if directory is None else directory
             container_command = build_container_command(
                 container_runtime_,
@@ -194,27 +336,34 @@ def write_bash_job(
                     os.makedirs(pin_parent, exist_ok=True)
                 _pin_base, pin_suffix = strip_compression_suffix(pin)
                 _found_base, found_suffix = strip_compression_suffix(v)
-                if found_suffix == pin_suffix:
+                can_link = not container_command or _container_can_read(
+                    v, read_directories_
+                )
+                if can_link and found_suffix == pin_suffix:
                     os.symlink(v, pin_path)
                 else:
                     with open(job_path(v), "rb") as handle:
                         data = handle.read()
-                    if found_suffix is not None:
-                        data = decompress_bytes(data, found_suffix)
-                    if pin_suffix is not None:
-                        data = compress_bytes(data, pin_suffix)
+                    if found_suffix != pin_suffix:
+                        if found_suffix is not None:
+                            data = decompress_bytes(data, found_suffix)
+                        if pin_suffix is not None:
+                            data = compress_bytes(data, pin_suffix)
                     _write_file(pin, data, "bw", directory=directory)
                 continue
             elif FILESYSTEM[pin]["mode"] == "directory":
                 fs_entry = FILESYSTEM[pin]
-                deep = fs_entry.get("celltype") == "deepfolder"
                 directory_pin, compression_suffix = strip_compression_suffix(pin)
-                write_to_directory(
+                celltype = fs_entry.get("celltype", "folder")
+                write_directory_pin(
                     job_path(directory_pin),
                     v,
-                    cleanup=False,
-                    deep=deep,
-                    text_only=False,
+                    celltype,
+                    read_directories=read_directories_,
+                    container=container_command is not None,
+                    members_are_checksums=fs_entry.get(
+                        "members_are_checksums", celltype == "deepfolder"
+                    ),
                     compression_suffix=compression_suffix,
                 )
                 env[pin] = directory_pin
@@ -641,6 +790,10 @@ Error: Result file/folder RESULT does not exist
             raise SeamlessStreamTransformationError(msg)
 
         result_is_dir = os.path.isdir(resultfile)
+        if OUTPUTPIN in ("folder", "deepcell") and not result_is_dir:
+            raise SeamlessStreamTransformationError(
+                f"Bash {OUTPUTPIN} result requires RESULT to be a directory"
+            )
         if result_is_dir:
             result = {}
             for dirpath, _, filenames in os.walk(resultfile):
@@ -649,7 +802,17 @@ Error: Result file/folder RESULT does not exist
                     assert full_filename.startswith(resultfile + "/")
                     member = full_filename[len(resultfile) + 1 :]
                     data = open(full_filename, "rb").read()
-                    rdata = read_data(data)
+                    if OUTPUTPIN == "deepcell":
+                        try:
+                            Buffer(data).get_value("mixed")
+                        except Exception as exc:
+                            raise SeamlessStreamTransformationError(
+                                f"Bash deepcell result member {member!r} "
+                                "is not a valid mixed buffer"
+                            ) from exc
+                        rdata = data
+                    else:
+                        rdata = read_data(data)
                     result[member] = rdata
             if not len(result):
                 msg = """
@@ -705,4 +868,4 @@ Error: Result folder RESULT is empty
     return result
 
 
-__all__ = ["execute_bash", "write_bash_job"]
+__all__ = ["execute_bash", "write_bash_job", "write_directory_pin"]

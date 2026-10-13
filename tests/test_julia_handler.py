@@ -18,18 +18,18 @@ from seamless_transformer.transformation_utils import extract_tf_dunder
 
 
 @pytest.fixture(params=["cli", "mem"])
-def backend(request, monkeypatch):
-    # JuliaCall uses its own conda-local project. The CLI receives the tracked
-    # Julia project only for this fixture instance.
+def backend(request):
+    # JuliaCall uses its own conda-local project. The CLI stages the tracked
+    # Julia project files into each job directory and passes --project=.
     if request.param == "mem":
         if importlib.util.find_spec("juliacall") is None:
             pytest.skip("juliacall is missing")
         return request.param
-    monkeypatch.setenv("JULIA_PROJECT", str(Path(__file__).resolve().parents[2] / "seamless" / "julia"))
+    project = Path(__file__).resolve().parents[2] / "seamless" / "julia"
     executable = shutil.which("julia")
     if executable is None:
         pytest.skip("Julia CLI executable is missing from PATH")
-    probe = subprocess.run([executable, "--startup-file=no", "-e", "using NPZ, JSON"],
+    probe = subprocess.run([executable, "--startup-file=no", f"--project={project}", "-e", "using NPZ, JSON"],
                            capture_output=True, text=True, timeout=180)
     if probe.returncode:
         pytest.skip("Julia CLI needs NPZ and JSON: " + probe.stderr[-1000:])
@@ -197,21 +197,47 @@ def test_mixed_container_is_refused_by_cli(backend):
 def test_deep_pin_celltypes_are_refused(backend, celltype):
     from seamless_transformer.languages import get_language_handler
     handler = get_language_handler("julia").handler
-    with pytest.raises((ValueError, TypeError), match="deep|folder|celltype"):
-        handler(code="result = 1", pins={"value": {}},
-                filesystem={"value": {"celltype": celltype, "filesystem": False}},
-                output_name="result", output_celltype="plain",
-                metavars={"BACKEND": backend}, environment=None, process_lock=True)
+    checksum = "a" * 64
+    if celltype == "deepcell":
+        value = {"k": Checksum(checksum)}
+        code = f'result = value["k"] isa Checksum && value["k"].hex == "{checksum}"'
+        expected = True
+    elif celltype == "deepfolder":
+        value = {"k": "/tmp/member.gz"}
+        code = 'result = value["k"]'
+        expected = "/tmp/member.gz"
+    else:
+        value = {"k": b"folder bytes"}
+        code = 'result = String(value["k"])'
+        expected = "folder bytes"
+    assert handler(
+        code=code,
+        pins={"value": value},
+        filesystem={"value": {"celltype": celltype, "filesystem": False}},
+        output_name="result",
+        output_celltype="plain",
+        metavars={"BACKEND": backend},
+        environment=None,
+        process_lock=True,
+    ) == expected
 
 
 @pytest.mark.parametrize("celltype", ["deepcell", "folder"])
 def test_deep_result_celltypes_are_refused(backend, celltype):
     from seamless_transformer.languages import get_language_handler
     handler = get_language_handler("julia").handler
-    with pytest.raises((ValueError, TypeError), match="deep|folder|celltype"):
-        handler(code="result = 1", pins={}, filesystem={},
-                output_name="result", output_celltype=celltype,
-                metavars={"BACKEND": backend}, environment=None, process_lock=True)
+    checksum = "b" * 64
+    result = handler(
+        code=f'result = Dict("k" => Checksum("{checksum}"))',
+        pins={},
+        filesystem={},
+        output_name="result",
+        output_celltype=celltype,
+        metavars={"BACKEND": backend},
+        environment=None,
+        process_lock=True,
+    )
+    assert result == {"k": Checksum(checksum)}
 
 
 def test_stdout_and_stderr_reach_transformation_logs(backend):
@@ -425,15 +451,14 @@ def test_bytes_magic_remains_raw_and_checksum_parity(backend, form, payload_kind
         assert path.read_bytes() == stored
 
 
-def test_julia_cli_readiness_canary(monkeypatch):
+def test_julia_cli_readiness_canary():
     from seamless_transformer.languages import get_language_handler
 
     project = Path(__file__).resolve().parents[2] / "seamless" / "julia"
-    monkeypatch.setenv("JULIA_PROJECT", str(project))
     executable = shutil.which("julia")
     assert executable is not None, "Julia CLI executable is required for the Phase 2 canary"
     probe = subprocess.run(
-        [executable, "--startup-file=no", "-e", "using NPZ, JSON"],
+        [executable, "--startup-file=no", f"--project={project}", "-e", "using NPZ, JSON"],
         capture_output=True, text=True, timeout=180,
     )
     assert probe.returncode == 0, "Julia CLI requires NPZ and JSON: " + probe.stderr[-1000:]
@@ -449,3 +474,43 @@ def test_julia_cli_readiness_canary(monkeypatch):
         process_lock=True,
     )
     assert result == 42
+
+
+def test_checksum_class_contract(backend):
+    from seamless_transformer.languages import get_language_handler
+
+    checksum = "ab" * 32
+    handler = get_language_handler("julia").handler
+    result = handler(
+        code=(
+            f'checksum = Checksum("{checksum}")\n'
+            f'result = Dict("text" => string(checksum), '
+            '"is_checksum" => checksum isa Checksum, '
+            f'"equal" => checksum == Checksum("{checksum}"), '
+            f'"plain_is_checksum" => ("{checksum}" isa Checksum))'
+        ),
+        pins={},
+        filesystem={},
+        output_name="result",
+        output_celltype="plain",
+        metavars={"BACKEND": backend},
+        environment=None,
+        process_lock=True,
+    )
+    assert result == {
+        "text": checksum,
+        "is_checksum": True,
+        "equal": True,
+        "plain_is_checksum": False,
+    }
+    with pytest.raises(Exception):
+        handler(
+            code='result = Checksum("invalid")',
+            pins={},
+            filesystem={},
+            output_name="result",
+            output_celltype="plain",
+            metavars={"BACKEND": backend},
+            environment=None,
+            process_lock=True,
+        )

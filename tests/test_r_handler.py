@@ -367,3 +367,42 @@ def test_json_marker_dicts_remain_lists_and_checksum_parity(
         cli = builder("cli", code, value, celltype)
         assert execution(cli)[0] == execution(tf)[0]
         assert result_checksum(cli) == checksum
+
+
+def test_checksum_class_contract(backend):
+    from seamless_transformer.languages import get_language_handler
+
+    checksum = "ab" * 32
+    result = get_language_handler("r").handler(
+        code=(
+            f'checksum <- seamless_checksum("{checksum}")\n'
+            "result <- list(text = as.character(checksum), "
+            "is_checksum = is_seamless_checksum(checksum), "
+            f'equal = identical(checksum, seamless_checksum("{checksum}")), '
+            f'plain_is_checksum = is_seamless_checksum("{checksum}"))'
+        ),
+        pins={},
+        filesystem={},
+        output_name="result",
+        output_celltype="plain",
+        metavars={"BACKEND": backend},
+        environment=None,
+        process_lock=True,
+    )
+    assert result == {
+        "text": checksum,
+        "is_checksum": True,
+        "equal": True,
+        "plain_is_checksum": False,
+    }
+    with pytest.raises(Exception):
+        get_language_handler("r").handler(
+            code='result <- seamless_checksum("invalid")',
+            pins={},
+            filesystem={},
+            output_name="result",
+            output_celltype="plain",
+            metavars={"BACKEND": backend},
+            environment=None,
+            process_lock=True,
+        )

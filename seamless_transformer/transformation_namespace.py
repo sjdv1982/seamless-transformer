@@ -184,7 +184,10 @@ def build_transformation_namespace_sync(
         fs_entry = FILESYSTEM.get(pinname)
         if fs_entry is not None:
             fs_mode = fs_entry.get("mode")
-            if fs_mode:
+            # A deep directory's index, not a separately cached directory,
+            # defines its members. Folder inputs are values in memory and
+            # bash jobs materialize the same index into their own directory.
+            if fs_mode and fs_mode != "directory":
                 compression_suffix = None
                 if fs_mode == "file":
                     _pin_base, compression_suffix = strip_compression_suffix(
@@ -276,15 +279,36 @@ def build_transformation_namespace_sync(
             continue
 
         if celltype in ("deepcell", "deepfolder"):
+            if language == "bash" and celltype == "deepcell":
+                raise TypeError(
+                    f"Bash transformer pin {pinname!r} cannot be deepcell; "
+                    "declare it deepfolder, folder or plain"
+                )
             deep_structure = buffer.get_value("plain")
             value = _to_checksum_dict(deep_structure)
+            if celltype == "deepfolder" and language != "bash":
+                paths = {}
+                for member_name, member_checksum in value.items():
+                    path, _suffix = _find_filesystem_path(
+                        member_checksum, "file", read_folder_directories
+                    )
+                    if path is None:
+                        raise CacheMissError(
+                            f"{pinname}: deepfolder member {member_name!r} "
+                            f"({member_checksum.hex()}) is not in a read-buffer directory"
+                        )
+                    paths[member_name] = path
+                value = paths
             pinname_as = as_.get(pinname, pinname)
             namespace["PINS"][pinname_as] = value
             namespace[pinname_as] = value
             continue
         elif celltype == "folder":
             deep_structure = buffer.get_value("plain")
-            value = unpack_deep_structure(deep_structure, "folder")
+            if language == "bash":
+                value = _to_checksum_dict(deep_structure)
+            else:
+                value = unpack_deep_structure(deep_structure, "folder")
             pinname_as = as_.get(pinname, pinname)
             namespace["PINS"][pinname_as] = value
             namespace[pinname_as] = value
@@ -296,6 +320,8 @@ def build_transformation_namespace_sync(
             value = buffer
         else:
             value = buffer.get_value(celltype or "mixed")
+            if celltype == "checksum":
+                value = Checksum(value)
 
         if (celltype, subcelltype) == ("plain", "module"):
             modules_to_build[pinname] = value

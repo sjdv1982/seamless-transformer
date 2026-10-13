@@ -127,7 +127,7 @@ def prepare_bash_transformation(
     if not result_targets:
         transformation_dict["__output__"] = ("result", "bytes", None)
     else:
-        transformation_dict["__output__"] = ("result", "deepfolder", None)
+        transformation_dict["__output__"] = ("result", "folder", None)
 
     if meta:
         transformation_dict["__meta__"] = meta
@@ -142,9 +142,9 @@ def prepare_bash_transformation(
         if k in directory_set:
             fmt = {
                 "filesystem": {"optional": True, "mode": "directory"},
-                "celltype": "deepfolder",
+                "celltype": "folder",
             }
-            transformation_dict[k] = "mixed", None, v
+            transformation_dict[k] = "folder", None, v
         else:
             fmt = {"filesystem": {"optional": True, "mode": "file"}}
             transformation_dict[k] = "bytes", None, v

@@ -19,8 +19,19 @@ def r(
     from pathlib import Path
 
     import numpy as np
-    from seamless import Buffer
-    from seamless_transformer.execute_bash import execute_bash
+    from seamless import Buffer, Checksum
+    from seamless_transformer.execute_bash import (
+        _validate_container_deepfolder_members,
+        write_directory_pin,
+    )
+    from seamless_transformer.languages import execute_cli
+    from seamless_transformer.wire_format import (
+        decode_jsonarray,
+        decode_result_payload,
+        read_wire_directory,
+        write_checksum_pin_index,
+        write_deepcell_pin_index,
+    )
 
     if not isinstance(metavars, Mapping):
         metavars = {}
@@ -38,10 +49,6 @@ def r(
 
     deep_celltypes = {"deepcell", "deepfolder", "folder"}
     file_celltypes = {"mixed", "plain", "text", "bytes", "binary"}
-    if output_celltype in deep_celltypes:
-        raise ValueError(
-            f"R handler cannot return deep or folder celltype {output_celltype!r}"
-        )
     environment = environment if isinstance(environment, Mapping) else {}
     if backend == "mem":
         from seamless_transformer.languages import check_in_memory_environment
@@ -97,9 +104,20 @@ def r(
             return {"__seamless_bytes__": True, "values": list(bytes(value))}
         return value
 
+    def read_wire_files(directory):
+        files = {}
+        for root, _, filenames in os.walk(directory):
+            for filename in filenames:
+                path = os.path.join(root, filename)
+                name = os.path.relpath(path, directory).replace(os.sep, "/")
+                with open(path, "rb") as handle:
+                    files[name] = handle.read()
+        return read_wire_directory(files, output_celltype)
+
     pin_specs = []
     pin_data = {}
     pin_is_filesystem = {}
+    pin_directory_values = {}
     for index, (name, value) in enumerate(pins.items()):
         if not isinstance(name, str):
             raise TypeError("R handler pin names must be strings")
@@ -107,12 +125,37 @@ def r(
         if not isinstance(entry, Mapping):
             raise TypeError(f"R handler filesystem entry for {name!r} must be a mapping")
         celltype = entry.get("celltype", "mixed")
-        if celltype in deep_celltypes:
-            raise ValueError(
-                f"R handler cannot accept deep or folder pin celltype {celltype!r}"
-            )
         on_file = bool(entry.get("filesystem", False))
-        if on_file:
+        if celltype == "folder":
+            pin_directory_values[name] = value
+            pin_is_filesystem[name] = False
+            pin_specs.append(
+                {
+                    "name": name,
+                    "file": f"seamless_pin_{index:04d}",
+                    "celltype": celltype,
+                    "array_type": None,
+                    "array_dtype": None,
+                }
+            )
+            continue
+        if celltype == "deepcell":
+            raw = write_deepcell_pin_index(value)
+        elif celltype == "checksum":
+            raw = write_checksum_pin_index(value)
+        elif celltype == "deepfolder":
+            if backend == "cli" and environment.get("docker") is not None:
+                from seamless_transformer.transformation_namespace import (
+                    _get_read_folder_directories,
+                )
+
+                _validate_container_deepfolder_members(
+                    value, _get_read_folder_directories()
+                )
+            raw = json.dumps(
+                encode_tree(value), ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+        elif on_file:
             if celltype not in file_celltypes:
                 raise TypeError(
                     f"R handler cannot transport file pin {name!r} "
@@ -195,6 +238,61 @@ def r(
         "pins": pin_specs,
     }
     runtime_source = r'''
+seamless_checksum <- function(value) {
+    if (!is.character(value) || length(value) != 1L ||
+        !grepl("^[0-9a-f]{64}$", value)) {
+        stop("seamless_checksum expects 64 lowercase hexadecimal characters")
+    }
+    structure(value, class = "seamless_checksum")
+}
+
+is_seamless_checksum <- function(value) inherits(value, "seamless_checksum")
+
+contains_seamless_checksum <- function(value) {
+    if (is_seamless_checksum(value)) return(TRUE)
+    if (is.list(value)) {
+        return(any(vapply(value, contains_seamless_checksum, logical(1))))
+    }
+    FALSE
+}
+
+as.character.seamless_checksum <- function(x, ...) unclass(x)
+
+print.seamless_checksum <- function(x, ...) {
+    cat("Checksum(", unclass(x), ")\n", sep = "")
+    invisible(x)
+}
+
+decode_wire_pin <- function(data, celltype) {
+    index <- jsonlite::fromJSON(rawToChar(data), simplifyVector = FALSE)
+    decode_checksum <- function(value, label) {
+        if (!is.list(value) || length(value) != 1L ||
+            !identical(names(value), "__checksum__")) {
+            stop(paste0("Malformed checksum entry ", label))
+        }
+        seamless_checksum(value[["__checksum__"]])
+    }
+    if (identical(celltype, "checksum")) {
+        return(decode_checksum(index[["value"]], "value"))
+    }
+    members <- index[["members"]]
+    if (!is.list(members)) stop("Malformed deepcell pin index")
+    for (key in names(members)) members[[key]] <- decode_checksum(members[[key]], key)
+    members
+}
+
+read_folder_pin <- function(path) {
+    files <- list.files(path, recursive = TRUE, full.names = TRUE, all.files = TRUE)
+    files <- files[!dir.exists(files)]
+    values <- lapply(files, function(filename) {
+        size <- file.info(filename)$size
+        con <- file(filename, open = "rb")
+        tryCatch(readBin(con, what = "raw", n = size), finally = close(con))
+    })
+    names(values) <- substring(files, nchar(path) + 2L)
+    values
+}
+
 decode_tree <- function(value) {
     if (is.list(value) && !is.null(value[["__seamless_array__"]]) &&
         isTRUE(value[["__seamless_array__"]])) {
@@ -218,6 +316,10 @@ decode_tree <- function(value) {
 
 decode_pin <- function(data, pin) {
     celltype <- pin[["celltype"]]
+    if (identical(celltype, "deepcell") || identical(celltype, "checksum"))
+        return(decode_wire_pin(data, celltype))
+    if (identical(celltype, "deepfolder"))
+        return(jsonlite::fromJSON(rawToChar(data), simplifyVector = FALSE))
     if (identical(celltype, "bytes")) return(data)
     if (identical(celltype, "text")) {
         value <- rawToChar(data)
@@ -263,6 +365,39 @@ is_transform <- function(code) {
     FALSE
 }
 
+encode_tree <- function(value) {
+    if (is.raw(value)) {
+        return(list("__seamless_bytes__" = TRUE,
+                    values = as.list(as.integer(value))))
+    }
+    dims <- dim(value)
+    is_array <- (is.numeric(value) || is.integer(value) || is.logical(value)) &&
+        (length(value) > 1L || !is.null(dims))
+    if (is_array) {
+        shape <- if (is.null(dims)) length(value) else dims
+        dtype <- if (is.logical(value)) "bool" else if (is.integer(value)) "int64" else "float64"
+        values <- if (is.logical(value)) as.list(as.logical(as.vector(value)))
+                  else if (is.integer(value)) as.list(as.integer(as.vector(value)))
+                  else as.list(as.numeric(as.vector(value)))
+        payload <- list(TRUE, dtype, as.list(as.integer(shape)), values)
+        names(payload) <- c("__seamless_array__", "dtype", "shape", "values")
+        return(payload)
+    }
+    if (is.list(value)) {
+        for (i in seq_along(value)) value[[i]] <- encode_tree(value[[i]])
+    }
+    value
+}
+
+is_json_value <- function(value) {
+    if (is.object(value)) return(FALSE)
+    if (is.null(value) || is.atomic(value)) return(TRUE)
+    if (is.list(value)) {
+        return(all(vapply(value, is_json_value, logical(1))))
+    }
+    FALSE
+}
+
 encode_result <- function(value, output_celltype) {
     if (identical(output_celltype, "bytes")) {
         if (is.raw(value)) bytes <- as.integer(value)
@@ -277,6 +412,12 @@ encode_result <- function(value, output_celltype) {
             payload, auto_unbox = TRUE, null = "null", digits = 17
         )))
     }
+    if (identical(output_celltype, "mixed") && is.raw(value)) {
+        return(as.character(jsonlite::toJSON(
+            encode_tree(value), auto_unbox = TRUE, null = "null", digits = 17
+        )))
+    }
+    if (identical(output_celltype, "mixed")) value <- encode_tree(value)
     dims <- dim(value)
     is_array <- (is.numeric(value) || is.integer(value) || is.logical(value)) &&
         (length(value) > 1L || !is.null(dims))
@@ -299,6 +440,74 @@ encode_result <- function(value, output_celltype) {
     ))
 }
 
+write_wire_result <- function(value, output_celltype, directory) {
+    if (!is.list(value) || is.null(names(value)))
+        stop("R deep results must be a named list")
+    keys <- names(value)
+    if (anyNA(keys)) stop("R deep result keys must be strings")
+    dir.create(directory, recursive = TRUE, showWarnings = FALSE)
+    file_index <- 0L
+    write_wire_file <- function(data, suffix) {
+        filename <- sprintf("m%06d%s", file_index, suffix)
+        file_index <<- file_index + 1L
+        writeBin(data, file.path(directory, filename))
+        filename
+    }
+    members <- list()
+    json_values <- list()
+    for (key in keys) {
+        item <- value[[key]]
+        if (is_seamless_checksum(item)) {
+            members[[key]] <- list("__checksum__" = as.character(item))
+        } else if (identical(output_celltype, "folder")) {
+            if (is.raw(item)) bytes <- item
+            else stop(paste0("Folder member ", key, " is not bytes"))
+            members[[key]] <- write_wire_file(bytes, ".bytes")
+        } else if (is.raw(item)) {
+            members[[key]] <- write_wire_file(item, ".bytes")
+        } else {
+            dims <- dim(item)
+            is_array <- (is.numeric(item) || is.integer(item) || is.logical(item)) &&
+                (length(item) > 1L || !is.null(dims))
+            if (is_array) {
+                shape <- if (is.null(dims)) length(item) else dims
+                dtype <- if (is.logical(item)) "bool" else if (is.integer(item)) "int64" else "float64"
+                values <- if (is.logical(item)) as.list(as.logical(as.vector(item)))
+                          else if (is.integer(item)) as.list(as.integer(as.vector(item)))
+                          else as.list(as.numeric(as.vector(item)))
+                payload <- list(dtype = dtype, shape = as.list(as.integer(shape)), values = values)
+                members[[key]] <- write_wire_file(
+                    charToRaw(as.character(jsonlite::toJSON(
+                        payload, auto_unbox = TRUE, null = "null", digits = 17
+                    ))),
+                    ".jsonarray"
+                )
+            } else {
+                if (!is_json_value(item)) {
+                    stop(paste0("Unsupported deep result value for member ", key))
+                }
+                json_values[key] <- list(item)
+            }
+        }
+    }
+    member_json <- if (length(members)) {
+        as.character(jsonlite::toJSON(members, auto_unbox = TRUE, null = "null"))
+    } else "{}"
+    json_field <- ""
+    if (length(json_values)) {
+        json_name <- write_wire_file(
+            charToRaw(as.character(jsonlite::toJSON(
+                json_values, auto_unbox = TRUE, null = "null", digits = 17, force = TRUE
+            ))),
+            ".json"
+        )
+        json_field <- paste0(",\"json\":", as.character(jsonlite::toJSON(json_name, auto_unbox = TRUE)))
+    }
+    index_text <- paste0("{\"members\":", member_json, json_field, "}")
+    writeBin(charToRaw(enc2utf8(index_text)), file.path(directory, "index.json"))
+    invisible(NULL)
+}
+
 run <- function(config_path, code_path, stdout_path = NULL, stderr_path = NULL) {
     stdout_connection <- if (!is.null(stdout_path)) file(stdout_path, open = "wt") else NULL
     stderr_connection <- if (!is.null(stderr_path)) file(stderr_path, open = "wt") else NULL
@@ -316,19 +525,25 @@ run <- function(config_path, code_path, stdout_path = NULL, stderr_path = NULL) 
     code <- readChar(code_path, file.info(code_path)$size, useBytes = TRUE)
     pins <- list()
     for (pin in config[["pins"]]) {
-        size <- file.info(pin[["file"]])$size
-        con <- file(pin[["file"]], open = "rb")
-        data <- tryCatch(
-            readBin(con, what = "raw", n = size),
-            finally = close(con)
-        )
-        pins[[pin[["name"]]]] <- decode_pin(data, pin)
+        if (identical(pin[["celltype"]], "folder") && dir.exists(pin[["file"]])) {
+            pins[[pin[["name"]]]] <- read_folder_pin(pin[["file"]])
+        } else {
+            size <- file.info(pin[["file"]])$size
+            con <- file(pin[["file"]], open = "rb")
+            data <- tryCatch(
+                readBin(con, what = "raw", n = size),
+                finally = close(con)
+            )
+            pins[[pin[["name"]]]] <- decode_pin(data, pin)
+        }
     }
 
     if (is_transform(code)) {
         key <- config[["cache_key"]]
         if (!exists(key, envir = ISOLATIONS, inherits = FALSE)) {
             isolation <- new.env(parent = globalenv())
+            assign("seamless_checksum", seamless_checksum, envir = isolation)
+            assign("is_seamless_checksum", is_seamless_checksum, envir = isolation)
             eval(parse(text = code), envir = isolation)
             assign(key, isolation, envir = ISOLATIONS)
         }
@@ -337,6 +552,8 @@ run <- function(config_path, code_path, stdout_path = NULL, stderr_path = NULL) 
         result <- do.call(fun, pins)
     } else {
         isolation <- new.env(parent = globalenv())
+        assign("seamless_checksum", seamless_checksum, envir = isolation)
+        assign("is_seamless_checksum", is_seamless_checksum, envir = isolation)
         list2env(pins, envir = isolation)
         eval(parse(text = code), envir = isolation)
         name <- config[["output_name"]]
@@ -344,7 +561,21 @@ run <- function(config_path, code_path, stdout_path = NULL, stderr_path = NULL) 
             stop(paste0("R transformer did not define '", name, "'"))
         result <- get(name, envir = isolation, inherits = FALSE)
     }
-    encode_result(result, config[["output_celltype"]])
+    output_celltype <- config[["output_celltype"]]
+    if (output_celltype %in% c("folder", "deepcell")) {
+        write_wire_result(result, output_celltype, config[["result_directory"]])
+        return("")
+    }
+    if (contains_seamless_checksum(result) &&
+        !(output_celltype %in% c("checksum", "deepcell", "folder"))) {
+        stop("A Seamless checksum can only be returned under the 'checksum' or deep celltype")
+    }
+    if (is_seamless_checksum(result)) {
+        if (!identical(output_celltype, "checksum"))
+            stop("A Seamless checksum can only be returned under the 'checksum' celltype")
+        return(as.character(result))
+    }
+    encode_result(result, output_celltype)
 }
 
 error_json <- function(error) {
@@ -360,27 +591,41 @@ runtime <- new.env(parent = globalenv())
 eval(parse(text = readChar("runtime.R", file.info("runtime.R")$size, useBytes = TRUE)),
      envir = runtime)
 result <- runtime$run("pins.json", "transformer.R")
-writeBin(charToRaw(enc2utf8(result)), "RESULT")
+if (!dir.exists("RESULT")) writeBin(charToRaw(enc2utf8(result)), "RESULT")
 '''
 
     if backend == "cli":
+        config["result_directory"] = "RESULT"
         job_pins = {}
         job_filesystem = {}
         for spec in pin_specs:
             name = spec["name"]
-            entry = filesystem.get(name, {})
-            on_file = pin_is_filesystem[name]
             job_name = spec["file"]
-            if on_file:
+            if spec["celltype"] == "folder":
+                job_pins[job_name] = pin_directory_values[name]
+                job_filesystem[job_name] = {
+                    "mode": "directory",
+                    "optional": True,
+                    "filesystem": False,
+                    "celltype": "folder",
+                    "members_are_checksums": False,
+                }
+            elif pin_is_filesystem[name]:
                 job_pins[job_name] = os.fspath(pins[name])
+                job_filesystem[job_name] = {
+                    "mode": "file",
+                    "optional": True,
+                    "filesystem": True,
+                    "celltype": "bytes",
+                }
             else:
                 job_pins[job_name] = Buffer(pin_data[name], "bytes")
-            job_filesystem[job_name] = {
-                "mode": "file",
-                "optional": True,
-                "filesystem": on_file,
-                "celltype": "bytes",
-            }
+                job_filesystem[job_name] = {
+                    "mode": "file",
+                    "optional": True,
+                    "filesystem": False,
+                    "celltype": "bytes",
+                }
             spec["file"] = job_name
         config["pins"] = pin_specs
         job_pins.update(
@@ -391,14 +636,19 @@ writeBin(charToRaw(enc2utf8(result)), "RESULT")
                 "META__FILE__pins.json": json.dumps(config, ensure_ascii=False),
             }
         )
-        result = execute_bash(
+        cli_outputpin = "folder" if output_celltype in deep_celltypes else "plain"
+        result = execute_cli(
             "Rscript --vanilla runner.R",
             sorted(job_pins),
-            environment.get("conda_environment", ""),
             job_pins,
             job_filesystem,
-            "plain",
+            cli_outputpin,
+            environment,
         )
+        if output_celltype in deep_celltypes:
+            result = read_wire_directory(result, output_celltype)
+        else:
+            result = decode_result_payload(result)
     else:
         import ryp
 
@@ -408,12 +658,23 @@ writeBin(charToRaw(enc2utf8(result)), "RESULT")
         result_name = f".seamless_r_result_{token}"
         with tempfile.TemporaryDirectory(prefix="seamless-ryp-") as tempdir:
             config_path = os.path.join(tempdir, "pins.json")
+            result_directory = os.path.join(tempdir, "RESULT")
+            config["result_directory"] = result_directory
             code_path = os.path.join(tempdir, "transformer.R")
             stdout_path = os.path.join(tempdir, "stdout")
             stderr_path = os.path.join(tempdir, "stderr")
             for spec in pin_specs:
+                name = spec["name"]
                 spec["file"] = os.path.join(tempdir, spec["file"])
-                Path(spec["file"]).write_bytes(pin_data[spec["name"]])
+                if spec["celltype"] == "folder":
+                    write_directory_pin(
+                        spec["file"],
+                        pin_directory_values[name],
+                        "folder",
+                        members_are_checksums=False,
+                    )
+                else:
+                    Path(spec["file"]).write_bytes(pin_data[name])
             config["pins"] = pin_specs
             Path(config_path).write_text(
                 json.dumps(config, ensure_ascii=False), encoding="utf-8"
@@ -464,19 +725,24 @@ assign(
                 result = result.item()
             if not isinstance(result, str):
                 raise TypeError("ryp did not return the R runtime's JSON text")
-            result = json.loads(result)
+            if output_celltype in deep_celltypes:
+                result = read_wire_files(result_directory)
+            elif output_celltype == "checksum":
+                try:
+                    result = json.loads(result)
+                except json.JSONDecodeError:
+                    pass
+            else:
+                result = decode_result_payload(json.loads(result))
 
     if isinstance(result, Mapping) and result.get("__seamless_error__"):
         raise RuntimeError(f"R transformer failed: {result['__seamless_error__']}")
+    if output_celltype == "checksum" and isinstance(result, str):
+        return Checksum(result)
     if isinstance(result, Mapping) and result.get("__seamless_bytes__") is True:
         return bytes(result["values"])
     if isinstance(result, Mapping) and result.get("__seamless_array__") is True:
-        dtype = result["dtype"]
-        numpy_dtype = {"bool": np.bool_, "float64": np.float64}[dtype]
-        array = np.asarray(result["values"], dtype=numpy_dtype).reshape(
-            tuple(result["shape"]), order="F"
-        )
-        return np.ascontiguousarray(array)
+        return np.ascontiguousarray(decode_jsonarray(result))
     return result
 
 

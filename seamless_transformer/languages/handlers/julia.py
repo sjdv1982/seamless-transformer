@@ -22,8 +22,19 @@ def julia(
 
     import numpy as np
     from seamless import Buffer
-    from seamless_transformer.execute_bash import execute_bash
+    from seamless_transformer.execute_bash import (
+        _validate_container_deepfolder_members,
+        write_directory_pin,
+    )
+    from seamless_transformer.languages import execute_cli
     from seamless_transformer.languages import run_in_interpreter_thread
+    from seamless_transformer.wire_format import (
+        decode_jsonarray,
+        decode_result_payload,
+        read_wire_directory,
+        write_checksum_pin_index,
+        write_deepcell_pin_index,
+    )
 
     if not isinstance(metavars, Mapping):
         metavars = {}
@@ -42,10 +53,6 @@ def julia(
 
     deep_celltypes = {"deepcell", "deepfolder", "folder"}
     file_celltypes = {"mixed", "plain", "text", "bytes", "binary"}
-    if output_celltype in deep_celltypes:
-        raise ValueError(
-            f"Julia handler cannot return deep or folder celltype {output_celltype!r}"
-        )
     environment = environment if isinstance(environment, Mapping) else {}
     if backend == "mem":
         from seamless_transformer.languages import check_in_memory_environment
@@ -110,10 +117,21 @@ def julia(
             }
         return value
 
+    def read_wire_files(directory):
+        files = {}
+        for root, _, filenames in os.walk(directory):
+            for filename in filenames:
+                path = os.path.join(root, filename)
+                name = os.path.relpath(path, directory).replace(os.sep, "/")
+                with open(path, "rb") as handle:
+                    files[name] = handle.read()
+        return read_wire_directory(files, output_celltype)
+
     pin_specs = []
     pin_data = {}
     pin_is_filesystem = {}
     native_arrays = {}
+    pin_directory_values = {}
     for index, (name, value) in enumerate(pins.items()):
         if not isinstance(name, str):
             raise TypeError("Julia handler pin names must be strings")
@@ -123,14 +141,44 @@ def julia(
                 f"Julia handler filesystem entry for {name!r} must be a mapping"
             )
         celltype = entry.get("celltype", "mixed")
-        if celltype in deep_celltypes:
-            raise ValueError(
-                f"Julia handler cannot accept deep or folder pin celltype {celltype!r}"
-            )
         on_file = bool(entry.get("filesystem", False))
         native_array = None
         container_celltype = celltype in {"binary", "mixed"}
-        if on_file:
+        if celltype == "folder":
+            if not isinstance(value, Mapping):
+                raise TypeError(f"Julia folder pin {name!r} must be a mapping")
+            pin_directory_values[name] = value
+            folder_data = {}
+            for key, member in value.items():
+                if not isinstance(key, str):
+                    raise TypeError(f"Julia folder pin key {key!r} must be a string")
+                if isinstance(member, Buffer):
+                    member = member.content
+                if not isinstance(member, bytes):
+                    raise TypeError(f"Julia folder pin member {key!r} must be bytes")
+                folder_data[key] = list(member)
+            raw = json.dumps(
+                {"__seamless_folder__": folder_data},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        elif celltype == "deepcell":
+            raw = write_deepcell_pin_index(value)
+        elif celltype == "checksum":
+            raw = write_checksum_pin_index(value)
+        elif celltype == "deepfolder":
+            if backend == "cli" and environment.get("docker") is not None:
+                from seamless_transformer.transformation_namespace import (
+                    _get_read_folder_directories,
+                )
+
+                _validate_container_deepfolder_members(
+                    value, _get_read_folder_directories()
+                )
+            raw = json.dumps(
+                encode_tree(value), ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+        elif on_file:
             if celltype not in file_celltypes:
                 raise TypeError(
                     f"Julia handler cannot transport file pin {name!r} "
@@ -223,11 +271,28 @@ def julia(
     }
     runtime_source = r'''module SeamlessRuntime
 using JSON
+using Printf
 
 const ISOLATIONS = Dict{String,Module}()
 const NPY_MAGIC = UInt8[0x93, 0x4e, 0x55, 0x4d, 0x50, 0x59]
 const MIXED_MAGIC = UInt8[0x94; codeunits("SEAMLESS-MIXED")]
 const EMBEDDED_MAGIC = Vector{UInt8}(codeunits("SEAMLESS-JULIA-JSON\n"))
+
+struct Checksum
+    hex::String
+    function Checksum(value::AbstractString)
+        occursin(r"^[0-9a-f]{64}$", value) ||
+            error("Checksum expects 64 lowercase hexadecimal characters")
+        new(String(value))
+    end
+end
+
+Base.string(value::Checksum) = value.hex
+Base.convert(::Type{String}, value::Checksum) = value.hex
+Base.:(==)(left::Checksum, right::Checksum) = left.hex == right.hex
+Base.isequal(left::Checksum, right::Checksum) = isequal(left.hex, right.hex)
+Base.hash(value::Checksum, seed::UInt) = hash(value.hex, seed)
+Base.show(io::IO, value::Checksum) = print(io, "Checksum(\"", value.hex, "\")")
 
 function has_prefix(data::Vector{UInt8}, prefix::Vector{UInt8})
     length(data) < length(prefix) && return false
@@ -295,6 +360,45 @@ function embedded_value(value)
     return value
 end
 
+function decode_wire_pin(data::Vector{UInt8}, celltype::String)
+    index = JSON.parse(String(data))
+    function checksum_entry(entry, label)
+        entry isa AbstractDict && length(entry) == 1 && haskey(entry, "__checksum__") ||
+            error("Malformed checksum entry $label")
+        return Checksum(entry["__checksum__"])
+    end
+    if celltype == "checksum"
+        return checksum_entry(get(index, "value", nothing), "value")
+    end
+    members = get(index, "members", nothing)
+    members isa AbstractDict || error("Malformed deepcell pin index")
+    return Dict{String,Any}(
+        String(key) => checksum_entry(value, String(key))
+        for (key, value) in members
+    )
+end
+
+function read_folder_pin(path::String)
+    values = Dict{String,Vector{UInt8}}()
+    for (root, _, files) in walkdir(path)
+        for filename in files
+            full_path = joinpath(root, filename)
+            key = replace(relpath(full_path, path), '\\' => '/')
+            values[key] = read(full_path)
+        end
+    end
+    return values
+end
+
+function decode_folder_pin(data::Vector{UInt8})
+    encoded = JSON.parse(String(data))
+    members = get(encoded, "__seamless_folder__", nothing)
+    members isa AbstractDict || error("Malformed folder pin")
+    return Dict{String,Vector{UInt8}}(
+        String(key) => UInt8.(value) for (key, value) in members
+    )
+end
+
 function read_npy(data::Vector{UInt8})
     path = tempname()
     try
@@ -312,7 +416,13 @@ function read_npy(data::Vector{UInt8})
 end
 
 function decode_pin(data::Vector{UInt8}, celltype::String)
-    if celltype == "bytes"
+    if celltype in ("deepcell", "checksum")
+        return decode_wire_pin(data, celltype)
+    elseif celltype == "deepfolder"
+        return JSON.parse(String(data))
+    elseif celltype == "folder"
+        return decode_folder_pin(data)
+    elseif celltype == "bytes"
         return data
     elseif celltype == "text"
         value = String(data)
@@ -409,7 +519,104 @@ function array_payload(result)
     )
 end
 
-function encode_result(result, output_celltype::String)
+function write_wire_result(result, output_celltype::String, result_directory::String)
+    result isa AbstractDict || error("Julia deep results must be a dictionary")
+    mkpath(result_directory)
+    members = Dict{String,Any}()
+    json_values = Dict{String,Any}()
+    file_index = 0
+    function write_wire_file(data::Vector{UInt8}, suffix::String)
+        filename = @sprintf("m%06d%s", file_index, suffix)
+        file_index += 1
+        open(joinpath(result_directory, filename), "w") do io
+            write(io, data)
+        end
+        return filename
+    end
+    for (key, value) in result
+        key isa AbstractString || error("Julia deep result keys must be strings")
+        name = String(key)
+        if value isa Checksum
+            members[name] = Dict("__checksum__" => value.hex)
+        elseif output_celltype == "folder"
+            bytes = if value isa AbstractString
+                error("Folder member $name must be a byte vector")
+            elseif value isa AbstractVector{UInt8}
+                collect(UInt8, value)
+            else
+                error("Folder member $name must be a string or Vector{UInt8}")
+            end
+            members[name] = write_wire_file(bytes, ".bytes")
+        elseif value isa AbstractVector{UInt8}
+            members[name] = write_wire_file(collect(UInt8, value), ".bytes")
+        elseif value isa AbstractArray && (eltype(value) <: Number || eltype(value) === Bool)
+            array = canonical_array(value)
+            dtype = eltype(array) === Bool ? "bool" :
+                    eltype(array) === Int64 ? "int64" :
+                    eltype(array) === UInt64 ? "uint64" : "float64"
+            payload = Dict(
+                "dtype" => dtype,
+                "shape" => collect(size(array)),
+                "values" => collect(vec(array)),
+            )
+            members[name] = write_wire_file(
+                Vector{UInt8}(codeunits(JSON.json(payload))), ".jsonarray"
+            )
+        else
+            json_values[name] = value
+        end
+    end
+    index = Dict{String,Any}("members" => members)
+    if !isempty(json_values)
+        json_name = write_wire_file(
+            Vector{UInt8}(codeunits(JSON.json(json_values))), ".json"
+        )
+        index["json"] = json_name
+    end
+    write(joinpath(result_directory, "index.json"), JSON.json(index))
+    return nothing
+end
+
+function encode_tree(value)
+    if value isa AbstractVector{UInt8}
+        return Dict("__seamless_bytes__" => true, "values" => collect(value))
+    elseif value isa AbstractArray && ndims(value) > 1 &&
+           (eltype(value) <: Number || eltype(value) === Bool)
+        return array_payload(value)
+    elseif value isa AbstractDict
+        all(key -> key isa AbstractString, keys(value)) ||
+            error("Julia mixed result dictionary keys must be strings")
+        return Dict(String(key) => encode_tree(item) for (key, item) in value)
+    elseif value isa AbstractVector
+        return [encode_tree(item) for item in value]
+    elseif value isa Tuple
+        return [encode_tree(item) for item in value]
+    end
+    return value
+end
+
+function contains_checksum(value)
+    if value isa Checksum
+        return true
+    elseif value isa AbstractDict
+        return any(contains_checksum(item) for item in values(value))
+    elseif value isa AbstractArray || value isa Tuple
+        return any(contains_checksum(item) for item in value)
+    end
+    return false
+end
+
+function encode_result(result, output_celltype::String, result_directory::String)
+    if output_celltype in ("folder", "deepcell")
+        write_wire_result(result, output_celltype, result_directory)
+        return ""
+    elseif contains_checksum(result) && output_celltype != "checksum"
+        error("A Checksum can only be returned under the 'checksum' or deep celltype")
+    elseif result isa Checksum
+        output_celltype == "checksum" ||
+            error("A Checksum can only be returned under the 'checksum' celltype")
+        return JSON.json(result.hex)
+    end
     if output_celltype == "bytes"
         value = if result isa AbstractString
             Vector{UInt8}(codeunits(result))
@@ -419,9 +626,13 @@ function encode_result(result, output_celltype::String)
             error("Julia bytes output must be a string or Vector{UInt8}")
         end
         return JSON.json(Dict("__seamless_bytes__" => true, "values" => collect(value)))
+    elseif output_celltype == "mixed" && result isa AbstractVector{UInt8}
+        return JSON.json(encode_tree(result))
     elseif output_celltype in ("binary", "mixed") &&
            result isa AbstractArray && eltype(result) <: Number
         return JSON.json(array_payload(result))
+    elseif output_celltype == "mixed"
+        return JSON.json(encode_tree(result))
     end
     return JSON.json(result)
 end
@@ -432,10 +643,12 @@ function run_values(
     pins::Dict{String,Any},
     output_name::String,
     output_celltype::String,
+    result_directory::String,
 )
     if is_transform(code)
         mod = get!(ISOLATIONS, cache_key) do
             m = Module(:SeamlessTF)
+            Core.eval(m, :(using Main.SeamlessRuntime: Checksum))
             Base.include_string(m, code, "transformer.jl")
             m
         end
@@ -443,6 +656,7 @@ function run_values(
         result = Base.invokelatest(call_by_name, f, pins)
     else
         mod = Module(:SeamlessTF)
+        Core.eval(mod, :(using Main.SeamlessRuntime: Checksum))
         for (name, value) in pins
             Core.eval(mod, :($(Symbol(name)) = $(QuoteNode(value))))
         end
@@ -451,7 +665,7 @@ function run_values(
             error("Julia transformer did not define '$output_name'")
         result = Base.invokelatest(getfield, mod, Symbol(output_name))
     end
-    return encode_result(result, output_celltype)
+    return encode_result(result, output_celltype, result_directory)
 end
 
 function run(
@@ -461,12 +675,15 @@ function run(
     pin_celltypes::Dict{String,String},
     output_name::String,
     output_celltype::String,
+    result_directory::String,
 )
     pins = Dict{String,Any}(
         name => decode_pin(data, get(pin_celltypes, name, "mixed"))
         for (name, data) in raw_pins
     )
-    return run_values(cache_key, code, pins, output_name, output_celltype)
+    return run_values(
+        cache_key, code, pins, output_name, output_celltype, result_directory
+    )
 end
 
 function run_native(
@@ -477,6 +694,7 @@ function run_native(
     native_arrays::Dict{String,Any},
     output_name::String,
     output_celltype::String,
+    result_directory::String,
 )
     pins = Dict{String,Any}(
         name => decode_pin(data, get(pin_celltypes, name, "mixed"))
@@ -485,7 +703,9 @@ function run_native(
     for (name, array) in native_arrays
         pins[name] = canonical_array(array)
     end
-    return run_values(cache_key, code, pins, output_name, output_celltype)
+    return run_values(
+        cache_key, code, pins, output_name, output_celltype, result_directory
+    )
 end
 
 function read_job(config_path::String, code_path::String)
@@ -493,7 +713,17 @@ function read_job(config_path::String, code_path::String)
     raw_pins = Dict{String,Vector{UInt8}}()
     pin_celltypes = Dict{String,String}()
     for pin in config["pins"]
-        raw_pins[pin["name"]] = read(pin["file"])
+        if pin["celltype"] == "folder" && isdir(pin["file"])
+            members = Dict(
+                key => collect(value)
+                for (key, value) in read_folder_pin(pin["file"])
+            )
+            raw_pins[pin["name"]] = Vector{UInt8}(codeunits(JSON.json(
+                Dict("__seamless_folder__" => members)
+            )))
+        else
+            raw_pins[pin["name"]] = read(pin["file"])
+        end
         pin_celltypes[pin["name"]] = pin["celltype"]
     end
     return config, read(code_path, String), raw_pins, pin_celltypes
@@ -508,6 +738,7 @@ function run_files(config_path::String, code_path::String)
         pin_celltypes,
         config["output_name"],
         config["output_celltype"],
+        config["result_directory"],
     )
 end
 
@@ -542,6 +773,7 @@ function run_captured_native(
     output_celltype::String,
     stdout_path::String,
     stderr_path::String,
+    result_directory::String,
 )
     result = ""
     open(stdout_path, "w") do out
@@ -556,6 +788,7 @@ function run_captured_native(
                         native_arrays,
                         output_name,
                         output_celltype,
+                        result_directory,
                     )
                     flush(out)
                     flush(err)
@@ -570,51 +803,94 @@ end # module SeamlessRuntime
 '''
     runner_source = r'''include("runtime.jl")
 result = SeamlessRuntime.run_files("pins.json", "transformer.jl")
-open("RESULT", "w") do io
-    write(io, codeunits(result))
+if !isdir("RESULT")
+    open("RESULT", "w") do io
+        write(io, codeunits(result))
+    end
 end
 '''
 
     if backend == "cli":
+        config["result_directory"] = "RESULT"
         job_pins = {}
         job_filesystem = {}
         for spec in pin_specs:
             name = spec["name"]
-            entry = filesystem.get(name, {})
             on_file = pin_is_filesystem[name]
             job_name = spec["file"]
-            if on_file:
+            if spec["celltype"] == "folder":
+                job_pins[job_name] = pin_directory_values[name]
+                job_filesystem[job_name] = {
+                    "mode": "directory",
+                    "optional": True,
+                    "filesystem": False,
+                    "celltype": "folder",
+                    "members_are_checksums": False,
+                }
+            elif on_file:
                 job_pins[job_name] = os.fspath(pins[name])
+                job_filesystem[job_name] = {
+                    "mode": "file",
+                    "optional": True,
+                    "filesystem": True,
+                    "celltype": "bytes",
+                }
             else:
                 job_pins[job_name] = Buffer(pin_data[name], "bytes")
-            job_filesystem[job_name] = {
-                "mode": "file",
-                "optional": True,
-                "filesystem": on_file,
-                "celltype": "bytes",
-            }
+                job_filesystem[job_name] = {
+                    "mode": "file",
+                    "optional": True,
+                    "filesystem": False,
+                    "celltype": "bytes",
+                }
             spec["file"] = job_name
+
+        import seamless_transformer
+
+        julia_project = (
+            Path(seamless_transformer.__file__).resolve().parents[2]
+            / "seamless"
+            / "julia"
+        )
+        project_file = julia_project / "Project.toml"
+        manifest_file = julia_project / "Manifest.toml"
+        if not project_file.is_file() or not manifest_file.is_file():
+            raise RuntimeError(
+                "Julia CLI requires the tracked seamless/julia/Project.toml "
+                "and Manifest.toml"
+            )
 
         config["pins"] = pin_specs
         job_pins.update(
             {
+                "META__FILE__Project.toml": project_file.read_text(encoding="utf-8"),
+                "META__FILE__Manifest.toml": manifest_file.read_text(encoding="utf-8"),
                 "META__FILE__runtime.jl": runtime_source,
                 "META__FILE__runner.jl": runner_source,
                 "META__FILE__transformer.jl": code,
                 "META__FILE__pins.json": json.dumps(config, ensure_ascii=False),
             }
         )
-        result = execute_bash(
-            "julia --startup-file=no runner.jl",
+        cli_outputpin = "folder" if output_celltype in deep_celltypes else "plain"
+        result = execute_cli(
+            'JULIA_DEPOT_PATH="$PWD/.julia${JULIA_DEPOT_PATH:+:$JULIA_DEPOT_PATH}'
+            '${CONDA_PREFIX:+:$CONDA_PREFIX/share/julia}:$HOME/.julia" '
+            "julia --startup-file=no --project=. runner.jl",
             sorted(job_pins),
-            environment.get("conda_environment", ""),
             job_pins,
             job_filesystem,
-            "plain",
+            cli_outputpin,
+            environment,
         )
+        if output_celltype in deep_celltypes:
+            result = read_wire_directory(result, output_celltype)
+        else:
+            result = decode_result_payload(result)
     else:
         with tempfile.TemporaryDirectory(prefix="seamless-juliacall-") as tempdir:
             config_path = os.path.join(tempdir, "pins.json")
+            result_directory = os.path.join(tempdir, "RESULT")
+            config["result_directory"] = result_directory
             code_path = os.path.join(tempdir, "transformer.jl")
             stdout_path = os.path.join(tempdir, "stdout")
             stderr_path = os.path.join(tempdir, "stderr")
@@ -708,6 +984,7 @@ end
                         output_celltype,
                         stdout_path,
                         stderr_path,
+                        result_directory,
                     )
                     return True, str(result_json), None
                 except BaseException as exc:
@@ -728,22 +1005,19 @@ end
                 sys.stderr.flush()
             if not succeeded:
                 raise RuntimeError(f"juliacall execution failed: {error_message}")
-            result = json.loads(result_json)
+            if output_celltype in deep_celltypes:
+                result = read_wire_files(result_directory)
+            else:
+                result = decode_result_payload(json.loads(result_json))
 
+    if output_celltype == "checksum" and isinstance(result, str):
+        from seamless import Checksum
+
+        return Checksum(result)
     if isinstance(result, Mapping) and result.get("__seamless_bytes__") is True:
         return bytes(result["values"])
     if isinstance(result, Mapping) and result.get("__seamless_array__") is True:
-        dtype = result["dtype"]
-        numpy_dtype = {
-            "bool": np.bool_,
-            "int64": np.int64,
-            "uint64": np.uint64,
-            "float64": np.float64,
-        }[dtype]
-        array = np.asarray(result["values"], dtype=numpy_dtype).reshape(
-            tuple(result["shape"]), order="F"
-        )
-        return np.ascontiguousarray(array)
+        return np.ascontiguousarray(decode_jsonarray(result))
     return result
 
 

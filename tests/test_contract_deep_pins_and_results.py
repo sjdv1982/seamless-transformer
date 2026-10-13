@@ -37,8 +37,13 @@ def test_deepcell_and_deepfolder_pins_hand_over_unresolved_checksums(celltype):
     index = _held({"dir/k": member.hex()}, "plain")
     describe = _describe_pin()
     describe.celltypes.x = celltype
-    # The member buffer does not exist: success proves no resolution.
-    assert describe(x=index.get_checksum()) == {"dir/k": ["Checksum", member.hex()]}
+    # Deepcell hands over unresolved checksums. A deepfolder must have stored
+    # member paths and fails without resolving missing members.
+    if celltype == "deepcell":
+        assert describe(x=index.get_checksum()) == {"dir/k": ["Checksum", member.hex()]}
+    else:
+        with pytest.raises(Exception, match="dir/k"):
+            describe(x=index.get_checksum())
 
 
 def test_folder_pin_hands_over_resolved_child_contents():
