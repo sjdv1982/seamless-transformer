@@ -57,6 +57,7 @@ def test_launcher_arguments(runtime_images, tmp_path, monkeypatch, gpus):
     monkeypatch.setenv('SEAMLESS_CONTAINER_ARGS', '--hostname "site host"')
     job = tmp_path / 'job with spaces'
     read = tmp_path / 'read buffers'
+    read.mkdir()
     args = command(UBUNTU, job, [read], gpus=gpus, shm_size='1g')
     assert args[:2] == ['apptainer', 'exec']
     assert '--containall' in args

@@ -4,6 +4,7 @@ import importlib
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -18,7 +19,8 @@ from seamless_transformer.transformation_utils import extract_tf_dunder
 def backend(request):
     # Paired tests also launch the CLI when only the embedded parameter was
     # selected. juliacall resolves its own project independently.
-    os.environ["JULIA_PROJECT"] = "/tmp/seamless-julia-r-support-project"
+    julia_project = Path(__file__).resolve().parents[2] / "seamless" / "julia"
+    os.environ["JULIA_PROJECT"] = str(julia_project)
     if request.param == "juliacall":
         if importlib.util.find_spec("juliacall") is None:
             pytest.skip("juliacall is missing")

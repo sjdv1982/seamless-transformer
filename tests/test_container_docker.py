@@ -63,6 +63,7 @@ def test_launcher_arguments(runtime_images, tmp_path, monkeypatch, pull):
     monkeypatch.setenv('SEAMLESS_CONTAINER_ARGS', '--network none --security-opt "label=disable"')
     job = tmp_path / 'job with spaces'
     read = tmp_path / 'buffers'
+    read.mkdir()
     args = build_container_command(runtime,
         {'name': available['bash'], 'gpus': True, 'shm_size': '1g'},
         str(job), [str(read)], tf_checksum='a' * 64, process_id=os.getpid())
@@ -99,10 +100,12 @@ def test_launcher_arguments(runtime_images, tmp_path, monkeypatch, pull):
 
 def test_comma_mount_paths_rejected(runtime_images, tmp_path):
     runtime, available = runtime_images
+    comma_directory = tmp_path / 'a,b'
+    comma_directory.mkdir()
     with pytest.raises(ValueError, match='comma|,'):
         build_container_command(runtime, {'name': available['bash']}, str(tmp_path / 'a,b'), [])
     with pytest.raises(ValueError, match='comma|,'):
-        build_container_command(runtime, {'name': available['bash']}, str(tmp_path), [str(tmp_path / 'a,b')])
+        build_container_command(runtime, {'name': available['bash']}, str(tmp_path), [str(comma_directory)])
 
 
 def test_string_file_and_directory_pins_and_result_file(runtime_images):
