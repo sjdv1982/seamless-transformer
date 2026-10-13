@@ -1,6 +1,6 @@
 # seamless-transformer
 
-`seamless-transformer` is the computation engine of the [Seamless](https://github.com/sjdv1982/seamless) framework. It takes a *transformation* — a pure-functional computation defined as a checksum-addressed dict of inputs, code, and language — and executes it, returning a result checksum. It supports Python and bash transformations, multi-process worker pools with shared-memory IPC, and integration with the Seamless caching and remote infrastructure.
+`seamless-transformer` is the computation engine of the [Seamless](https://github.com/sjdv1982/seamless) framework. It takes a *transformation* — a pure-functional computation defined as a checksum-addressed dict of inputs, code, and language — and executes it, returning a result checksum. It supports Python and bash transformations, compiled languages, handler languages such as R and Julia, multi-process worker pools with shared-memory IPC, and integration with the Seamless caching and remote infrastructure.
 
 ## Branch notes: `jupyter-sync` (sync API inside Jupyter)
 
@@ -53,7 +53,7 @@ A **transformation** in Seamless is a deterministic computation: given the same 
 
 1. **Building** the transformation dict from the inputs and code, then computing its checksum (which serves as the transformation's identity for caching).
 2. **Building** the execution namespace: resolving input buffers, compiling modules, injecting dependencies.
-3. **Executing** the code — either Python (via `exec`) or bash (via subprocess with file-mapped pins).
+3. **Executing** the code — Python (via `exec`), bash (via subprocess with file-mapped pins), compiled code (via a native call), or a handler language such as R or Julia (via that language's handler, a Python function).
 4. **Returning** the result as a checksum, which can be cached and reused.
 
 ## Transformer construction
@@ -64,7 +64,7 @@ There are three canonical construction paths:
 - assigning a function to a workflow Context (`ctx.tf = function`) creates a bound Python Transformer;
 - `Transformer(language="python", compiled=False, direct=False)` creates a code-less configurable builder for any scenario.
 
-`direct` and `delayed` are Python-only and have no `language` argument. The factory accepts `"python"` or `"bash"` when `compiled=False`; when `compiled=True`, it forwards the language to the compiled implementation. Set `direct=True` for immediate call semantics.
+`direct` and `delayed` are Python-only and have no `language` argument. The factory accepts `"python"`, `"bash"` or a handler language (`"r"`, `"julia"`, or one you registered) when `compiled=False`; when `compiled=True`, it forwards the language to the compiled implementation. Set `direct=True` for immediate call semantics. `seamless_transformer.languages.available_languages()` lists every accepted language with its kind.
 
 ```python
 from seamless_transformer import Transformer
@@ -75,9 +75,14 @@ bash.code = "cat input > RESULT"
 c = Transformer("c", compiled=True)
 c.schema = "..."
 c.code = "..."
+
+r = Transformer("r", direct=True)
+r.code = "result <- a + b"
+r.pins.a = 2
+r.pins.b = 3
 ```
 
-Python and Bash builder languages are fixed and read-only. The factory is also available as `seamless.transformer.Transformer`; `seamless.workflow` exports `Transformer`, `Context`, and `Cell` together.
+A builder's language is fixed and read-only. The factory is also available as `seamless.transformer.Transformer`; `seamless.workflow` exports `Transformer`, `Context`, and `Cell` together.
 
 ## Transformer pins
 
@@ -275,6 +280,46 @@ pip install seamless-transformer[compiled]
 ```
 
 See `docs/agent/contracts/compiled-transformers.md` for the full behavioral contract.
+
+## Handler languages: R and Julia
+
+A *handler language* is a language whose code is run by a *handler*: a Python function that receives the code and the pins, runs the code in the other language, and returns the result. R (`"r"`) and Julia (`"julia"`) are built in.
+
+```python
+from seamless_transformer import Transformer
+
+tf = Transformer("julia", direct=True)
+tf.code = """
+function transform(a, b)
+    return a + b
+end
+"""
+tf.pins.a = 2
+tf.pins.b = 3
+tf()   # -> 5
+```
+
+- **The code is ordinary R or Julia.** Either it is a block in which each pin is a variable and the code assigns `result`, or it defines a top-level function `transform` whose arguments are the pins. Pins are declared through `tf.pins`, as for bash.
+- **Each language has two backends**, selected with `tf.metavars.BACKEND`. The default starts an interpreter process per run (`"Rscript"`, `"julia"`). The alternative embeds the interpreter in the Python process (`"ryp"`, `"juliacall"`), which avoids the start-up cost and keeps `transform` definitions between runs.
+- **Both backends of a language give the same result, bit for bit, when both succeed.** The backend and the handler are therefore not part of the transformation's identity: switching backend is a cache hit.
+- **An embedded interpreter needs the process lock.** A transformation with `process_lock = False` and an in-memory backend fails when it runs.
+- **Seamless installs neither R nor Julia.** The machine that runs the transformation needs `Rscript` with the R packages `RcppCNPy` and `jsonlite`, or `julia` with `NPZ` and `JSON`. The in-memory backends need `ryp` or `juliacall`, and the same JSON package.
+
+The set of handler languages is open. A handler is one self-contained Python function, and its source travels with each transformation, so a worker process needs no registration:
+
+```python
+from seamless_transformer.languages import register_language_handler
+
+def my_handler(code, pins, filesystem, output_name, metavars):
+    import subprocess          # imports go inside the function
+    ...                        # run `code` on `pins`
+    return result
+
+register_language_handler("mylang", my_handler, metavars={"BACKEND": "cli"})
+tf = Transformer("mylang")
+```
+
+See `docs/agent/contracts/handler-languages.md` in the main seamless repository for the full behavioral contract: the handler's arguments, the value rules for pins and results, backend parity, and identity.
 
 ## Installation
 
