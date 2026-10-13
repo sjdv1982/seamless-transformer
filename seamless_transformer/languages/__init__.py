@@ -1,27 +1,20 @@
-"""Registry of compiled language definitions for seamless-transformer.
+"""Registries and helpers for languages accepted by Seamless transformers.
 
-Built-in languages (``c``, ``cpp``, ``fortran``, ``rust``) are registered
-automatically on import. Additional languages can be registered at runtime
-with :func:`define_compiled_language`.
+``python`` and ``bash`` are the built-in native languages. Register compiled
+languages with ``define_compiled_language`` and languages executed by Python
+handlers with ``register_language_handler``. ``available_languages()`` returns
+each language accepted by the ``Transformer`` factory and its kind
+(``"native"``, ``"compiled"`` or ``"handler"``). A language name belongs to
+one kind.
 
-Example — register a custom language::
+Built-in compiled languages and the ``r`` and ``julia`` handlers register
+when this module is imported. Registration does not import or start R or Julia,
+or load ``ryp`` or ``juliacall``.
 
-    from seamless_transformer.languages import define_compiled_language
-
-    define_compiled_language(
-        name="mylang",
-        compilation={
-            "compiler": "mycc",
-            "mode": "object",
-            "options": ["-O2", "-fPIC"],
-            "debug_options": ["-g", "-fPIC"],
-            "profile_options": [],
-            "release_options": [],
-            "compile_flag": "-c",
-            "output_flag": "-o",
-            "language_flag": "",
-        },
-    )
+``run_in_interpreter_thread()`` runs a callable on one process-wide thread
+associated with its name, for embedded interpreters that need a stable calling
+thread. Calls from that thread run inline. Set
+``SEAMLESS_INTERPRETER_THREAD=0`` to run on the calling thread.
 """
 
 from __future__ import annotations
@@ -51,6 +44,8 @@ class LanguageDefinition:
 
 
 _registry: dict[str, LanguageDefinition] = {}
+_handler_registry: dict[str, LanguageHandlerDefinition] = {}
+_NATIVE_LANGUAGES = frozenset({"python", "bash"})
 
 
 def define_compiled_language(name: str, compilation: dict) -> None:
@@ -75,9 +70,12 @@ def define_compiled_language(name: str, compilation: dict) -> None:
     - ``language_flag`` (str): flag to tell the compiler which language to use
       (e.g. ``"-x c"`` for gcc); empty string if not needed.
 
-    Raises ``ValueError`` if ``mode`` is not ``"object"`` or ``"archive"``.
+    Raises ``ValueError`` if ``mode`` is not ``"object"``, ``"archive"`` or
+    ``"package"``.
     """
 
+    if name in _NATIVE_LANGUAGES or name in _handler_registry:
+        raise ValueError(f"Language {name!r} is already registered by another kind")
     config = CompilationConfig(**compilation)
     if config.mode not in ("object", "archive", "package"):
         raise ValueError(f"Unsupported compile mode: {config.mode!r}")
@@ -103,11 +101,159 @@ def is_compiled_language(name: str) -> bool:
 from . import native  # noqa: E402,F401
 
 
+
+@dataclass(frozen=True)
+class LanguageHandlerDefinition:
+    """Registered source and defaults for a non-native transformer language."""
+
+    name: str
+    handler: object
+    source: str
+    parameters: tuple[str, ...]
+    metavars: dict
+
+
+_HANDLER_ARGUMENTS = frozenset(
+    {
+        "code",
+        "pins",
+        "filesystem",
+        "output_name",
+        "output_celltype",
+        "metavars",
+        "environment",
+        "process_lock",
+    }
+)
+def register_language_handler(name, handler, *, metavars=None) -> None:
+    """Register a Python function as the executor for a transformer language.
+
+    The name must not be native or compiled. ``handler`` must be one named,
+    source-retrievable function without a closure. Its supported parameters
+    are passed by keyword. ``metavars`` maps setting names to their defaults.
+    Registering the same handler language again replaces its registration.
+    """
+
+    import ast
+    import inspect
+    from collections.abc import Mapping
+
+    from ..cached_compile import analyze_code
+    from ..getsource import getsource
+
+    if not isinstance(name, str) or not name:
+        raise ValueError("language handler name must be a non-empty string")
+    if name in _NATIVE_LANGUAGES or name in _registry:
+        raise ValueError(f"Language {name!r} is already registered by another kind")
+    if not inspect.isfunction(handler):
+        raise TypeError("language handler must be a Python function")
+    if handler.__name__ == "<lambda>":
+        raise ValueError(
+            "language handler must be a named Python function; "
+            "lambda handlers do not have a stable source definition"
+        )
+    if handler.__closure__:
+        raise ValueError("language handler must not close over external variables")
+
+    try:
+        source = getsource(handler)
+    except (OSError, TypeError, ValueError, SyntaxError) as exc:
+        raise ValueError(
+            f"could not retrieve valid source for language handler {name!r}; "
+            "use a named function defined in source code"
+        ) from exc
+    if not isinstance(source, str):
+        raise ValueError("could not retrieve source for language handler")
+    try:
+        mode, function_name = analyze_code(source, f"language-handler-{name}")
+        tree = ast.parse(source)
+    except (SyntaxError, TypeError) as exc:
+        raise ValueError(
+            f"could not parse source for language handler {name!r}: {exc}"
+        ) from exc
+    if mode != "function" or function_name is None:
+        raise ValueError(
+            "language handler source must be exactly one named Python function"
+        )
+
+    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):
+        raise ValueError(
+            "language handler source must be exactly one named Python function"
+        )
+    function = tree.body[0]
+    if function.args.posonlyargs or function.args.vararg or function.args.kwarg:
+        raise ValueError("language handler parameters must be passed by keyword")
+    parameter_nodes = function.args.args + function.args.kwonlyargs
+    parameters = tuple(parameter.arg for parameter in parameter_nodes)
+    unsupported = sorted(set(parameters) - _HANDLER_ARGUMENTS)
+    if unsupported:
+        raise ValueError(
+            "unsupported language handler parameter(s): " + ", ".join(unsupported)
+        )
+
+    if metavars is None:
+        metavars = {}
+    if not isinstance(metavars, Mapping):
+        raise TypeError("metavars must be a mapping")
+    defaults = dict(metavars)
+    if any(not isinstance(key, str) for key in defaults):
+        raise TypeError("metavar names must be strings")
+
+    _handler_registry[name] = LanguageHandlerDefinition(
+        name=name,
+        handler=handler,
+        source=source,
+        parameters=parameters,
+        metavars=defaults,
+    )
+
+
+def get_language_handler(name: str) -> LanguageHandlerDefinition:
+    """Return the registered handler definition for ``name``.
+
+    Raises ``KeyError`` when no handler is registered for that name.
+    """
+
+    try:
+        return _handler_registry[name]
+    except KeyError:
+        raise KeyError(f"Unknown handler language: {name!r}") from None
+
+
+def is_handler_language(name: str) -> bool:
+    """Return whether name has a registered language handler."""
+
+    return name in _handler_registry
+
+
+def available_languages() -> dict[str, str]:
+    """Return Transformer-constructible languages mapped to their kind.
+
+    Each value is ``"native"``, ``"compiled"`` or ``"handler"``.
+    """
+
+    result = {name: "native" for name in _NATIVE_LANGUAGES}
+    result.update({name: "compiled" for name in _registry})
+    result.update({name: "handler" for name in _handler_registry})
+    return result
+
+
+from . import handlers  # noqa: E402,F401
+from .interpreter_thread import run_in_interpreter_thread
+
+
 __all__ = [
     "CompilationConfig",
     "LanguageDefinition",
+    "LanguageHandlerDefinition",
     "define_compiled_language",
     "get_language",
+    "get_language_handler",
     "is_compiled_language",
+    "is_handler_language",
+    "available_languages",
+    "register_language_handler",
+    "run_in_interpreter_thread",
     "_registry",
+    "_handler_registry",
 ]
