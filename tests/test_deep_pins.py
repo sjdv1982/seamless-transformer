@@ -29,6 +29,7 @@ def _python_transformer(code, value, celltype, output="mixed", pin="data"):
 
 LANGUAGE_BACKENDS = [
     ("python", "mem"),
+    ("python", "cli"),
     ("r", "mem"),
     ("r", "cli"),
     ("julia", "mem"),
@@ -38,7 +39,7 @@ LANGUAGE_BACKENDS = [
 
 def _transformer(language, backend, code, value, celltype, output="mixed"):
     transformer = Transformer(language)
-    if language in ("r", "julia"):
+    if language in ("python", "r", "julia"):
         transformer.metavars.BACKEND = backend
     transformer.code = code
     transformer.celltypes.value = celltype
@@ -385,14 +386,12 @@ def test_hashing_folder_contents_checksum_parity(language, backend):
     assert _run_value(transformer) == hashlib.sha256(b"hash this folder member").hexdigest()
 
 
-@pytest.mark.parametrize("language", ["r", "julia"])
+@pytest.mark.parametrize("language", ["r", "julia", "python"])
 @pytest.mark.parametrize("runtime", ["docker", "podman", "apptainer"])
 @pytest.mark.parametrize("celltype", ["folder", "deepfolder"])
 def test_container_deep_pins_and_external_symlink_rule(
     language, runtime, celltype, language_runtime_images, monkeypatch, tmp_path
 ):
-    from seamless_transformer.languages import get_language_handler
-
     images = language_runtime_images
     monkeypatch.setenv("SEAMLESS_CONTAINER_RUNTIME", runtime)
     monkeypatch.setenv("SEAMLESS_CONTAINER_PULL", "never")
@@ -409,10 +408,27 @@ def test_container_deep_pins_and_external_symlink_rule(
     import seamless_transformer.transformation_namespace as namespace
 
     monkeypatch.setattr(namespace, "_get_read_folder_directories", lambda: [str(read_dir)])
-    checksum = Buffer(external.read_bytes(), "bytes").get_checksum().hex()
+    member_buffer = _held(external.read_bytes(), "bytes")
+    checksum = member_buffer.get_checksum().hex()
     stored = read_dir / checksum[:2] / checksum
     stored.parent.mkdir()
     stored.symlink_to(external)
+
+    if language == "python":
+        index = _held({"member": checksum}, "plain")
+        code = f"runtime_variant = {runtime!r}\nresult = value[\"member\"]"
+        transformer = _transformer(
+            language, "cli", code, index, celltype, output="bytes"
+        )
+        transformer.environment.set_docker({"name": images[language]})
+        if celltype == "deepfolder":
+            with pytest.raises(CacheMissError, match="member"):
+                _run_checksum(transformer)
+        else:
+            assert _run_value(transformer) == external.read_bytes()
+        return
+
+    from seamless_transformer.languages import get_language_handler
 
     code = (
         'result <- data[["member"]]'

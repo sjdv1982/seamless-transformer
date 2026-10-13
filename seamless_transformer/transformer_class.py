@@ -1059,6 +1059,55 @@ class PythonBashBaseTransformer(PythonMixin[P, R], TransformerCore[P, R]):
         raise AttributeError("transformer language is read-only")
 
 
+class PythonMetaVars:
+    """Metavars available on an ordinary Python transformer."""
+
+    def __init__(self, transformer):
+        self._transformer = transformer
+
+    def _values(self):
+        from collections.abc import Mapping
+
+        transformer = self._transformer
+        backend = transformer._workflow_backend
+        meta = transformer._meta if backend is None else backend.cfg.meta
+        stored = meta.get("metavars", {})
+        if stored is None:
+            return {}
+        if not isinstance(stored, Mapping):
+            raise TypeError("transformer meta['metavars'] must be a mapping")
+        return deepcopy(dict(stored))
+
+    def __getattr__(self, name):
+        if name != "BACKEND":
+            raise AttributeError(f"No metavar {name!r}")
+        return self._values().get(name, "mem")
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            return super().__setattr__(name, value)
+        if name != "BACKEND":
+            raise AttributeError(f"No metavar {name!r}")
+        from .languages import _validate_backend_value
+
+        _validate_backend_value(value, "python")
+        values = self._values()
+        values[name] = value
+        transformer = self._transformer
+        backend = transformer._workflow_backend
+        if backend is None:
+            transformer._meta["metavars"] = values
+        else:
+            backend.context._set_node_config(
+                backend.node_path, "meta", {"metavars": values}
+            )
+
+    def to_dict(self):
+        values = self._values()
+        values.setdefault("BACKEND", "mem")
+        return values
+
+
 class PythonTransformer(PythonBashBaseTransformer[P, R]):
     """Delayed Python transformer."""
 
@@ -1075,6 +1124,10 @@ class PythonTransformer(PythonBashBaseTransformer[P, R]):
             scratch=scratch,
             local=local,
         )
+
+    @property
+    def metavars(self):
+        return PythonMetaVars(self)
 
 
 class BashTransformer(PythonBashBaseTransformer):

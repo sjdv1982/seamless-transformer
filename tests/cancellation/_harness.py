@@ -98,14 +98,23 @@ def _frontends_block(remote_kind: str, *, home: Path, conda_env: str, port_base:
 
 
 def _write_cluster_config(
-    home: Path, *, cluster_name: str, conda_env: str, remote_kind: str, port_base: int
+    home: Path, *, cluster_name: str, conda_env: str, remote_kind: str, port_base: int,
+    walltime: str = "10m",
+    seamless_workers: int = 1,
+    dask_resources_s: int | None = None,
 ) -> None:
     seamless_dir = home / ".seamless"
     seamless_dir.mkdir(parents=True, exist_ok=True)
+    dask_resources_config = ""
+    if dask_resources_s is not None:
+        dask_resources_config = (
+            "      dask_resources:\n"
+            f"        S: {dask_resources_s}\n"
+        )
     cluster_config = f"""
 {cluster_name}:
   type: local
-  workers: 1
+  workers: {seamless_workers}
   frontends:
     - {_frontends_block(remote_kind, home=home, conda_env=conda_env, port_base=port_base).lstrip()}
   default_queue: default
@@ -113,10 +122,10 @@ def _write_cluster_config(
     default:
       conda: {conda_env}
       interactive: true
-      walltime: 10m
+      walltime: {walltime}
       memory: 2000MB
       maximum_jobs: 2
-local_cluster: {cluster_name}
+{dask_resources_config}local_cluster: {cluster_name}
 """.strip()
     (seamless_dir / "clusters.yaml").write_text(cluster_config + "\n")
 
@@ -308,7 +317,12 @@ class Cluster:
 
 
 @contextlib.contextmanager
-def build_cluster(home_root: Path, *, remote_kind: str, cluster_name: str, port_base: int):
+def build_cluster(
+    home_root: Path, *, remote_kind: str, cluster_name: str, port_base: int,
+    walltime: str = "10m",
+    seamless_workers: int = 1,
+    dask_resources_s: int | None = None,
+):
     """Write config, start services (warmup), yield a :class:`Cluster`, then stop+rm."""
     conda_env = current_conda_env()
     home = home_root / "home"
@@ -319,7 +333,8 @@ def build_cluster(home_root: Path, *, remote_kind: str, cluster_name: str, port_
 
     _write_cluster_config(
         home, cluster_name=cluster_name, conda_env=conda_env,
-        remote_kind=remote_kind, port_base=port_base,
+        remote_kind=remote_kind, port_base=port_base, walltime=walltime,
+        seamless_workers=seamless_workers, dask_resources_s=dask_resources_s,
     )
     _write_test_config(workdir, project=project, cluster_name=cluster_name, remote_kind=remote_kind)
 

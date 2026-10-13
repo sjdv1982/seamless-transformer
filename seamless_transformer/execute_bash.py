@@ -631,7 +631,9 @@ def execute_bash(
                 text = line.decode(errors="ignore")
             if stream_name == "stdout" and text.strip() == "":
                 return
-            getattr(sys, stream_name).write(text)
+            stream = getattr(sys, stream_name)
+            stream.write(text)
+            stream.flush()
 
         def read_notify_fifo():
             if notify_fd is None:

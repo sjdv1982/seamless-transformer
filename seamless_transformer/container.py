@@ -287,6 +287,8 @@ def build_container_command(
             command.extend(["--bind", "{}:{}:ro".format(directory, directory)])
         if spec.get("gpus", False):
             command.append("--nv")
+        if tf_checksum is not None:
+            command.extend(["--env", "SEAMLESS_TF_CHECKSUM={}".format(tf_checksum)])
         try:
             command.extend(shlex.split(os.environ.get("SEAMLESS_CONTAINER_ARGS", "")))
         except ValueError as exc:

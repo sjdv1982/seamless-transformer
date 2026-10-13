@@ -1,6 +1,7 @@
 """Shared runtime images for Phase 3 language-backend contracts."""
 
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -9,8 +10,11 @@ import pytest
 RUNTIME_ONLY_BINARY = "seamless-phase3-runtime-only"
 R_IMAGE = "seamless-phase3-r:local"
 JULIA_IMAGE = "seamless-phase3-julia:local"
+PYTHON_IMAGE = "seamless-phase4-python-core:local"
+PYTHON_NO_CORE_IMAGE = "seamless-phase4-python-no-core:local"
 R_BASE_IMAGE = "rocker/r-ver:4.4.2"
 JULIA_BASE_IMAGE = "julia:1.12.6"
+PYTHON_BASE_IMAGE = "python:3.14-slim"
 
 
 def _run(argv, *, timeout=900):
@@ -21,7 +25,7 @@ def _run(argv, *, timeout=900):
 
 @pytest.fixture(scope="session")
 def language_runtime_images(tmp_path_factory):
-    """Build Docker images once, then load/convert them for all three engines."""
+    """Build contract images once, then load/convert them for all three engines."""
     context_root = tmp_path_factory.mktemp("phase3-language-images")
     julia_context = context_root / "julia"
     julia_context.mkdir()
@@ -66,23 +70,81 @@ def language_runtime_images(tmp_path_factory):
         encoding="utf-8",
     )
 
+    python_context = context_root / "python"
+    python_context.mkdir()
+    no_core_context = python_context / "no-core"
+    no_core_context.mkdir()
+    (no_core_context / "Dockerfile").write_text(
+        "\n".join(
+            (
+                f"FROM {PYTHON_BASE_IMAGE}",
+                "RUN apt-get update && apt-get install -y --no-install-recommends bash \\",
+                "    && rm -rf /var/lib/apt/lists/*",
+                "RUN python3 -m pip install --no-cache-dir numpy",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    core_context = python_context / "with-core"
+    core_context.mkdir()
+    repo_root = Path(__file__).resolve().parents[2]
+    shutil.copytree(
+        repo_root / "seamless-core",
+        core_context / "seamless-core",
+        ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", "tests"),
+    )
+    (core_context / "Dockerfile").write_text(
+        "\n".join(
+            (
+                f"FROM {PYTHON_BASE_IMAGE}",
+                "RUN apt-get update && apt-get install -y --no-install-recommends bash \\",
+                "    && rm -rf /var/lib/apt/lists/*",
+                "COPY seamless-core /opt/seamless-core",
+                "RUN python3 -m pip install --no-cache-dir /opt/seamless-core",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
     _run(["docker", "info"], timeout=180)
     _run(["podman", "info"], timeout=180)
     _run(["apptainer", "--version"], timeout=60)
     _run(["docker", "build", "-t", R_IMAGE, str(r_context)])
     _run(["docker", "build", "-t", JULIA_IMAGE, str(julia_context)])
+    _run(["docker", "build", "-t", PYTHON_NO_CORE_IMAGE, str(no_core_context)])
+    _run(["docker", "build", "-t", PYTHON_IMAGE, str(core_context)])
 
     image_archive = context_root / "phase3-language-images.tar"
-    _run(["docker", "save", "-o", str(image_archive), R_IMAGE, JULIA_IMAGE])
+    _run(
+        [
+            "docker",
+            "save",
+            "-o",
+            str(image_archive),
+            R_IMAGE,
+            JULIA_IMAGE,
+            PYTHON_IMAGE,
+            PYTHON_NO_CORE_IMAGE,
+        ]
+    )
     _run(["podman", "load", "-i", str(image_archive)], timeout=300)
 
     sif_dir = context_root / "apptainer"
     sif_dir.mkdir()
-    for image in (R_IMAGE, JULIA_IMAGE):
+    for image in (R_IMAGE, JULIA_IMAGE, PYTHON_IMAGE, PYTHON_NO_CORE_IMAGE):
         sif = sif_dir / (image + ".sif")
         _run(
             ["apptainer", "build", "--fakeroot", str(sif), "docker-daemon:" + image],
             timeout=900,
         )
         assert sif.is_file()
-    return {"r": R_IMAGE, "julia": JULIA_IMAGE, "sif_dir": sif_dir}
+    return {
+        "r": R_IMAGE,
+        "julia": JULIA_IMAGE,
+        "python": PYTHON_IMAGE,
+        "python_no_core": PYTHON_NO_CORE_IMAGE,
+        "sif_dir": sif_dir,
+    }
