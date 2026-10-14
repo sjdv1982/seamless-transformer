@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 
 from seamless import Checksum
-from seamless.util.mixed.io import deserialize, serialize
+from seamless.util.mixed.io import deserialize
 
 
 def decode_mixed(data):
@@ -14,7 +14,9 @@ def decode_mixed(data):
 
 
 def encode_mixed(value):
-    return serialize(value)
+    from seamless import Buffer
+
+    return Buffer(value, "mixed").content
 
 
 def decode_checksum_pin(data, celltype):

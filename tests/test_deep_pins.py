@@ -79,7 +79,18 @@ def _run_checksum(transformer):
     payload = checksum.resolve().get_value("plain")
     payload.update(extract_tf_dunder(handle._definition_payload_template))
     payload.update(handle._tf_dunder)
-    return Checksum(run_transformation_dict(payload, checksum))
+    result = Checksum(run_transformation_dict(payload, checksum, scratch=True, require_value=True))
+    if payload.get("__language__") == "python" and "__env__" not in payload:
+        # Phase 5: identical parsed deep pins and result classification under
+        # the other Python backend; both executions bypass the result cache.
+        other = dict(payload)
+        meta = dict(other.get("__meta__", {}))
+        metavars = dict(meta.get("metavars", {}))
+        metavars["BACKEND"] = "mem" if metavars.get("BACKEND", "mem") == "cli" else "cli"
+        meta["metavars"] = metavars
+        other["__meta__"] = meta
+        assert Checksum(run_transformation_dict(other, checksum, scratch=True, require_value=True)) == result
+    return result
 
 
 def _run_value(transformer):

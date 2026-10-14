@@ -65,9 +65,10 @@ def _run_remote_script(cluster, source, *, timeout=240):
     return json.loads(lines[-1][len(marker) :])
 
 
+@pytest.mark.parametrize("backend", ["mem", "cli"])
 @pytest.mark.parametrize("driver", [False, True], ids=["body", "driver"])
 def test_nested_python_cli_submission_runs_on_cluster_and_reuses_cache(
-    python_cli_dask_cluster, driver
+    python_cli_dask_cluster, driver, backend
 ):
     first_marker = uuid.uuid4().hex
     second_marker = uuid.uuid4().hex
@@ -99,7 +100,7 @@ def run_parent(marker):
     tf = Transformer("python")
     tf.code = body
     tf.pins["parent_marker"] = marker
-    tf.metavars.BACKEND = "cli"
+    tf.metavars.BACKEND = {backend!r}
     tf.driver = driver
     built = tf.build()
     return built.run()
@@ -142,8 +143,46 @@ tf = Transformer("python")
 tf.code = "result = values['member'].resolve().get_value('text')"
 tf.celltypes.values = "deepcell"
 tf.pins["values"] = {{"member": checksum}}
-tf.metavars.BACKEND = "cli"
-result = tf.run()
-print("PYTHON_CLI_DASK_RESULT=" + json.dumps(result), flush=True)
+checksums = []
+for backend in ("mem", "cli"):
+    tf.metavars.BACKEND = backend
+    tf.pins["parity_nonce"] = backend + {uuid.uuid4().hex!r}
+    built = tf.build()
+    assert built.run() == value
+    checksums.append(built.result_checksum.hex())
+assert checksums[0] == checksums[1]
+print("PYTHON_CLI_DASK_RESULT=" + json.dumps(value), flush=True)
 """
     assert _run_remote_script(python_cli_dask_cluster, source) == value
+
+
+@pytest.mark.parametrize("driver", [False, True], ids=["body", "driver"])
+def test_nested_python_backends_checksum_parity(python_cli_dask_cluster, driver):
+    # The Phase 4 cache test returns UUIDs and process IDs. This companion
+    # compares a deterministic nested result under the same cluster.
+    source = f"""
+import json
+import seamless.config as seamless_config
+from seamless.transformer import Transformer
+seamless_config.init()
+checksums = []
+for backend in ("mem", "cli"):
+    tf = Transformer("python")
+    tf.code = '''
+from seamless.transformer import direct
+@direct
+def child(value):
+    return value + 1
+result = child(41)
+'''
+    tf.pins["parity_nonce"] = backend + {uuid.uuid4().hex!r}
+    tf.metavars.BACKEND = backend
+    tf.driver = {driver!r}
+    built = tf.build()
+    assert built.run() == 42
+    checksums.append(built.result_checksum.hex())
+assert checksums[0] == checksums[1]
+print("PYTHON_CLI_DASK_RESULT=" + json.dumps(checksums), flush=True)
+"""
+    checksums = _run_remote_script(python_cli_dask_cluster, source)
+    assert checksums[0] == checksums[1]

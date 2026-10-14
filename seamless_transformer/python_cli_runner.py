@@ -92,10 +92,62 @@ def _checksum_hex(value):
     return None
 
 
+def _structured_dtype_has_padding(dtype):
+    subdtype = getattr(dtype, "subdtype", None)
+    if subdtype is not None:
+        return _structured_dtype_has_padding(subdtype[0])
+
+    fields = getattr(dtype, "fields", None)
+    if fields is None:
+        return False
+
+    offset = 0
+    for name in dtype.names or ():
+        field_dtype, field_offset = fields[name][:2]
+        if field_offset != offset or _structured_dtype_has_padding(field_dtype):
+            return True
+        offset = field_offset + field_dtype.itemsize
+    return offset != dtype.itemsize
+
+
+def _contains_checksum(value):
+    if _checksum_hex(value) is not None:
+        return True
+    if isinstance(value, Mapping):
+        return any(_contains_checksum(child) for child in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_contains_checksum(child) for child in value)
+    return False
+
+
+def _contains_padded_structured_array(value):
+    numpy_module = sys.modules.get("numpy")
+    ndarray_type = getattr(numpy_module, "ndarray", None)
+    if isinstance(ndarray_type, type) and isinstance(value, ndarray_type):
+        return (
+            value.dtype.fields is not None
+            and _structured_dtype_has_padding(value.dtype)
+        )
+    if isinstance(value, Mapping):
+        return any(
+            _contains_padded_structured_array(child)
+            for child in value.values()
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_contains_padded_structured_array(child) for child in value)
+    return False
+
+
 def _write_result_value(value, label, files, counter):
     checksum = _checksum_hex(value)
     if checksum is not None:
         return {"__checksum__": checksum}
+
+    if _contains_padded_structured_array(value):
+        raise TypeError(
+            f"Python CLI result {label!r} contains a structured NumPy "
+            "array with padding that cannot be checksum-preserved"
+        )
 
     if isinstance(value, bytes):
         suffix = ".bytes"
@@ -104,11 +156,18 @@ def _write_result_value(value, label, files, counter):
         numpy_module = sys.modules.get("numpy")
         ndarray_type = getattr(numpy_module, "ndarray", None)
         if isinstance(ndarray_type, type) and isinstance(value, ndarray_type):
-            np = numpy_module
-            suffix = ".npy"
-            buffer = BytesIO()
-            np.save(buffer, value, allow_pickle=False)
-            data = buffer.getvalue()
+            if value.dtype.fields is not None:
+                # NumPy's .npy loader drops dtype.isalignedstruct, which
+                # changes the Seamless checksum of aligned structured arrays.
+                helper = importlib.import_module("seamless_core_helper")
+                suffix = ".mixed"
+                data = helper.encode_mixed(value)
+            else:
+                np = numpy_module
+                suffix = ".npy"
+                buffer = BytesIO()
+                np.save(buffer, value, allow_pickle=False)
+                data = buffer.getvalue()
         elif _json_value(value):
             return None
         else:
@@ -125,12 +184,18 @@ def _write_result_value(value, label, files, counter):
 
 
 def _write_result(result, output_celltype):
+    if output_celltype not in ("deepcell", "folder", "checksum") and _contains_checksum(result):
+        raise TypeError(
+            f"A Checksum can only be returned under a deep or checksum result, "
+            f"not {output_celltype!r}"
+        )
+
     files = {}
     counter = [0]
     if output_celltype in ("folder", "deepcell"):
-        if not isinstance(result, Mapping):
+        if not isinstance(result, dict):
             raise TypeError(
-                f"Python CLI {output_celltype} result must be a mapping"
+                f"Python CLI {output_celltype} result must be a dict"
             )
         members = {}
         inline = {}

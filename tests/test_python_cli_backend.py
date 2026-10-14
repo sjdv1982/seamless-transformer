@@ -1,5 +1,6 @@
 import os
 import sys
+import uuid
 
 import pytest
 
@@ -102,6 +103,31 @@ def _held(value, celltype):
     return buffer
 
 
+# These Phase 4 cases observe backend-specific interpreter state or wall
+# clock time, or assert CLI isolation by making in-memory execution fail.
+# Their original assertions remain the coverage for that behavior.
+_PARITY_STATE_CASES = {
+    "test_code_modes_and_namespace",  # sys.prefix differs inside containers
+    "test_conda_base_prefix_is_used",  # observes the selected interpreter
+    "test_python_launcher_and_environment_which",  # observes sys.executable
+    "test_process_lock_false_allows_overlap",  # returns monotonic timestamps
+    "test_driver_runs_while_process_lock_is_held",  # replay would take held lock
+    "test_direct_function_defined_inside_cli_body",  # returns process IDs
+    "test_without_dask_nested_transformation_runs_in_job_process",  # process IDs
+    "test_running_container_has_transformation_label",  # container inspection
+    "test_runtime_none_never_runs_host_body",  # asserts CLI isolation
+}
+_PARITY_CASE = None
+
+
+@pytest.fixture(autouse=True)
+def _phase5_case(request):
+    global _PARITY_CASE
+    _PARITY_CASE = request.node.originalname
+    yield
+    _PARITY_CASE = None
+
+
 def _run_python(
     code,
     pins=None,
@@ -114,6 +140,8 @@ def _run_python(
     process_lock=None,
     driver=False,
 ):
+    pins = dict(pins or {})
+    pins["phase5_nonce"] = (uuid.uuid4().hex, "str")
     code_buffer = _held(code, "text")
     transformation = {
         "__language__": "python",
@@ -146,7 +174,26 @@ def _run_python(
         scratch=True,
         require_value=True,
     )
-    return Checksum(result), output
+    cli_result = Checksum(result)
+    if backend == "cli" and _PARITY_CASE is not None:
+        mem_dunder = dict(tf_dunder)
+        mem_dunder["__meta__"] = dict(meta, metavars={"BACKEND": "mem"})
+        foreign_environment = bool(environment and (
+            environment.get("docker") or (
+                environment.get("conda_environment") and
+                os.path.realpath(environment["conda_environment"]) != os.path.realpath(sys.prefix)
+            )
+        ))
+        if foreign_environment:
+            # CLI can run in a foreign environment; mem must reject it.
+            with pytest.raises((RuntimeError, ValueError)):
+                run_transformation_dict(transformation, checksum,
+                    tf_dunder=mem_dunder, scratch=True, require_value=True)
+        elif _PARITY_CASE not in _PARITY_STATE_CASES:
+            mem_result = run_transformation_dict(transformation, checksum,
+                tf_dunder=mem_dunder, scratch=True, require_value=True)
+            assert cli_result == Checksum(mem_result), _PARITY_CASE
+    return cli_result, output
 
 
 def _resolve_result(result, celltype):
@@ -228,8 +275,8 @@ def test_pin_celltypes_roundtrip():
 def test_code_modes_and_namespace(monkeypatch, language_runtime_images):
     modes = [
         ("result = 4", {}, 4),
-        ("def calculate(value):\n    return value + 5", {"value": (9, "int")}, 14),
-        ("lambda value: value + 5", {"value": (9, "int")}, 14),
+        ("def calculate(value, **kwargs):\n    return value + 5", {"value": (9, "int")}, 14),
+        ("lambda value, **kwargs: value + 5", {"value": (9, "int")}, 14),
         ("value + 5", {"value": (9, "int")}, 14),
     ]
     for code, pins, expected in modes:
@@ -447,6 +494,15 @@ def test_without_core_required_helper_import_fails(
     assert "ModuleNotFoundError" in message
     assert "seamless" in message
 
+    # The same payload succeeds in the in-memory backend, where core is
+    # available. A container is independently forbidden for that backend.
+    original_run = _run_python
+    def memory_counterpart(*args, **kwargs):
+        kwargs.update(backend="mem", environment=None)
+        return original_run(*args, **kwargs)
+    monkeypatch.setattr(sys.modules[__name__], "_run_python", memory_counterpart)
+    call()
+
 
 def test_conda_base_prefix_is_used():
     import sys
@@ -597,7 +653,8 @@ def test_cli_environment_dispatch_rules(monkeypatch):
     assert tf.compute() == first
 
 
-def test_process_lock_false_allows_overlap():
+@pytest.mark.parametrize("backend", ["mem", "cli"])
+def test_process_lock_false_allows_overlap(backend):
     import concurrent.futures
 
     code = """
@@ -612,6 +669,7 @@ result = (start, time.monotonic())
                 _run_python,
                 code + f"# {os.urandom(8).hex()}\n",
                 process_lock=False,
+                backend=backend,
             )
             for _ in range(2)
         ]
@@ -698,7 +756,8 @@ result = 'holder-finished'
     assert _resolve_result(holder_result["value"][0], "mixed") == "holder-finished"
 
 
-def test_direct_function_defined_inside_cli_body():
+@pytest.mark.parametrize("backend", ["mem", "cli"])
+def test_direct_function_defined_inside_cli_body(backend):
     code = """
 from seamless.transformer import direct
 
@@ -709,13 +768,14 @@ def local(value):
 
 result = local(41)
 """
-    checksum, celltype = _run_python(code)
+    checksum, celltype = _run_python(code, backend=backend)
     pid, value = _resolve_result(checksum, celltype)
     assert pid > 0
     assert value == 42
 
 
-def test_without_dask_nested_transformation_runs_in_job_process():
+@pytest.mark.parametrize("backend", ["mem", "cli"])
+def test_without_dask_nested_transformation_runs_in_job_process(backend):
     code = """
 from seamless.transformer import direct
 
@@ -729,7 +789,7 @@ parent_pid = os.getpid()
 child_pid = nested()
 result = (parent_pid, child_pid)
 """
-    checksum, celltype = _run_python(code)
+    checksum, celltype = _run_python(code, backend=backend)
     parent_pid, child_pid = _resolve_result(checksum, celltype)
     assert parent_pid == child_pid
 
