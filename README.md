@@ -300,10 +300,15 @@ tf()   # -> 5
 ```
 
 - **The code is ordinary R or Julia.** Either it is a block in which each pin is a variable and the code assigns `result`, or it defines a top-level function `transform` whose arguments are the pins. Pins are declared through `tf.pins`, as for bash.
-- **Each language has two backends**, selected with `tf.metavars.BACKEND`. The default starts an interpreter process per run (`"Rscript"`, `"julia"`). The alternative embeds the interpreter in the Python process (`"ryp"`, `"juliacall"`), which avoids the start-up cost and keeps `transform` definitions between runs.
+- **Each language has two backends**, selected with `tf.metavars.BACKEND`. The default CLI backend starts an interpreter process per run (`"cli"`). The alternative embeds the interpreter in the Python process (`"mem"`), which avoids the start-up cost and keeps `transform` definitions between runs. These setting values are the same for R and Julia; `Rscript`, `julia`, `ryp` and `juliacall` are tool names, not backend values.
 - **Both backends of a language give the same result, bit for bit, when both succeed.** The backend and the handler are therefore not part of the transformation's identity: switching backend is a cache hit.
 - **An embedded interpreter needs the process lock.** A transformation with `process_lock = False` and an in-memory backend fails when it runs.
-- **Seamless installs neither R nor Julia.** The machine that runs the transformation needs `Rscript` with the R packages `RcppCNPy` and `jsonlite`, or `julia` with `NPZ` and `JSON`. The in-memory backends need `ryp` or `juliacall`, and the same JSON package.
+- **The CLI backends honour the transformer environment.** They can run in a conda environment or Docker image; the image or environment must contain the runtime and required packages. Seamless installs neither R nor Julia.
+- **The CLI runner packages** are `jsonlite` for R, and the tracked `seamless/julia/Project.toml` plus `Manifest.toml` for Julia (`JSON` 1.10.0, `NPZ` 0.4.3). R's `RcppCNPy` is needed for NumPy arrays. The in-memory backends instead need `ryp` or `juliacall`; JuliaCall uses its own Julia project.
+- **R and Julia support deep celltypes.** Their checksum types can be passed through a `deepcell` pin or returned as a deep result member; see the [deep celltypes contract](../seamless/docs/agent/contracts/deep-celltypes.md).
+
+For concrete runtime installation steps, package setup, and a CLI smoke example,
+see the [R and Julia transformer guide](../seamless/docs/main/r-and-julia-transformers.md).
 
 The set of handler languages is open. A handler is one self-contained Python function, and its source travels with each transformation, so a worker process needs no registration:
 

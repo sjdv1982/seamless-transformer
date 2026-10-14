@@ -151,6 +151,13 @@ if language == 'r':
             'wait=FALSE, stdout="/dev/null", stderr="/dev/null")\n'
             'file.create(' + json.dumps(marker) + ')\n'
             'Sys.sleep(120)\nresult <- "finished"')
+elif language == 'python':
+    literal = json.dumps(command)
+    code = ('import subprocess, time\n'
+            'subprocess.Popen(["bash", "-c", ' + literal + '], '
+            'stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n'
+            'open(' + json.dumps(marker) + ', "w").write("started")\n'
+            'time.sleep(120)\nresult = "finished"')
 else:
     literal = json.dumps(command)
     code = ('run(pipeline(Cmd(["bash", "-c", ' + literal + ']), '
@@ -162,6 +169,8 @@ tf = Transformer(language)
 tf.code = code
 tf.celltypes.result = 'text'
 tf.local = True
+if language == 'python':
+    tf.metavars.BACKEND = 'cli'
 if runtime in ('docker', 'podman', 'apptainer'):
     tf.environment.set_docker({'name': image})
 job = tf.transformation()
@@ -221,7 +230,7 @@ try:
             if result.returncode == 1:
                 return False
             raise AssertionError(result.stdout + result.stderr)
-        wait(handler_started, 30, 'R/Julia handler did not enter its sleep')
+        wait(handler_started, 30, language + ' handler did not enter its sleep')
     else:
         pid = wait(token_pids, 45, 'sleep never started')[0]
         pgid = os.getpgid(pid)
@@ -397,7 +406,7 @@ def test_executor_finally_unregisters_and_kills_background_job(fail, monkeypatch
         registry.run_cleanups(checksum)
 
 
-@pytest.mark.parametrize('language', ['r', 'julia'])
+@pytest.mark.parametrize('language', ['r', 'julia', 'python'])
 @pytest.mark.parametrize('mode', ['process', 'spawn'])
 @pytest.mark.parametrize('runtime', ['plain', 'docker', 'podman', 'apptainer'])
 def test_handler_cli_hard_cancel(language, mode, runtime, language_runtime_images):

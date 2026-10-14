@@ -50,29 +50,30 @@ def analyze_code(code, identifier):
     return mode, func_name
 
 
-def exec_code(
-    code, identifier, namespace, inputs, output, *, with_ipython_kernel=False
-):
-    """Execute Python code in a namespace."""
+def build_exec_code(code, identifier, inputs, output):
+    """Return the code text that :func:`exec_code` executes."""
     mode, func_name = analyze_code(code, identifier)
     inputs2 = [inp for inp in sorted(list(inputs)) if not inp.endswith("_SCHEMA")]
     input_params = ",".join(f"{inp}={inp}" for inp in inputs2)
     if mode == "block":
-        code2 = code
-    elif mode == "function":
+        return code
+    if mode == "function":
         code2 = code + "\n\n"
         if output is None:
-            code2 += f"{func_name}({input_params})"
-        else:
-            code2 += f"{output} = {func_name}({input_params})"
-    elif mode == "lambda":
+            return code2 + f"{func_name}({input_params})"
+        return code2 + f"{output} = {func_name}({input_params})"
+    if mode == "lambda":
         assert output is not None
-        code2 = "LAMBDA = " + code + "\n\n"
-        code2 += f"{output} = LAMBDA({input_params})"
-    elif mode == "expression":
-        assert output is not None
-        code2 = f"{output} = " + code
+        return "LAMBDA = " + code + "\n\n" + f"{output} = LAMBDA({input_params})"
+    assert mode == "expression" and output is not None
+    return f"{output} = " + code
 
+
+def exec_code(
+    code, identifier, namespace, inputs, output, *, with_ipython_kernel=False
+):
+    """Execute Python code in a namespace."""
+    code2 = build_exec_code(code, identifier, inputs, output)
     if with_ipython_kernel:
         ipython_execute(code2, namespace)
     else:
@@ -99,4 +100,10 @@ def check_function_like(code, identifier):
     return function_name, nstatements
 
 
-__all__ = ["cached_compile", "analyze_code", "exec_code", "check_function_like"]
+__all__ = [
+    "cached_compile",
+    "analyze_code",
+    "build_exec_code",
+    "exec_code",
+    "check_function_like",
+]

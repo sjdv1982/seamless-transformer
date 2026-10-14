@@ -153,13 +153,28 @@ def run_transformation_dict(
 
     language = transformation.get("__language__", "python")
     is_probe = is_record_probe(transformation, tf_dunder)
+    python_backend = "mem"
+    if language == "python":
+        stored_metavars = meta.get("metavars", {})
+        if stored_metavars is not None:
+            if not isinstance(stored_metavars, Mapping):
+                raise TypeError("transformation meta['metavars'] must be a mapping")
+            if "BACKEND" in stored_metavars:
+                from .languages import _validate_backend_value
+
+                _validate_backend_value(stored_metavars["BACKEND"], "python")
+                python_backend = stored_metavars["BACKEND"]
+    python_cli = language == "python" and python_backend == "cli" and not is_probe
     docker_spec = None
     container_runtime = None
     if not is_probe:
         docker_spec = _validate_environment_dispatch(env_dict)
         if docker_spec is not None and language == "bash":
             container_runtime = select_container_runtime(docker_spec["name"])
-        if language == "python" or _is_compiled_transformation(transformation, tf_dunder):
+        if (
+            (language == "python" and not python_cli)
+            or _is_compiled_transformation(transformation, tf_dunder)
+        ):
             from .languages import check_in_memory_environment
 
             check_in_memory_environment(env_dict, language)
@@ -173,6 +188,10 @@ def run_transformation_dict(
 
     tf_namespace = build_transformation_namespace_sync(transformation)
     code, namespace, modules_to_build = tf_namespace
+    if python_cli and modules_to_build:
+        raise NotImplementedError(
+            'Python CLI backend does not support modules or globals; use BACKEND="mem"'
+        )
     if language == "python" and isinstance(code, str) and len(code) == 64:
         # Defensive fallback: recover code text if a checksum hex string leaked through.
         tf_dict_fallback = None
@@ -408,7 +427,25 @@ def run_transformation_dict(
         return result_checksum
 
     with process_lock_scope(process_lock_active, should_abort=should_abort):
-        if handler_language:
+        if python_cli:
+            from .languages import _use_cli_execution_context
+            from .python_cli import execute_python_cli
+
+            tf_checksum_hex = (
+                Checksum(tf_checksum).hex() if tf_checksum is not None else None
+            )
+            with _use_cli_execution_context(tf_checksum_hex, should_abort):
+                result = execute_python_cli(
+                    transformation,
+                    code,
+                    identifier,
+                    namespace,
+                    inputs,
+                    output_name,
+                    output_celltype,
+                    env_dict,
+                )
+        elif handler_language:
             from .languages import _use_cli_execution_context
 
             with _use_cli_execution_context(checksum_hex, should_abort):
