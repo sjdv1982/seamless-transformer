@@ -194,18 +194,14 @@ def test_mixed_container_is_refused_by_cli(backend):
 
 
 @pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
-def test_deep_pin_celltypes_are_refused(backend, celltype):
+def test_deep_pin_celltypes_are_delivered_in_their_native_form(backend, celltype):
     from seamless_transformer.languages import get_language_handler
     handler = get_language_handler("julia").handler
     checksum = "a" * 64
-    if celltype == "deepcell":
+    if celltype in ("deepcell", "deepfolder"):
         value = {"k": Checksum(checksum)}
         code = f'result = value["k"] isa Checksum && value["k"].hex == "{checksum}"'
         expected = True
-    elif celltype == "deepfolder":
-        value = {"k": "/tmp/member.gz"}
-        code = 'result = value["k"]'
-        expected = "/tmp/member.gz"
     else:
         value = {"k": b"folder bytes"}
         code = 'result = String(value["k"])'

@@ -136,29 +136,7 @@ def _pin_specs(transformation, namespace, stage_pins, stage_filesystem):
                 "members_are_checksums": False,
             }
             encoding = "folder"
-        elif celltype == "deepfolder":
-            if not isinstance(value, Mapping):
-                raise TypeError(
-                    f"Python CLI deepfolder pin {pinname!r} must be a mapping"
-                )
-            path_map = {}
-            for member, path in value.items():
-                if not isinstance(member, str) or not isinstance(path, (str, os.PathLike)):
-                    raise TypeError(
-                        f"Python CLI deepfolder pin {pinname!r} must map strings to paths"
-                    )
-                path_map[member] = os.fspath(path)
-            stage_pins[input_file] = path_map
-            # execute_cli uses this entry to check that container jobs can
-            # follow every path. "metadata" keeps write_bash_job from
-            # materializing the paths as a directory pin.
-            stage_filesystem[input_file] = {
-                "mode": "metadata",
-                "filesystem": False,
-                "celltype": "deepfolder",
-            }
-            encoding = "deepfolder"
-        elif celltype == "deepcell":
+        elif celltype in ("deepcell", "deepfolder"):
             _stage_bytes(
                 stage_pins,
                 input_file,

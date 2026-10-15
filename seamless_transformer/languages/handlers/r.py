@@ -21,7 +21,6 @@ def r(
     import numpy as np
     from seamless import Buffer, Checksum
     from seamless_transformer.execute_bash import (
-        _validate_container_deepfolder_members,
         write_directory_pin,
     )
     from seamless_transformer.languages import execute_cli
@@ -139,22 +138,10 @@ def r(
                 }
             )
             continue
-        if celltype == "deepcell":
+        if celltype in ("deepcell", "deepfolder"):
             raw = write_deepcell_pin_index(value)
         elif celltype == "checksum":
             raw = write_checksum_pin_index(value)
-        elif celltype == "deepfolder":
-            if backend == "cli" and environment.get("docker") is not None:
-                from seamless_transformer.transformation_namespace import (
-                    _get_read_folder_directories,
-                )
-
-                _validate_container_deepfolder_members(
-                    value, _get_read_folder_directories()
-                )
-            raw = json.dumps(
-                encode_tree(value), ensure_ascii=False, separators=(",", ":")
-            ).encode("utf-8")
         elif on_file:
             if celltype not in file_celltypes:
                 raise TypeError(
@@ -316,10 +303,9 @@ decode_tree <- function(value) {
 
 decode_pin <- function(data, pin) {
     celltype <- pin[["celltype"]]
-    if (identical(celltype, "deepcell") || identical(celltype, "checksum"))
+    if (identical(celltype, "deepcell") || identical(celltype, "deepfolder") ||
+        identical(celltype, "checksum"))
         return(decode_wire_pin(data, celltype))
-    if (identical(celltype, "deepfolder"))
-        return(jsonlite::fromJSON(rawToChar(data), simplifyVector = FALSE))
     if (identical(celltype, "bytes")) return(data)
     if (identical(celltype, "text")) {
         value <- rawToChar(data)

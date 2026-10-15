@@ -423,7 +423,7 @@ def direct_transformer_to_pretransformation(
 
         if celltype == "module":
             pin = {"celltype": "plain", "subcelltype": "module"}
-        elif celltype in ("deepfolder", "folder"):
+        elif celltype == "folder":
             pin = {
                 "celltype": celltype,
                 "filesystem": {"mode": "directory"},

@@ -121,26 +121,24 @@ def test_folder_remote_member_is_written(monkeypatch, tmp_path):
     assert not member.is_symlink()
 
 
-def test_deepfolder_remote_member_fails_without_fetch(monkeypatch, tmp_path):
+def test_bash_deepfolder_pin_is_refused_without_resolving_members(monkeypatch, tmp_path):
     checksum = Buffer(b"not stored").get_checksum()
-    calls = []
 
-    def resolve(self):
-        calls.append(self.hex())
-        raise AssertionError("deepfolder must not resolve a missing member")
+    def no_resolve(self):
+        raise AssertionError("a refused deepfolder pin must not resolve members")
 
-    monkeypatch.setattr(Checksum, "resolve", resolve)
-    with pytest.raises(CacheMissError, match="remote.txt"):
+    monkeypatch.setattr(Checksum, "resolve", no_resolve)
+    with pytest.raises(TypeError, match="cannot be deepfolder"):
         write_directory_pin(
             tmp_path / "deep",
             {"remote.txt": checksum},
             "deepfolder",
             read_directories=[],
         )
-    assert calls == []
+    assert not (tmp_path / "deep").exists()
 
 
-def test_deepfolder_stored_compression_is_linked_without_copy(tmp_path):
+def test_bash_deepfolder_pin_is_refused_regardless_of_storage_form(tmp_path):
     read_dir = tmp_path / "buffers"
     data = b"compressed deep member\n"
     checksum = Buffer(data).get_checksum()
@@ -149,17 +147,14 @@ def test_deepfolder_stored_compression_is_linked_without_copy(tmp_path):
     stored.write_bytes(gzip.compress(data))
     pin = tmp_path / "deep"
 
-    write_directory_pin(
-        pin,
-        {"member.txt": checksum},
-        "deepfolder",
-        read_directories=[str(read_dir)],
-    )
-
-    member = pin / "member.txt.gz"
-    assert member.is_symlink()
-    assert member.resolve() == stored.resolve()
-    assert member.read_bytes() == gzip.compress(data)
+    with pytest.raises(TypeError, match="cannot be deepfolder"):
+        write_directory_pin(
+            pin,
+            {"member.txt": checksum},
+            "deepfolder",
+            read_directories=[str(read_dir)],
+        )
+    assert not pin.exists()
 
 
 def test_folder_compression_follows_pin_name(tmp_path):
@@ -230,12 +225,13 @@ def test_external_buffer_symlink_without_container(monkeypatch, tmp_path):
     stored.symlink_to(outside)
     _use_read_directory(monkeypatch, read_dir)
 
-    assert _bash(
-        "cat data/member > RESULT",
-        {"data": {"member": checksum}},
-        {"data": {"mode": "directory", "filesystem": False, "celltype": "deepfolder"}},
-        output="text",
-    ) == "external target\n"
+    with pytest.raises(TypeError, match="cannot be deepfolder"):
+        _bash(
+            "cat data/member > RESULT",
+            {"data": {"member": checksum}},
+            {"data": {"mode": "directory", "filesystem": False, "celltype": "deepfolder"}},
+            output="text",
+        )
 
 
 def test_container_external_buffer_symlink_fallback(
@@ -285,15 +281,34 @@ def test_container_internal_symlink_and_hardlink(
     assert result == "internal symlink\ninternal hardlink\n"
 
 
-def test_bash_deepcell_pin_refused_before_launch(tmp_path):
+@pytest.mark.parametrize("celltype", ["deepcell", "deepfolder"])
+def test_bash_deep_pins_refused_before_launch(tmp_path, celltype):
     from seamless_transformer import Transformer
 
     sentinel = tmp_path / "ran"
     transformer = Transformer("bash", direct=True)
     transformer.code = f"touch {sentinel}"
-    with pytest.raises(TypeError, match="deepcell.*deepfolder.*folder.*plain"):
-        transformer.celltypes.data = "deepcell"
+    with pytest.raises(TypeError, match=f"cannot be {celltype}.*folder or plain"):
+        transformer.celltypes.data = celltype
     assert not sentinel.exists()
+
+
+@pytest.mark.parametrize("celltype", ["deepcell", "deepfolder"])
+@pytest.mark.parametrize("checksum", ["a" * 64, None], ids=["set", "absent"])
+def test_bash_deep_pins_are_refused_when_celltype_validation_is_bypassed(
+    celltype, checksum
+):
+    from seamless_transformer.transformation_namespace import (
+        build_transformation_namespace_sync,
+    )
+
+    transformation = {
+        "__language__": "bash",
+        "__output__": ("plain", "result"),
+        "data": (celltype, None, checksum),
+    }
+    with pytest.raises(TypeError, match=f"cannot be {celltype}.*folder or plain"):
+        build_transformation_namespace_sync(transformation)
 
 
 def test_bash_deepcell_result_preserves_file_bytes():

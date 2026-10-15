@@ -23,7 +23,6 @@ def julia(
     import numpy as np
     from seamless import Buffer
     from seamless_transformer.execute_bash import (
-        _validate_container_deepfolder_members,
         write_directory_pin,
     )
     from seamless_transformer.languages import execute_cli
@@ -162,22 +161,10 @@ def julia(
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
-        elif celltype == "deepcell":
+        elif celltype in ("deepcell", "deepfolder"):
             raw = write_deepcell_pin_index(value)
         elif celltype == "checksum":
             raw = write_checksum_pin_index(value)
-        elif celltype == "deepfolder":
-            if backend == "cli" and environment.get("docker") is not None:
-                from seamless_transformer.transformation_namespace import (
-                    _get_read_folder_directories,
-                )
-
-                _validate_container_deepfolder_members(
-                    value, _get_read_folder_directories()
-                )
-            raw = json.dumps(
-                encode_tree(value), ensure_ascii=False, separators=(",", ":")
-            ).encode("utf-8")
         elif on_file:
             if celltype not in file_celltypes:
                 raise TypeError(
@@ -416,10 +403,8 @@ function read_npy(data::Vector{UInt8})
 end
 
 function decode_pin(data::Vector{UInt8}, celltype::String)
-    if celltype in ("deepcell", "checksum")
+    if celltype in ("deepcell", "deepfolder", "checksum")
         return decode_wire_pin(data, celltype)
-    elseif celltype == "deepfolder"
-        return JSON.parse(String(data))
     elseif celltype == "folder"
         return decode_folder_pin(data)
     elseif celltype == "bytes"

@@ -117,26 +117,6 @@ def _container_can_read(path, read_directories):
     return False
 
 
-def _validate_container_deepfolder_members(structure, read_directories):
-    """Require every deepfolder path to be readable through a container bind."""
-    if not isinstance(structure, dict):
-        raise TypeError("deepfolder pin must contain a mapping of members")
-    for key, value in structure.items():
-        try:
-            path = os.fspath(value)
-        except TypeError:
-            path = None
-        if path is None or not os.path.isfile(path):
-            raise CacheMissError(
-                f"deepfolder member {key!r}: member is not in a read-buffer directory"
-            )
-        if not _container_can_read(path, read_directories):
-            raise CacheMissError(
-                f"deepfolder member {key!r}: "
-                "buffer file is a link which the container cannot follow"
-            )
-
-
 def _safe_directory_member_path(root, key):
     if not isinstance(key, str) or not key:
         raise ValueError(f"Invalid directory member name: {key!r}")
@@ -158,8 +138,12 @@ def write_directory_pin(
     members_are_checksums=None,
     compression_suffix=None,
 ):
-    """Write a folder or deepfolder pin using the bash job's materialization rules."""
-    if celltype not in ("folder", "deepfolder"):
+    """Write a folder pin using the bash job's materialization rules."""
+    if celltype == "deepfolder":
+        raise TypeError(
+            "Bash transformer pins cannot be deepfolder; declare it folder or plain"
+        )
+    if celltype != "folder":
         raise ValueError(f"Unsupported directory pin celltype {celltype!r}")
     if not isinstance(structure, dict):
         raise TypeError(f"{celltype} pin must contain a mapping of members")
@@ -168,24 +152,17 @@ def write_directory_pin(
 
     root = os.path.abspath(pin_path)
     os.makedirs(root, exist_ok=True)
-    deep = celltype == "deepfolder"
     if members_are_checksums is None:
-        members_are_checksums = deep
+        members_are_checksums = False
     if compression_suffix is None:
         _pin_base, target_suffix = strip_compression_suffix(os.path.basename(pin_path))
     else:
         target_suffix = compression_suffix
-    if deep:
-        target_suffix = None
 
     for key, value in structure.items():
         member_is_checksum = isinstance(value, Checksum) or (
             members_are_checksums and isinstance(value, str)
         )
-        if deep and not member_is_checksum:
-            raise TypeError(
-                f"deepfolder member {key!r} must be a checksum"
-            )
         if member_is_checksum:
             checksum = Checksum(value)
             source_path, source_suffix = _find_filesystem_path(
@@ -195,21 +172,13 @@ def write_directory_pin(
                 source_path is not None
                 and (not container or _container_can_read(source_path, read_directories))
             )
-            target_key = key + (source_suffix or "") if deep else key + (target_suffix or "")
-            member_path = _safe_directory_member_path(root, target_key)
+            member_path = _safe_directory_member_path(
+                root, key + (target_suffix or "")
+            )
             os.makedirs(os.path.dirname(member_path), exist_ok=True)
-            if path_is_reachable and (deep or source_suffix == target_suffix):
+            if path_is_reachable and source_suffix == target_suffix:
                 os.symlink(os.path.abspath(source_path), member_path)
                 continue
-            if deep:
-                reason = (
-                    "buffer file is a link which the container cannot follow"
-                    if source_path is not None
-                    else "member is not in a read-buffer directory"
-                )
-                raise CacheMissError(
-                    f"deepfolder member {key!r} ({checksum.hex()}): {reason}"
-                )
             if source_path is not None:
                 with open(source_path, "rb") as handle:
                     data = handle.read()
@@ -231,8 +200,6 @@ def write_directory_pin(
                 handle.write(data)
             continue
 
-        if deep:
-            raise TypeError(f"deepfolder member {key!r} must be a checksum")
         if isinstance(value, Buffer):
             data = value.content
         elif isinstance(value, bytes):
@@ -362,7 +329,7 @@ def write_bash_job(
                     read_directories=read_directories_,
                     container=container_command is not None,
                     members_are_checksums=fs_entry.get(
-                        "members_are_checksums", celltype == "deepfolder"
+                        "members_are_checksums", False
                     ),
                     compression_suffix=compression_suffix,
                 )
