@@ -53,11 +53,6 @@ def _decode_pin(spec):
     if encoding in ("deepcell", "checksum"):
         helper = importlib.import_module("seamless_core_helper")
         return helper.decode_checksum_pin(data, encoding)
-    if encoding == "deepfolder":
-        value = json.loads(data.decode("utf-8"))
-        if not isinstance(value, Mapping):
-            raise TypeError("deepfolder pin must contain an object")
-        return dict(value)
     raise ValueError(f"Unsupported Python CLI pin encoding {encoding!r}")
 
 

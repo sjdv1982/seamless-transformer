@@ -116,62 +116,10 @@ def test_folder_pin_is_contents_including_read_buffer_index(language, backend):
 
 
 @pytest.mark.parametrize(("language", "backend"), LANGUAGE_BACKENDS)
-def test_deepfolder_pin_is_stored_paths_without_materialization(
-    language, backend, monkeypatch, tmp_path
+@pytest.mark.parametrize("celltype", ["deepcell", "deepfolder"])
+def test_deep_pins_are_checksum_objects_without_resolution(
+    language, backend, celltype, monkeypatch
 ):
-    import seamless_transformer.transformation_namespace as namespace
-
-    member = Buffer(b"deep folder bytes", "bytes")
-    checksum = member.get_checksum()
-    stored = tmp_path / checksum.hex()[:2] / checksum.hex()
-    stored.parent.mkdir()
-    stored.write_bytes(member.content)
-    monkeypatch.setattr(namespace, "_get_read_folder_directories", lambda: [str(tmp_path)])
-    index = _held({"member.txt": checksum.hex()}, "plain")
-    result = _run_value(
-        _transformer(
-            language,
-            backend,
-            _identity_code(language),
-            index,
-            "deepfolder",
-            output="plain",
-        )
-    )
-    assert set(result) == {"member.txt"}
-    assert isinstance(result["member.txt"], str)
-    assert result["member.txt"] == str(stored)
-    assert stored.read_bytes() == b"deep folder bytes"
-    assert not (tmp_path / "member.txt").exists()
-
-
-@pytest.mark.parametrize(("language", "backend"), LANGUAGE_BACKENDS)
-def test_deepfolder_missing_disk_member_fails_without_fetch(language, backend, monkeypatch):
-    checksum = Buffer(b"not stored anywhere", "bytes").get_checksum()
-    index = _held({"missing.txt": checksum.hex()}, "plain")
-
-    original_resolve = Checksum.resolve
-
-    def no_resolve(self):
-        if self == checksum:
-            raise AssertionError("deepfolder must not resolve a missing member")
-        return original_resolve(self)
-
-    monkeypatch.setattr(Checksum, "resolve", no_resolve)
-    transformer = _transformer(
-        language,
-        backend,
-        _identity_code(language),
-        index,
-        "deepfolder",
-        output="plain",
-    )
-    with pytest.raises(CacheMissError, match="missing.txt"):
-        _run_value(transformer)
-
-
-@pytest.mark.parametrize(("language", "backend"), LANGUAGE_BACKENDS)
-def test_deepcell_pin_is_checksum_objects_without_resolution(language, backend, monkeypatch):
     checksum = "a" * 64
     index = _held({"missing": checksum}, "plain")
 
@@ -179,7 +127,7 @@ def test_deepcell_pin_is_checksum_objects_without_resolution(language, backend, 
 
     def no_resolve(self):
         if self.hex() == checksum:
-            raise AssertionError("deepcell pins carry references without resolution")
+            raise AssertionError("deep pins carry references without resolution")
         return original_resolve(self)
 
     monkeypatch.setattr(Checksum, "resolve", no_resolve)
@@ -192,7 +140,7 @@ def test_deepcell_pin_is_checksum_objects_without_resolution(language, backend, 
         "julia": 'result = Dict("class" => string(typeof(value["missing"])), "hex" => value["missing"].hex)',
     }[language]
     result = _run_value(
-        _transformer(language, backend, code, index, "deepcell", output="plain")
+        _transformer(language, backend, code, index, celltype, output="plain")
     )
     if language == "python":
         assert result == {"missing": ["Checksum", checksum]}
@@ -400,7 +348,7 @@ def test_hashing_folder_contents_checksum_parity(language, backend):
 @pytest.mark.parametrize("language", ["r", "julia", "python"])
 @pytest.mark.parametrize("runtime", ["docker", "podman", "apptainer"])
 @pytest.mark.parametrize("celltype", ["folder", "deepfolder"])
-def test_container_deep_pins_and_external_symlink_rule(
+def test_container_folder_and_deepfolder_pin_forms(
     language, runtime, celltype, language_runtime_images, monkeypatch, tmp_path
 ):
     images = language_runtime_images
@@ -427,51 +375,60 @@ def test_container_deep_pins_and_external_symlink_rule(
 
     if language == "python":
         index = _held({"member": checksum}, "plain")
-        code = f"runtime_variant = {runtime!r}\nresult = value[\"member\"]"
+        if celltype == "deepfolder":
+            code = f"runtime_variant = {runtime!r}\nresult = value[\"member\"].hex()"
+            output = "plain"
+        else:
+            code = f"runtime_variant = {runtime!r}\nresult = value[\"member\"]"
+            output = "bytes"
         transformer = _transformer(
-            language, "cli", code, index, celltype, output="bytes"
+            language, "cli", code, index, celltype, output=output
         )
         transformer.environment.set_docker({"name": images[language]})
         if celltype == "deepfolder":
-            with pytest.raises(CacheMissError, match="member"):
-                _run_checksum(transformer)
+            assert _run_value(transformer) == checksum
         else:
             assert _run_value(transformer) == external.read_bytes()
         return
 
     from seamless_transformer.languages import get_language_handler
 
-    code = (
-        'result <- data[["member"]]'
-        if language == "r"
-        else 'result = data["member"]'
-    )
+    if celltype == "deepfolder":
+        code = (
+            'result <- as.character(data[["member"]])'
+            if language == "r"
+            else 'result = data["member"].hex'
+        )
+        output_celltype = "plain"
+        member_value = member_buffer.get_checksum()
+    else:
+        code = (
+            'result <- data[["member"]]'
+            if language == "r"
+            else 'result = data["member"]'
+        )
+        output_celltype = "bytes"
+        member_value = Buffer(external.read_bytes(), "bytes")
     handler = get_language_handler(language).handler
     arguments = dict(
         code=code,
         pins={
             "data": {
                 "member": (
-                    Buffer(external.read_bytes(), "bytes")
-                    if celltype == "folder"
-                    else checksum
+                    member_value
                 )
             }
         },
         filesystem={"data": {"celltype": celltype, "filesystem": False}},
         output_name="result",
-        output_celltype="bytes",
+        output_celltype=output_celltype,
         metavars={"BACKEND": "cli"},
         environment={"docker": {"name": images[language]}},
         process_lock=True,
     )
 
-    if celltype == "deepfolder":
-        with pytest.raises(CacheMissError, match="member"):
-            handler(**arguments)
-        return
-
-    assert handler(**arguments) == external.read_bytes()
+    expected = checksum if celltype == "deepfolder" else external.read_bytes()
+    assert handler(**arguments) == expected
 
 
 def test_compiled_transformer_still_refuses_deep_pin():

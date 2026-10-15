@@ -1345,12 +1345,12 @@ class CelltypesWrapper:
             raise TypeError(value, all_celltypes)
         if (
             key != "result"
-            and value == "deepcell"
+            and value in ("deepcell", "deepfolder")
             and getattr(self._owner, "language", None) == "bash"
         ):
             raise TypeError(
-                f"Bash transformer pin {key!r} cannot be deepcell; "
-                "declare it deepfolder, folder or plain"
+                f"Bash transformer pin {key!r} cannot be {value}; "
+                "declare it folder or plain"
             )
         from seamless.cell_class import _check_projected_source
         ref = self._args.get(key, (None, None))[0]

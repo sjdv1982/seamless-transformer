@@ -37,13 +37,7 @@ def test_deepcell_and_deepfolder_pins_hand_over_unresolved_checksums(celltype):
     index = _held({"dir/k": member.hex()}, "plain")
     describe = _describe_pin()
     describe.celltypes.x = celltype
-    # Deepcell hands over unresolved checksums. A deepfolder must have stored
-    # member paths and fails without resolving missing members.
-    if celltype == "deepcell":
-        assert describe(x=index.get_checksum()) == {"dir/k": ["Checksum", member.hex()]}
-    else:
-        with pytest.raises(Exception, match="dir/k"):
-            describe(x=index.get_checksum())
+    assert describe(x=index.get_checksum()) == {"dir/k": ["Checksum", member.hex()]}
 
 
 def test_folder_pin_hands_over_resolved_child_contents():
@@ -87,8 +81,7 @@ def test_pin_namespace_checksum_dict_rejects_nesting_like_unpacking():
 
 
 @pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
-def test_only_deepfolder_and_folder_pins_carry_the_directory_filesystem_format(celltype):
-    """'deepfolder and folder pins additionally carry {"filesystem": {"mode": "directory"}}'."""
+def test_only_folder_pins_carry_the_directory_filesystem_format(celltype):
 
     @delayed
     def consume(d):
@@ -98,7 +91,7 @@ def test_only_deepfolder_and_folder_pins_carry_the_directory_filesystem_format(c
     index = _held({"k": "aa" * 32}, "plain")
     transformation_dict = consume(index.get_checksum()).construct().resolve("plain")
     fmt = transformation_dict.get("__format__", {}).get("d")
-    if celltype == "deepcell":
+    if celltype != "folder":
         assert fmt is None
     else:
         assert fmt == {"celltype": celltype, "filesystem": {"mode": "directory"}}

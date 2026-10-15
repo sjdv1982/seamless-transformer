@@ -130,39 +130,29 @@ def test_conda_interpreter_observes_requested_prefix(language):
 
 @pytest.mark.parametrize("language", ["r", "julia"])
 @pytest.mark.parametrize("runtime", ["docker", "podman", "apptainer"])
-def test_container_result_and_read_folder_pin(
-    language, runtime, language_runtime_images, monkeypatch, tmp_path
+def test_container_deepfolder_pin_carries_checksums(
+    language, runtime, language_runtime_images, monkeypatch
 ):
     images = language_runtime_images
     environment = _set_runtime(monkeypatch, runtime, images, language)
     member = Buffer(b"read-folder member bytes", "bytes")
-    checksum = member.get_checksum().hex()
-    read_dir = tmp_path / "read-buffer"
-    read_dir.mkdir()
-    stored = read_dir / checksum[:2] / checksum
-    stored.parent.mkdir()
-    stored.write_bytes(member.content)
-
-    import seamless_transformer.transformation_namespace as namespace
-
-    monkeypatch.setattr(namespace, "_get_read_folder_directories", lambda: [str(read_dir)])
-    pins = {"data": {"member": str(stored)}}
+    checksum = member.get_checksum()
+    pins = {"data": {"member": checksum}}
     filesystem = {"data": {"celltype": "deepfolder", "filesystem": False}}
     code = (
-        'result <- readBin(data[["member"]], "raw", '
-        'n=file.info(data[["member"]])$size)'
+        'result <- as.character(data[["member"]])'
         if language == "r"
-        else 'result = read(data["member"])'
+        else 'result = data["member"].hex'
     )
     result = _call_handler(
         language,
         code,
         pins=pins,
         filesystem=filesystem,
-        output="bytes",
+        output="plain",
         environment=environment,
     )
-    assert result == member.content
+    assert result == checksum.hex()
 
 
 @pytest.mark.parametrize("language", ["r", "julia"])
