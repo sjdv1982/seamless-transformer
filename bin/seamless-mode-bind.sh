@@ -130,3 +130,11 @@ function seamless-mode-bind() {
     echo 'From now on, new local shell variables will be exported.'
     set -a
 }
+
+case "$-" in
+  *i*)
+    if [ -n "${BASH_VERSION:-}" ]; then
+      seamless-mode-bind
+    fi
+    ;;
+esac
