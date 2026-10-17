@@ -30,12 +30,8 @@ def _get_executor(key: tuple[int, str]) -> ThreadPoolExecutor:
 def run_in_interpreter_thread(name, func, /, *args, **kwargs):
     """Run ``func`` on one process-wide thread associated with ``name``.
 
-    Calls made from the owner thread run inline. Set
-    ``SEAMLESS_INTERPRETER_THREAD=0`` to run inline on the calling thread.
+    Calls made from the owner thread run inline.
     """
-
-    if os.environ.get("SEAMLESS_INTERPRETER_THREAD") == "0":
-        return func(*args, **kwargs)
 
     key = (os.getpid(), str(name))
     if getattr(_thread_state, "key", None) == key:
