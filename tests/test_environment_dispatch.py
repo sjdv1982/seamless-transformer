@@ -169,24 +169,43 @@ def test_dask_sender_validates_only_before_a_new_submission(tmp_path):
 
 def test_seamless_run_combined_environment_fails_at_dispatch(tmp_path):
     marker = tmp_path / "body-executed"
+    home = tmp_path / "home"
+    home.mkdir()
     env = os.environ.copy()
     env["SEAMLESS_CACHE"] = str(tmp_path / "cache")
-    completed = subprocess.run(
-        [
-            "seamless-run",
-            "--conda",
-            "seamless1",
-            "--docker",
-            "ubuntu:22.04",
-            "touch",
-            str(marker),
-        ],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    env["HOME"] = str(home)
+    env.pop("REMOTE_HTTP_LAUNCHER_DIR", None)
+    try:
+        completed = subprocess.run(
+            [
+                "seamless-run",
+                "--conda",
+                "seamless1",
+                "--docker",
+                "ubuntu:22.04",
+                "touch",
+                str(marker),
+            ],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        server_dir = home / ".remote-http-launcher" / "server"
+        keys = [path.stem for path in server_dir.glob("*.json")]
+        if keys:
+            for command in ("rhl-stop", "rhl-rm"):
+                result = subprocess.run(
+                    [command, *keys],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                assert result.returncode == 0, result.stdout + result.stderr
+
     assert completed.returncode != 0
     assert "conda" in completed.stderr.lower() and "docker" in completed.stderr.lower()
     assert not marker.exists()
