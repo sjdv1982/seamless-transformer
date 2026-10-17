@@ -48,6 +48,7 @@ class ProcessHandle:
     health_task: Optional[asyncio.Task[Any]] = None
     _condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     ready_event: asyncio.Event = field(default_factory=asyncio.Event)
+    active_execute_requests: int = 0
 
     async def wait_for_generation(self, generation: int) -> None:
         async with self._condition:
@@ -75,7 +76,14 @@ class ProcessHandle:
         endpoint = self.endpoint
         if endpoint is None or endpoint.is_closed():
             raise ProcessError(f"Worker {self.name} is not ready")
-        return await endpoint.request(op, payload, timeout=timeout)
+        is_execute_request = op == "execute_transformation"
+        if is_execute_request:
+            self.active_execute_requests += 1
+        try:
+            return await endpoint.request(op, payload, timeout=timeout)
+        finally:
+            if is_execute_request:
+                self.active_execute_requests -= 1
 
     def is_alive(self) -> bool:
         return bool(self.process and self.process.is_alive())
@@ -289,15 +297,19 @@ class ProcessManager:
             except Exception as exc:
                 if handle.closing or handle.restarting:
                     return
-                # A busy bidirectional pipe can delay the ping response behind
-                # ordinary traffic. That traffic also proves the child is alive.
                 if (
                     isinstance(exc, asyncio.TimeoutError)
                     and endpoint is not None
                     and not endpoint.is_closed()
-                    and endpoint.received_messages > received_messages
                 ):
-                    continue
+                    # A running transformation can delay the worker's ping
+                    # response without meaning that the process has failed.
+                    if handle.active_execute_requests > 0:
+                        continue
+                    # A busy bidirectional pipe can delay the ping response behind
+                    # ordinary traffic. That traffic also proves the child is alive.
+                    if endpoint.received_messages > received_messages:
+                        continue
                 await self._handle_worker_failure(handle, "ping timeout")
                 return
 
