@@ -13,8 +13,7 @@ or load ``ryp`` or ``juliacall``.
 
 ``run_in_interpreter_thread()`` runs a callable on one process-wide thread
 associated with its name, for embedded interpreters that need a stable calling
-thread. Calls from that thread run inline. Set
-``SEAMLESS_INTERPRETER_THREAD=0`` to run on the calling thread.
+thread. Calls from that thread run inline.
 """
 
 from __future__ import annotations

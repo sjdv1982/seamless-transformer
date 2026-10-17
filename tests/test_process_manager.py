@@ -73,6 +73,7 @@ def test_health_check_accepts_traffic_but_restarts_silent_worker() -> None:
         handle = SimpleNamespace(
             closing=False,
             restarting=False,
+            active_execute_requests=0,
             endpoint=endpoint,
             process=SimpleNamespace(is_alive=lambda: True),
             request=ping,
@@ -84,6 +85,71 @@ def test_health_check_accepts_traffic_but_restarts_silent_worker() -> None:
         await asyncio.wait_for(manager._health_loop(handle), 1)
         assert attempts == 2
         manager._handle_worker_failure.assert_awaited_once_with(handle, "ping timeout")
+        await manager.aclose()
+
+    run(check())
+
+
+def test_health_check_preserves_worker_with_active_transformation() -> None:
+    from seamless_transformer.process.manager import ProcessHandle
+
+    async def check():
+        execute_started = asyncio.Event()
+        ping_attempts = 0
+        alive_checks = 0
+
+        async def endpoint_request(op, *_args, **_kwargs):
+            nonlocal ping_attempts
+            if op == "execute_transformation":
+                execute_started.set()
+                await asyncio.Event().wait()
+            elif op == "ping":
+                ping_attempts += 1
+                await asyncio.Event().wait()
+
+        def is_alive():
+            nonlocal alive_checks
+            alive_checks += 1
+            return alive_checks == 1
+
+        manager = make_manager({})
+        endpoint = SimpleNamespace(
+            received_messages=0,
+            is_closed=lambda: False,
+            request=endpoint_request,
+        )
+        handle = ProcessHandle(
+            manager,
+            "test",
+            None,
+            True,
+            process=SimpleNamespace(is_alive=is_alive),
+            endpoint=endpoint,
+        )
+        manager.health_check_interval = 0.001
+        manager.health_check_timeout = 0.01
+        manager._handle_worker_failure = AsyncMock()
+
+        execute_task = asyncio.create_task(
+            handle.request("execute_transformation", {})
+        )
+        await asyncio.wait_for(execute_started.wait(), 1)
+        assert handle.active_execute_requests == 1
+
+        await asyncio.wait_for(manager._health_loop(handle), 1)
+
+        assert ping_attempts == 1
+        assert handle.active_execute_requests == 1
+        manager._handle_worker_failure.assert_awaited_once_with(
+            handle, "process exited"
+        )
+
+        execute_task.cancel()
+        try:
+            await execute_task
+        except asyncio.CancelledError:
+            pass
+        assert handle.active_execute_requests == 0
         await manager.aclose()
 
     run(check())
