@@ -16,6 +16,12 @@ from seamless.config import set_stage
 set_stage("fingertip")
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _close_seamless_after_module():
+    yield
+    seamless.close()
+
+
 def _drop_expression_buffer(checksum):
     checksum = Checksum(checksum)
     cache = get_buffer_cache()
@@ -62,8 +68,6 @@ def test_fingertip_recompute_scratch():
     value2 = asyncio.run(result_checksum.fingertip("mixed"))
     assert value2 == pytest.approx(12.84)
 
-    seamless.close()
-
 
 def test_fingertip_recovers_expression_over_transformation_result():
     seamless.config.init()
@@ -92,8 +96,6 @@ def test_fingertip_recovers_expression_over_transformation_result():
     assert value == "via-transform"
     assert expression_result.resolve("str") == "via-transform"
 
-    seamless.close()
-
 
 def test_run_fingertip_scratch():
     seamless.config.init()
@@ -108,8 +110,6 @@ def test_run_fingertip_scratch():
     tf = func(2, 3)
     value = tf.run()
     assert value == pytest.approx(12.84)
-
-    seamless.close()
 
 
 def _random_scratch_transformation():

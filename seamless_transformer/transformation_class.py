@@ -958,7 +958,6 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         try:
             loop = _sync_task_loop()
             self._verify_sync_construct(loop)
-            self.start(loop=loop, _internal=True)
             for depname, dep in self._upstream_dependencies.items():
                 _start_dependency(dep, loop=loop, scratch=self._pin_scratch(depname))
             for depname, dep in self._upstream_dependencies.items():
