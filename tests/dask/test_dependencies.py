@@ -99,7 +99,6 @@ def test_optional_pin_dask_partial_construction_and_null_normalization():
         assert non_null.transformation_checksum != absent.transformation_checksum
     finally:
         set_seamless_dask_client(None)
-        seamless.close()
 
 
 def test_optional_pin_dask_dependency_failure_is_not_absence():
@@ -123,4 +122,3 @@ def test_optional_pin_dask_dependency_failure_is_not_absence():
         assert "dask upstream failed" in tf.exception
     finally:
         set_seamless_dask_client(None)
-        seamless.close()

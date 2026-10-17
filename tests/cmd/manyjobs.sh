@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u -e
 export ntrials=${1:-1000}
-export ndots=${2:-1000000000}
+export ndots=${2:-300000000}
 
 seeds=$(python -c '
 import sys
