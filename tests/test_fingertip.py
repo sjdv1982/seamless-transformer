@@ -283,7 +283,7 @@ def test_nested_transformation_fingertip_keeps_category(monkeypatch):
     ))
     @delayed
     def outer(value, nonce) -> bytes:
-        return value.content + nonce.encode()
+        return value + nonce.encode()
     outer.scratch = True
     outer.local = True
     outer.celltypes.value = "bytes"

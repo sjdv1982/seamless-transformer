@@ -447,6 +447,16 @@ def test_bytes_pin_run_returns_raw_bytes():
     assert tf.pins.value.run() == b"abc"
 
 
+def test_bytes_pin_reaches_code_as_bytes():
+    def describe(value):
+        return [type(value).__name__, value[:1].hex(), len(value + b"!")]
+
+    tf = builder(describe, celltype="bytes")
+    tf.celltypes.result = "plain"
+    assert tf(b"\x00\xff").run() == ["bytes", "00", 3]
+    assert tf(b"").run() == ["bytes", "", 1]
+
+
 def test_fingertip_on_unwired_pin_is_a_noop():
     pin = builder(celltype="int").pins.value
     assert pin.fingertip() is None

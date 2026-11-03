@@ -272,6 +272,16 @@ def test_pin_celltypes_roundtrip():
             raise AssertionError(f"round trip {index}: {celltype}") from exc
 
 
+def test_bytes_pin_is_bytes_under_both_backends():
+    for value in (b"\x00\xff", b""):
+        result, output = _run_python(
+            "result = [type(value).__name__, value[:1].hex(), len(value + b'!')]",
+            {"value": (value, "bytes")},
+            output="plain",
+        )
+        assert _resolve_result(result, output) == ["bytes", value[:1].hex(), len(value) + 1]
+
+
 def test_code_modes_and_namespace(monkeypatch, language_runtime_images):
     modes = [
         ("result = 4", {}, 4),
