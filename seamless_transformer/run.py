@@ -344,7 +344,7 @@ def run_transformation_dict(
             transformation.get("__as__", {}).get(name, name): entry
             for name, entry in namespace.get("FILESYSTEM", {}).items()
         }
-        handler_pins = namespace.get("PINS", {})
+        handler_pins = dict(namespace.get("PINS", {}))
         as_map = transformation.get("__as__", {})
         for pinname, entry in transformation.items():
             if pinname in ("code", "__language__", "__output__") or pinname.startswith("__"):
@@ -356,16 +356,6 @@ def run_transformation_dict(
                 handler_filesystem.setdefault(pinname_as, {}).setdefault(
                     "celltype", entry[0]
                 )
-        if handler_pins:
-            handler_pins = dict(handler_pins)
-            for pinname, value in handler_pins.items():
-                fs_entry = handler_filesystem.get(pinname, {})
-                if (
-                    fs_entry.get("celltype") == "bytes"
-                    and not fs_entry.get("filesystem", False)
-                    and isinstance(value, Buffer)
-                ):
-                    handler_pins[pinname] = value.content
         handler_metavars = {}
         if handler_definition is not None:
             handler_metavars.update(handler_definition.metavars)

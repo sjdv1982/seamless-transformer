@@ -101,7 +101,7 @@ def test_input_fingertip_in_worker_without_dask_is_not_implemented(
     assert list(candidates), "precondition: the parent knows a candidate"
 
     def consumer(value, nonce):
-        return len(value.content)
+        return len(value)
 
     consumer_builder = delayed(consumer)
     consumer_builder.scratch = True

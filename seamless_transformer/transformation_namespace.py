@@ -6,7 +6,7 @@ import os
 import sys
 from typing import Any, Dict, Tuple
 
-from seamless import CacheMissError, Checksum
+from seamless import Buffer, CacheMissError, Checksum
 
 from .compression_utils import COMPRESSION_SUFFIXES, strip_compression_suffix
 from .code_manager import get_code_manager
@@ -308,6 +308,9 @@ def build_transformation_namespace_sync(
             value = buffer.get_value(celltype or "mixed")
             if celltype == "checksum":
                 value = Checksum(value)
+            elif celltype == "bytes" and isinstance(value, Buffer):
+                # A bytes pin reaches the code as bytes under every backend
+                value = value.content
 
         if (celltype, subcelltype) == ("plain", "module"):
             modules_to_build[pinname] = value
