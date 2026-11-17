@@ -894,20 +894,24 @@ class TransformerCore(Generic[P, R]):
             return
         object.__setattr__(self, "_refholds_released", True)
         from seamless import Checksum
+        from seamless.reference_lifecycle import release_all
+
+        held = []
         for value, _input_celltype in list(getattr(self, "_args", {}).values()):
             if isinstance(value, Checksum):
-                value.decref_refholder()
+                held.append(value)
         for value in list(getattr(self, "_modules", {}).values()):
             if isinstance(value, Checksum):
-                value.decref_refholder()
+                held.append(value)
         code_checksum = getattr(self, "_code_checksum_ref", None)
         if isinstance(code_checksum, Checksum):
-            code_checksum.decref_refholder()
+            held.append(code_checksum)
         self._code_checksum_ref = None
         for memo in getattr(self, "_pin_memos", {}).values():
             if memo["checksum"] is not None:
-                memo["checksum"].decref_refholder()
+                held.append(memo["checksum"])
                 memo["checksum"] = None
+        release_all(*(cs.decref_refholder for cs in held))
 
     def __del__(self):
         try:
