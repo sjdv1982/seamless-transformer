@@ -83,7 +83,15 @@ class Endpoint:
     async def _send(self, message: Any) -> None:
         async with self._send_lock:
             try:
-                await self._loop.run_in_executor(None, self._conn.send, message)
+                try:
+                    await self._loop.run_in_executor(None, self._conn.send, message)
+                except RuntimeError as exc:
+                    # atexit handlers run after concurrent.futures has shut the
+                    # default executor down ("cannot schedule new futures after
+                    # interpreter shutdown"): fall back to a direct, blocking send.
+                    if "after interpreter shutdown" not in str(exc).lower():
+                        raise
+                    self._conn.send(message)
             except (BrokenPipeError, EOFError, OSError) as exc:
                 raise ConnectionClosed(f"{self._name} send failed") from exc
 
