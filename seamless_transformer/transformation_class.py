@@ -780,6 +780,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
         Evaluate dependencies and calculate the transformation checksum from the inputs
         In case of failure, set .exception and return None
         """
+        return self._construct(publish_definition=True)
+
+    def _construct(self, *, publish_definition: bool) -> Checksum | None:
         ensure_open("transformation construct")
         if self._cancelled:
             return None
@@ -796,7 +799,9 @@ class Transformation(TransformationDaskMixin, Generic[T]):
                     "Invalid transformation checksum: "
                     f"{tf_checksum_raw!r} ({type(tf_checksum_raw).__name__}): {exc}"
                 ) from exc
-            self._transformation_checksum = self._publish_definition(tf_checksum)
+            self._transformation_checksum = (
+                self._publish_definition(tf_checksum) if publish_definition else tf_checksum
+            )
         except TransformationError:
             self._exception = traceback.format_exc().strip("\n") + "\n"
         except Exception as exc:
