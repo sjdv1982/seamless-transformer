@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "seamless-transformer"
-version = "0.8.0"
+version = "0.8.1"
 description = "Computation engine for Seamless: execute checksum-addressed transformations in Python or bash"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,7 +15,7 @@ dependencies = [
     "PyYAML",
     "tqdm",
     "wurlitzer",
-    "seamless-core>=0.2",
+    "seamless-core>=0.3",
     "zstandard",
 ]
 keywords = ["seamless", "transformer", "computation", "checksum", "reproducible"]
