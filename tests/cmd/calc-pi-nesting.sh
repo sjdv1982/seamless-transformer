@@ -1,3 +1,5 @@
 #!/bin/bash
 set -u -e
-seamless-run -i calc_pi.py -vvv ./calc-pi-nested.sh $1 $2
+ntrials="${1:-250}"
+ndots="${2:-30000000}"
+seamless-run -i calc_pi.py -vvv ./calc-pi-nested.sh "$ntrials" "$ndots"

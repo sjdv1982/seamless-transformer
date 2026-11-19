@@ -241,6 +241,7 @@ def test_run_resolves_jobserver_result_through_hashserver(tmp_path):
             async def no_lengths(checksums):
                 return [None for _ in checksums]
             buffer_remote.get_buffer = no_buffer
+            buffer_remote.get_server_buffer = no_buffer
             buffer_remote.get_buffer_lengths = no_lengths
             try:
                 expression.run()

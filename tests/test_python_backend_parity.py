@@ -199,13 +199,13 @@ def test_modules_are_one_sided_failure():
     assert Checksum(run('mem')) == Buffer(42, 'mixed').get_checksum()
 
 
-def test_bytes_pin_type_is_explicitly_outside_parity():
+def test_bytes_pin_type_matches_across_backends():
     pins = {'value': (b'raw', 'bytes')}
     code = "result = type(value).__name__"
     mem = _run_python(code, pins, backend='mem')[0]
     cli = _run_python(code, pins, backend='cli')[0]
-    assert mem.resolve().get_value('mixed') == 'Buffer'
-    assert cli.resolve().get_value('mixed') == 'bytes'
+    assert mem == cli
+    assert mem.resolve().get_value('mixed') == 'bytes'
 
 
 @pytest.mark.parametrize('expression', [
