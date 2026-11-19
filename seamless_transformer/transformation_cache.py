@@ -1072,6 +1072,8 @@ class TransformationCache:
             try:
                 dispatch_started[0] = True
                 self.clear_transformation_log(tf_checksum)
+                # Keep fresh local scratch bytes for the handoff to the result owner.
+                # A cache hit can still return a checksum without its buffer.
                 result_checksum, captured_logs = await _await_with_active_cancellation(
                     loop.run_in_executor(
                         None,
@@ -1080,7 +1082,7 @@ class TransformationCache:
                         tf_checksum,
                         tf_dunder,
                         scratch,
-                        require_value,
+                        require_value or scratch,
                         (
                             (lambda: active_submission.canceled)
                             if active_submission is not None
