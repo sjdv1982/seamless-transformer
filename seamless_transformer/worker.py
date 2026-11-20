@@ -1267,6 +1267,7 @@ class _WorkerManager:
         self._pointers: Dict[str, _Pointer] = {}
         self._pointer_lock: Optional[asyncio.Lock] = None
         self._prefetched_buffers: Dict[str, bytes] = {}
+        self._prefetch_holds: Dict[str, int] = {}
         self._limits: Dict[str, asyncio.Semaphore] = {}
         self._delegate_registry: Dict[str, Dict[str, Any]] = {}
         self._delegate_completed: Dict[str, tuple[Dict[str, Any], float]] = {}
@@ -1438,7 +1439,46 @@ class _WorkerManager:
         nparallel: int | None = None,
         want_logs: bool = False,
     ) -> Checksum | str | tuple[Checksum, Dict[str, str]]:
-        await self._prefetch_transformation_assets(transformation_dict, tf_checksum)
+        held = await self._prefetch_transformation_assets(
+            transformation_dict, tf_checksum, tf_dunder=tf_dunder, hold=True
+        )
+        try:
+            return await self._dispatch_prefetched(
+                transformation_dict,
+                tf_checksum,
+                tf_dunder,
+                scratch,
+                strict_dunder=strict_dunder,
+                enforce_limit=enforce_limit,
+                owner_dask_key=owner_dask_key,
+                owner_dask_priority=owner_dask_priority,
+                streaming=streaming,
+                stream_worker_address=stream_worker_address,
+                stream_event_logger=stream_event_logger,
+                nparallel=nparallel,
+                want_logs=want_logs,
+            )
+        finally:
+            # The worker has read its inputs; drop the bytes nothing else holds.
+            self._release_prefetched_assets(held)
+
+    async def _dispatch_prefetched(
+        self,
+        transformation_dict: Dict[str, Any] | None,
+        tf_checksum: Checksum,
+        tf_dunder: Dict[str, Any],
+        scratch: bool,
+        *,
+        strict_dunder: bool = False,
+        enforce_limit: bool = True,
+        owner_dask_key: str | None = None,
+        owner_dask_priority: int | None = None,
+        streaming: bool = False,
+        stream_worker_address: str | None = None,
+        stream_event_logger: Callable[[str, dict[str, Any]], Any] | None = None,
+        nparallel: int | None = None,
+        want_logs: bool = False,
+    ) -> Checksum | str | tuple[Checksum, Dict[str, str]]:
         tf_hex = Checksum(tf_checksum).hex()
         stream_context = None
         stream_key = owner_dask_key
@@ -3284,28 +3324,81 @@ class _WorkerManager:
         return await loop.run_in_executor(None, transformer_obj, *args, **kwargs)
 
     async def _prefetch_transformation_assets(
-        self, transformation_dict: Dict[str, Any] | None, tf_checksum: Checksum
-    ) -> None:
+        self, transformation_dict: Dict[str, Any] | None, tf_checksum: Checksum,
+        *, tf_dunder: Dict[str, Any] | None = None, hold: bool = False,
+    ) -> list[str]:
+        """Load a transformation's buffers for download by a local worker.
+
+        With ``hold``, return the keys held for the caller, which passes them to
+        ``_release_prefetched_assets`` once its dispatch has finished.
+        """
         if transformation_dict is None:
-            return
+            return []
+        from .transformation_utils import merge_transformation_meta
+
+        recover_inputs = tf_dunder is not None and not dask_available() and bool(
+            merge_transformation_meta(transformation_dict, tf_dunder).get(
+                "allow_input_fingertip"
+            )
+        )
+        formats = transformation_dict.get("__format__")
+        if not isinstance(formats, dict):
+            formats = {}
+        recoverable: set[str] = set()
         checksums: set[str] = set()
         checksums.add(Checksum(tf_checksum).hex())
         for key, value in transformation_dict.items():
             if isinstance(value, tuple) and len(value) >= 3:
                 cs_hex = value[2]
                 if _is_checksum_hex(cs_hex):
-                    checksums.add(Checksum(cs_hex).hex())
+                    cs_hex = Checksum(cs_hex).hex()
+                    checksums.add(cs_hex)
+                    if recover_inputs and not key.startswith("__") and key != "code":
+                        pin_format = formats.get(key)
+                        filesystem = (
+                            pin_format.get("filesystem")
+                            if isinstance(pin_format, dict)
+                            else None
+                        )
+                        mode = filesystem.get("mode") if isinstance(filesystem, dict) else None
+                        if not mode or mode == "directory":
+                            recoverable.add(cs_hex)
             elif _is_checksum_hex(value):
                 checksums.add(Checksum(value).hex())
-        for cs_hex in checksums:
-            if cs_hex in self._prefetched_buffers:
+        held: list[str] = []
+        try:
+            for cs_hex in checksums:
+                if cs_hex not in self._prefetched_buffers:
+                    checksum = Checksum(cs_hex)
+                    if cs_hex in recoverable:
+                        # Local workers download bytes from this process, where
+                        # the producer's reverse records are available.
+                        buf = await checksum.fingertip()
+                    else:
+                        try:
+                            buf = checksum.resolve()
+                        except Exception:
+                            continue
+                    if not isinstance(buf, Buffer):
+                        continue
+                    self._prefetched_buffers[cs_hex] = bytes(buf.content)
+                if hold:
+                    self._prefetch_holds[cs_hex] = self._prefetch_holds.get(cs_hex, 0) + 1
+                    held.append(cs_hex)
+        except BaseException:
+            self._release_prefetched_assets(held)
+            raise
+        return held
+
+    def _release_prefetched_assets(self, held: list[str] | None) -> None:
+        """Drop prefetched bytes that no dispatch holds any longer."""
+        for cs_hex in held or ():
+            holds = self._prefetch_holds.get(cs_hex, 0) - 1
+            if holds > 0:
+                self._prefetch_holds[cs_hex] = holds
                 continue
-            try:
-                buf = Checksum(cs_hex).resolve()
-            except Exception:
-                continue
-            if isinstance(buf, Buffer):
-                self._prefetched_buffers[cs_hex] = bytes(buf.content)
+            self._prefetch_holds.pop(cs_hex, None)
+            self._prefetched_buffers.pop(cs_hex, None)
 
     async def _get_cached_transformation_result(
         self, tf_checksum: Checksum

@@ -90,7 +90,7 @@ def test_manager_sets_opt_in_and_unwraps_reply(monkeypatch, want_logs):
     manager._active_dispatches = {}
     manager._active_dispatch_lock = threading.RLock()
     manager._cancelled_checksums = set()
-    monkeypatch.setattr(manager, '_prefetch_transformation_assets', lambda *a: asyncio.sleep(0))
+    monkeypatch.setattr(manager, '_prefetch_transformation_assets', lambda *a, **k: asyncio.sleep(0))
     reply = asyncio.run(manager._dispatch({}, result, {}, False, want_logs=want_logs))
     assert bool(payloads[0].get('want_logs')) is want_logs
     assert reply == ((result, logs) if want_logs else result)

@@ -396,7 +396,7 @@ def test_parent_inline_dispatch_uses_real_manager_signature_and_requests_logs(ca
     manager._delegate_owner_by_handle = {}
     async def cached(checksum):
         return None
-    async def prefetch(*args):
+    async def prefetch(*args, **kwargs):
         pass
     monkeypatch.setattr(manager, '_get_cached_transformation_result', cached)
     monkeypatch.setattr(manager, '_prefetch_transformation_assets', prefetch)

@@ -77,14 +77,15 @@ def test_nested_scratch_run_in_worker_fingertips_without_publishing(
     assert inner_result not in writes, "the scratch inner result was published"
 
 
-def test_input_fingertip_in_worker_without_dask_is_not_implemented(
-    temporary_spawned_workers,
-):
-    """The worker cannot consult its parent's candidates, and says so."""
+def _purged_scratch_payload(nonce):
+    """A scratch producer's result, computed in-process and then purged.
+
+    Returns the result checksum and the producer's builder. The builder holds
+    the producer's code, which a recomputation needs.
+    """
     from seamless import CacheMissError
     from seamless.caching.buffer_cache import get_buffer_cache
     from seamless_transformer.transformation_cache import get_transformation_cache
-    from seamless_transformer.transformation_class import TransformationError
 
     def producer(nonce) -> bytes:
         return ("payload-" + nonce).encode()
@@ -92,30 +93,68 @@ def test_input_fingertip_in_worker_without_dask_is_not_implemented(
     producer_builder = delayed(producer)
     producer_builder.scratch = True
     producer_builder.local = True
-    produced = producer_builder(uuid.uuid4().hex).compute()
-    assert isinstance(produced, Checksum)
+    handle = producer_builder(nonce)
+    produced = handle.compute()
+    assert isinstance(produced, Checksum), handle.exception
+    handle._release_refholds()
     get_buffer_cache().purge_scratch(produced)
     with pytest.raises(CacheMissError):
         produced.resolve()
     candidates = get_transformation_cache().get_reverse_transformations(produced)
     assert list(candidates), "precondition: the parent knows a candidate"
+    return produced, producer_builder
 
+
+def _spawned_consumer(produced):
     def consumer(value, nonce):
-        return len(value)
+        import os
+
+        return [len(value), os.getpid()]
 
     consumer_builder = delayed(consumer)
-    consumer_builder.scratch = True
+    # Not scratch: run() must read the worker's result, not recompute it here.
     consumer_builder.local = True
     consumer_builder.celltypes.value = "bytes"
     consumer_builder.meta = {"allow_input_fingertip": True}
-    transformation = consumer_builder(produced, uuid.uuid4().hex)
+    return consumer_builder(produced, uuid.uuid4().hex)
+
+
+def test_parent_recovers_direct_input_before_spawn_dispatch(
+    temporary_spawned_workers,
+):
+    """Without Dask, the parent fingertips an absent direct input for its worker."""
+    import os
+
+    # The producer's own input must stay available for the recomputation.
+    nonce = Buffer(uuid.uuid4().hex, "mixed")
+    produced, _producer_builder = _purged_scratch_payload(nonce.get_checksum())
+    transformation = _spawned_consumer(produced)
     try:
-        with pytest.raises(TransformationError, match="NotImplementedError") as caught:
-            transformation.run()
+        length, pid = transformation.run()
     finally:
         transformation._release_refholds()
-    assert "without Dask" in str(caught.value)
-    assert produced.hex() in str(caught.value)
+    assert pid != os.getpid(), "the consumer ran in a worker"
+    assert length == len(produced.resolve().content)
+
+
+def test_failed_parent_recovery_reports_cache_miss_with_category(
+    temporary_spawned_workers,
+):
+    """A failed recovery before dispatch fails the job like an in-process one."""
+    from seamless import CacheMissError, FingertipCategory
+
+    # No buffer of the producer's input survives, so no candidate can recover it.
+    produced, _producer_builder = _purged_scratch_payload(uuid.uuid4().hex)
+    transformation = _spawned_consumer(produced)
+    try:
+        assert transformation.compute() is None
+        exc = transformation._exception
+    finally:
+        transformation._release_refholds()
+    assert isinstance(exc, CacheMissError), repr(exc)
+    assert Checksum(exc.checksum) == produced
+    assert exc.fingertip_category == FingertipCategory.MATERIALIZATION
+    assert "NotImplementedError" not in transformation.exception
 
 
 def test_worker_forwards_automatic_irreproducible_observation(temporary_spawned_workers, monkeypatch):

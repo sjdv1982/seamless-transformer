@@ -407,6 +407,7 @@ class TransformationCache:
         store_execution_record: bool = True,
         strict_dunder: bool = False,
         driver_context: bool = False,
+        force_recompute: bool = False,
     ) -> Checksum:
         """Run a transformation and return its result checksum.
 
@@ -417,7 +418,7 @@ class TransformationCache:
         self._remember_transformation_dunder(tf_checksum, tf_dunder)
         record_mode = get_record_mode()
         cached_result = self._transformation_cache.get(tf_checksum)
-        if cached_result is not None:
+        if cached_result is not None and not force_recompute:
             if require_value:
                 try:
                     await cached_result.resolution()
@@ -1067,16 +1068,17 @@ class TransformationCache:
                 ) from exc
         else:
             _debug("running transformation in-process")
-            loop = asyncio.get_running_loop()
             gpu_sampler = start_gpu_memory_sampler()
             try:
                 dispatch_started[0] = True
                 self.clear_transformation_log(tf_checksum)
                 # Keep fresh local scratch bytes for the handoff to the result owner.
                 # A cache hit can still return a checksum without its buffer.
+                # to_thread, not run_in_executor: it copies context variables,
+                # so input recovery in the thread sees the fingertip cycle path.
+                # Without it, recovering X through T(X) = X re-enters T and hangs.
                 result_checksum, captured_logs = await _await_with_active_cancellation(
-                    loop.run_in_executor(
-                        None,
+                    asyncio.to_thread(
                         _run_process_transformation_with_capture,
                         transformation_dict,
                         tf_checksum,
@@ -1511,6 +1513,7 @@ async def recompute_from_transformation_checksum(
     *,
     scratch: bool = True,
     require_value: bool = True,
+    force_recompute: bool = False,
 ) -> Checksum | None:
     drop_for_nested_work()
     try:
@@ -1530,6 +1533,7 @@ async def recompute_from_transformation_checksum(
         require_value=require_value,
         force_local=True,
         store_execution_record=False,
+        force_recompute=force_recompute,
     )
 
 

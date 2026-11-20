@@ -305,15 +305,20 @@ def _fingertip(in_loop):
     import seamless
     import uuid
     from seamless.transformer import delayed
-    from seamless import CacheMissError
+    from seamless import Buffer, CacheMissError
     from seamless.caching.buffer_cache import get_buffer_cache
     try:
         producer = delayed(_scratch_producer)
         producer.scratch = True
-        handle = producer(uuid.uuid4().hex)
+        # This local keeps the nonce buffer alive: once the handle's refholds are
+        # released, nothing else does, and the recomputation needs it.
+        nonce = Buffer(uuid.uuid4().hex, "mixed")
+        handle = producer(nonce.get_checksum())
         checksum = handle.compute()
         assert checksum is not None, handle.exception
         checksum.tempref()
+        # The handle holds its fresh scratch result, which purge_scratch skips.
+        handle._release_refholds()
         get_buffer_cache().purge_scratch(checksum)
         try:
             checksum.resolve()
