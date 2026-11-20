@@ -1068,16 +1068,17 @@ class TransformationCache:
                 ) from exc
         else:
             _debug("running transformation in-process")
-            loop = asyncio.get_running_loop()
             gpu_sampler = start_gpu_memory_sampler()
             try:
                 dispatch_started[0] = True
                 self.clear_transformation_log(tf_checksum)
                 # Keep fresh local scratch bytes for the handoff to the result owner.
                 # A cache hit can still return a checksum without its buffer.
+                # to_thread, not run_in_executor: it copies context variables,
+                # so input recovery in the thread sees the fingertip cycle path.
+                # Without it, recovering X through T(X) = X re-enters T and hangs.
                 result_checksum, captured_logs = await _await_with_active_cancellation(
-                    loop.run_in_executor(
-                        None,
+                    asyncio.to_thread(
                         _run_process_transformation_with_capture,
                         transformation_dict,
                         tf_checksum,

@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from seamless import CacheMissError, Checksum, Expression
+from seamless import Buffer, CacheMissError, Checksum, Expression
 from seamless.error_envelope import ExecutionCanceledError
 from aiohttp import ClientConnectionError, ClientPayloadError
 import seamless.config
@@ -68,6 +68,82 @@ def test_fingertip_recompute_scratch():
 
     value2 = asyncio.run(result_checksum.fingertip("mixed"))
     assert value2 == pytest.approx(12.84)
+
+
+def test_spawn_fingertips_evicted_plain_input_in_parent(monkeypatch):
+    import uuid
+
+    from seamless.transformer import spawn
+    from seamless_config.select import get_execution, select_execution
+    from seamless_remote import buffer_remote, database_remote
+    from seamless_transformer.worker import shutdown_workers
+
+    monkeypatch.setattr(buffer_remote, "_read_server_clients", [])
+    monkeypatch.setattr(buffer_remote, "_write_server_clients", [])
+    monkeypatch.setattr(database_remote, "_read_database_clients", [])
+    monkeypatch.setattr(database_remote, "_write_database_clients", [])
+    monkeypatch.setenv("SEAMLESS_ALLOW_REMOTE_CLIENTS_IN_WORKER", "0")
+
+    @delayed
+    def fit_echo(value):
+        return {"value": value}
+
+    @delayed
+    def parse_best_fits(fit_echo):
+        return fit_echo["value"] + "-parsed"
+
+    fit_echo.local = True
+    fit_echo.scratch = True
+    fit_echo.celltypes.result = "plain"
+    parse_best_fits.allow_input_fingertip = True
+    parse_best_fits.celltypes.fit_echo = "plain"
+
+    execution = get_execution()
+    select_execution("process")
+    try:
+        value = uuid.uuid4().hex
+        source = Buffer(value, "mixed")
+        producer = fit_echo(source.get_checksum())
+        checksum = producer.compute()
+        assert isinstance(checksum, Checksum), producer.exception
+        _drop_expression_buffer(checksum)
+        with pytest.raises(CacheMissError):
+            checksum.resolve()
+
+        spawn(1)
+        consumer = parse_best_fits(checksum)
+        result = consumer.compute()
+        assert isinstance(result, Checksum), consumer.exception
+        assert result.resolve("mixed") == value + "-parsed"
+    finally:
+        shutdown_workers()
+        select_execution(execution)
+
+
+def test_fingertip_identity_cycle_terminates():
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    # A regression hangs, so run it in a subprocess with a timeout.
+    # The helper selects no stage: the subprocess has no remote buffer source.
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).parent) + os.pathsep + env.get("PYTHONPATH", "")
+    script = (
+        "import fingertip_cycle_helper as m\n"
+        "m.identity_cycle_fingertip()\n"
+        "print('CYCLE_OK')"
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("fingertip of an identity-transformation cycle did not terminate")
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "CYCLE_OK" in completed.stdout
 
 
 def test_fingertip_recovers_expression_over_transformation_result():
