@@ -87,6 +87,43 @@ def test_same_checksum_latches_onto_active_submission(monkeypatch):
     assert calls == [1]
 
 
+def test_forced_fingertip_recompute_bypasses_cached_result_without_recording(monkeypatch):
+    from seamless import Buffer
+    from seamless_transformer import transformation_cache as module
+    from seamless_transformer.transformation_cache import recompute_from_transformation_checksum
+
+    cache = TransformationCache()
+    definition = Buffer({"code": "return 1"}, "plain")
+    definition.tempref()
+    tf_checksum = definition.get_checksum()
+    recorded = _checksum("5")
+    recomputed = _checksum("6")
+    cache._register_transformation_result(tf_checksum, recorded)
+    calls = []
+
+    async def execute(transformation_dict, **kwargs):
+        calls.append((transformation_dict, kwargs))
+        return recomputed
+
+    monkeypatch.setattr(cache, "_run_active_or_execute", execute)
+    monkeypatch.setattr(module, "get_transformation_cache", lambda: cache)
+
+    result = asyncio.run(
+        recompute_from_transformation_checksum(
+            tf_checksum, scratch=True, require_value=True, force_recompute=True
+        )
+    )
+
+    assert result == recomputed
+    assert cache._transformation_cache[tf_checksum] == recorded
+    assert len(calls) == 1
+    assert calls[0][0] == {"code": "return 1"}
+    assert calls[0][1]["scratch"] is True
+    assert calls[0][1]["require_value"] is True
+    assert calls[0][1]["force_local"] is True
+    assert calls[0][1]["store_execution_record"] is False
+
+
 def test_cancelled_first_awaiter_does_not_kill_peer(monkeypatch):
     cache = TransformationCache()
     started = threading.Event()

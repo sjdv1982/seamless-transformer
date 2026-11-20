@@ -407,6 +407,7 @@ class TransformationCache:
         store_execution_record: bool = True,
         strict_dunder: bool = False,
         driver_context: bool = False,
+        force_recompute: bool = False,
     ) -> Checksum:
         """Run a transformation and return its result checksum.
 
@@ -417,7 +418,7 @@ class TransformationCache:
         self._remember_transformation_dunder(tf_checksum, tf_dunder)
         record_mode = get_record_mode()
         cached_result = self._transformation_cache.get(tf_checksum)
-        if cached_result is not None:
+        if cached_result is not None and not force_recompute:
             if require_value:
                 try:
                     await cached_result.resolution()
@@ -1511,6 +1512,7 @@ async def recompute_from_transformation_checksum(
     *,
     scratch: bool = True,
     require_value: bool = True,
+    force_recompute: bool = False,
 ) -> Checksum | None:
     drop_for_nested_work()
     try:
@@ -1530,6 +1532,7 @@ async def recompute_from_transformation_checksum(
         require_value=require_value,
         force_local=True,
         store_execution_record=False,
+        force_recompute=force_recompute,
     )
 
 

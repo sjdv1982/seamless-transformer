@@ -49,6 +49,7 @@ def test_fingertip_recompute_scratch():
     print("Result:", result_checksum)
 
     result_checksum.tempref()
+    tf._release_refholds()
     get_buffer_cache().purge_scratch(result_checksum)
 
     with pytest.raises(CacheMissError):
@@ -133,6 +134,7 @@ def test_irreproducible_fingertip_preserves_recorded_identity():
     seamless.config.init()
     tf, recorded = _random_scratch_transformation()
     tf_checksum = tf.construct()
+    tf._release_refholds()
     get_buffer_cache().purge_scratch(recorded)
     with pytest.raises(CacheMissError) as caught:
         asyncio.run(recorded.fingertip())
@@ -150,6 +152,7 @@ def test_plain_rerun_returns_divergence_unrecorded():
     seamless.config.init()
     tf, recorded = _random_scratch_transformation()
     tf_checksum = tf.construct()
+    tf._release_refholds()
     get_buffer_cache().purge_scratch(recorded)
     produced = asyncio.run(get_transformation_cache().run(
         tf_checksum.resolve("plain"), tf_checksum=tf_checksum,
@@ -179,6 +182,7 @@ def test_reproducible_rerun_writes_nothing(monkeypatch):
         raise AssertionError("recomputation wrote an existing mapping")
     monkeypatch.setattr(database_remote, "set_transformation_result", unexpected_write)
     monkeypatch.setattr(database_remote, "set_execution_record", unexpected_write)
+    tf._release_refholds()
     get_buffer_cache().purge_scratch(result)
     assert asyncio.run(result.fingertip("mixed")).endswith("-reproduced")
     assert writes == []
@@ -201,6 +205,7 @@ def test_failed_transformation_category(monkeypatch):
     tf = first_only(uuid.uuid4().hex)
     result = tf.compute()
     monkeypatch.delenv(variable)
+    tf._release_refholds()
     get_buffer_cache().purge_scratch(result)
     with pytest.raises(CacheMissError) as caught:
         asyncio.run(result.fingertip())
@@ -237,6 +242,7 @@ def test_materialization_without_candidate_or_input(monkeypatch):
     monkeypatch.setattr(Checksum, "resolve", resolve)
     monkeypatch.setattr(Checksum, "resolution", resolution)
     _drop_expression_buffer(input_checksum)
+    tf._release_refholds()
     get_buffer_cache().purge_scratch(result)
     with pytest.raises(CacheMissError) as caught:
         asyncio.run(result.fingertip())
